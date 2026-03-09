@@ -310,7 +310,7 @@ def run_agent_openai(client, system_instruction: str, user_message: str, chat_ji
 
 
 
-def run_agent(client: genai.Client, system_instruction: str, user_message: str, chat_jid: str) -> str:
+def run_agent(client: genai.Client, system_instruction: str, user_message: str, chat_jid: str, assistant_name: str = "Andy") -> str:
     """
     Gemini function-calling 代理迴圈（agentic loop）。
 
@@ -503,7 +503,7 @@ def main():
             _model = os.environ.get("NIM_MODEL") or os.environ.get("OPENAI_MODEL") or os.environ.get("GEMINI_MODEL") or "meta/llama-3.3-70b-instruct"
             result = run_agent_openai(openai_client, system_instruction, prompt, chat_jid, _model)
         else:
-            result = run_agent(client, system_instruction, prompt, chat_jid)
+            result = run_agent(client, system_instruction, prompt, chat_jid, assistant_name)
         if result:
             tool_send_message(chat_jid, result)
         emit({"status": "success", "result": result, "newSessionId": f"evoclaw-{int(time.time())}"})
