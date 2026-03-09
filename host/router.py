@@ -54,12 +54,37 @@ def strip_internal_tags(text: str) -> str:
 def format_outbound(text: str) -> str:
     return strip_internal_tags(text)
 
+TELEGRAM_MAX_LEN = 4000  # Telegram limit is 4096, use 4000 for safety
+
+
+def _split_message(text: str, max_len: int = TELEGRAM_MAX_LEN) -> list[str]:
+    """Split long messages into chunks, preferring to break at newlines."""
+    if len(text) <= max_len:
+        return [text]
+    chunks = []
+    while text:
+        if len(text) <= max_len:
+            chunks.append(text)
+            break
+        # Try to split at a newline near the limit
+        split_at = text.rfind("\n", 0, max_len)
+        if split_at == -1:
+            split_at = max_len
+        chunks.append(text[:split_at].rstrip())
+        text = text[split_at:].lstrip("\n")
+    return [c for c in chunks if c]
+
+
 async def route_outbound(jid: str, text: str) -> None:
     ch = find_channel(jid)
     if not ch:
         log.warning(f"No channel found for JID {jid}")
         return
-    try:
-        await ch.send_message(jid, format_outbound(text))
-    except Exception as e:
-        log.error(f"Failed to send message to {jid}: {e}")
+    formatted = format_outbound(text)
+    chunks = _split_message(formatted)
+    for chunk in chunks:
+        try:
+            await ch.send_message(jid, chunk)
+        except Exception as e:
+            log.error(f"Failed to send message to {jid}: {e}")
+            break
