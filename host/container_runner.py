@@ -29,7 +29,7 @@ OUTPUT_END = "---EVOCLAW_OUTPUT_END---"
 
 def _read_secrets() -> dict:
     """從 .env 檔案讀取敏感金鑰（API key 等），以字典形式回傳給 container。"""
-    return read_env_file(["GOOGLE_API_KEY", "TELEGRAM_BOT_TOKEN", "GEMINI_MODEL", "ASSISTANT_NAME", "NIM_API_KEY", "NIM_MODEL", "NIM_BASE_URL"])
+    return read_env_file(["GOOGLE_API_KEY", "TELEGRAM_BOT_TOKEN", "GEMINI_MODEL", "ASSISTANT_NAME", "NIM_API_KEY", "NIM_MODEL", "NIM_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL"])
 
 def _build_volume_mounts(group: dict) -> list[str]:
     """
