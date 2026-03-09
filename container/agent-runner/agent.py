@@ -248,12 +248,22 @@ CLAUDE_TOOL_DECLARATIONS = [
 ]
 
 
-def run_agent_claude(client, model: str, system_instruction: str, user_message: str, chat_jid: str) -> str:
+def run_agent_claude(client, model: str, system_instruction: str, user_message: str, chat_jid: str, conv_history: list = None) -> str:
     """
     Anthropic Claude agentic loop.
     Uses Claude's tool use API format.
     """
-    messages = [{"role": "user", "content": user_message}]
+    # Pre-populate with conversation history for native multi-turn context
+    messages = []
+    for h in (conv_history or []):
+        role = h.get("role", "user")
+        if role not in ("user", "assistant"):
+            role = "user"
+        messages.append({"role": role, "content": h.get("content", "")})
+    # Ensure history ends properly before adding current message
+    if messages and messages[-1]["role"] == "user":
+        messages.append({"role": "assistant", "content": "..."})
+    messages.append({"role": "user", "content": user_message})
     MAX_ITER = 30
     final_response = ""
 
@@ -325,16 +335,22 @@ def execute_tool(name: str, args: dict, chat_jid: str) -> str:
 
 # ── Agentic loop ──────────────────────────────────────────────────────────────
 
-def run_agent_openai(client, system_instruction: str, user_message: str, chat_jid: str, model: str) -> str:
+def run_agent_openai(client, system_instruction: str, user_message: str, chat_jid: str, model: str, conv_history: list = None) -> str:
     """
     OpenAI-compatible agentic loop (NVIDIA NIM / OpenAI / Groq / etc.)
     Works the same as run_agent but uses OpenAI chat completions API.
     """
     import json as _json
-    history = [
-        {"role": "system", "content": system_instruction},
-        {"role": "user", "content": user_message},
-    ]
+    # Pre-populate with conversation history for native multi-turn context
+    history = [{"role": "system", "content": system_instruction}]
+    for h in (conv_history or []):
+        role = h.get("role", "user")
+        if role == "assistant":
+            role = "assistant"
+        else:
+            role = "user"
+        history.append({"role": role, "content": h.get("content", "")})
+    history.append({"role": "user", "content": user_message})
     MAX_ITER = 30
     final_response = ""
 
@@ -379,7 +395,7 @@ def run_agent_openai(client, system_instruction: str, user_message: str, chat_ji
 
 
 
-def run_agent(client: genai.Client, system_instruction: str, user_message: str, chat_jid: str, assistant_name: str = "Andy") -> str:
+def run_agent(client: genai.Client, system_instruction: str, user_message: str, chat_jid: str, assistant_name: str = "Andy", conv_history: list = None) -> str:
     """
     Gemini function-calling 代理迴圈（agentic loop）。
 
@@ -399,14 +415,24 @@ def run_agent(client: genai.Client, system_instruction: str, user_message: str, 
     history 維護完整的對話記錄（user / model / tool_response），
     讓 Gemini 在每次迭代都有完整的上下文，不需要重新解釋先前的工具結果。
     """
-    # Few-shot: only teach identity response for direct "who are you" questions.
-    # Avoid adding examples too similar to real user queries — that causes the model
-    # to apply the identity template to all questions (the "always says Andy" bug).
+    # Few-shot example: teach identity response for direct "who are you" questions
     identity_response = f"我是 {assistant_name}，你的個人 AI 助理！有什麼需要幫忙的嗎？"
     history = [
         types.Content(role="user", parts=[types.Part(text="你是誰？你是什麼AI？你是Google的嗎？")]),
         types.Content(role="model", parts=[types.Part(text=identity_response)]),
     ]
+    # Pre-populate with conversation history for native multi-turn context
+    # Gemini requires strictly alternating user/model roles
+    prev_role = "model"  # last item in history is model, so next should be user
+    for h in (conv_history or []):
+        role = "model" if h.get("role") == "assistant" else "user"
+        if role == prev_role:
+            continue  # skip consecutive same-role to maintain alternation
+        history.append(types.Content(role=role, parts=[types.Part(text=h.get("content", ""))]))
+        prev_role = role
+    # Ensure we can safely append the current user message
+    if history and history[-1].role == "user":
+        history.append(types.Content(role="model", parts=[types.Part(text="...")]))
     history.append(types.Content(role="user", parts=[types.Part(text=user_message)]))
 
     MAX_ITER = 30  # 最多迭代次數，防止無限迴圈
@@ -560,15 +586,7 @@ def main():
             lines.append("")
             lines.append(Path(claude_md).read_text(encoding="utf-8"))
 
-    # 注入對話歷史（最近 N 則），讓 agent 記住之前的對話內容
-    if conversation_history:
-        lines.append("")
-        lines.append("=== Recent conversation history (oldest first) ===")
-        for msg in conversation_history[-24:]:  # 最多最近 24 則
-            role_label = "Assistant" if msg.get("role") == "assistant" else "User"
-            lines.append(f"[{role_label}]: {msg.get('content', '')}")
-        lines.append("=== End of history ===")
-        lines.append("Use the above history to maintain context and remember what was discussed.")
+    # Conversation history is now passed directly to each backend's messages array (multi-turn)
 
     # 演化引擎提示：附加在所有靜態設定之後（表觀遺傳，動態覆蓋）
     # 格式：\n\n---\n[環境自動調整提示...] 或 [群組偏好...]
@@ -581,9 +599,9 @@ def main():
     try:
         if use_openai_compat:
             _model = os.environ.get("NIM_MODEL") or os.environ.get("OPENAI_MODEL") or os.environ.get("GEMINI_MODEL") or "meta/llama-3.3-70b-instruct"
-            result = run_agent_openai(openai_client, system_instruction, prompt, chat_jid, _model)
+            result = run_agent_openai(openai_client, system_instruction, prompt, chat_jid, _model, conv_history=conversation_history)
         else:
-            result = run_agent(client, system_instruction, prompt, chat_jid, assistant_name)
+            result = run_agent(client, system_instruction, prompt, chat_jid, assistant_name, conv_history=conversation_history)
         # 若 agent 已透過 mcp__evoclaw__send_message 工具主動發送訊息，
         # 則清空 result 欄位，避免 host 的 container_runner 再次發送（雙重訊息 + 超長訊息 bug）
         # 若 agent 沒有呼叫工具（純文字回覆），則由 host 負責發送 result
