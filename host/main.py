@@ -125,7 +125,11 @@ async def _process_group_messages(group: dict, messages: list[dict],
     if not messages:
         return
 
-    prompt = format_messages(messages, config.TIMEZONE)
+    # 取得最近 20 條對話歷史作為上下文（多輪記憶）
+    # 排除已在 messages 中的訊息（避免重複），讓 agent 看到完整的對話脈絡
+    new_ts_set = {m["timestamp"] for m in messages}
+    history = [m for m in db.get_conversation_history(jid, limit=20) if m["timestamp"] not in new_ts_set]
+    prompt = format_messages(history + messages, config.TIMEZONE)
     session_id = db.get_session(folder)
 
     log.info(f"Processing {len(messages)} message(s) for {folder}")
