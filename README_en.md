@@ -283,7 +283,7 @@ For full architecture details see [docs/SPEC.md](docs/SPEC.md).
 echo '{"prompt":"hello"}' | docker run -i --rm evoclaw-agent
 ```
 
-**Windows (PowerShell):**
+**Windows (PowerShell) — simple:**
 ```powershell
 '{"prompt":"hello"}' | docker run -i --rm evoclaw-agent
 ```
@@ -293,6 +293,12 @@ $json = '{"prompt":"說你好","secrets":{"GOOGLE_API_KEY":"API Key"},"groupFold
 $json | docker run -i --rm evoclaw-agent
 ```
 
+
+**Windows (PowerShell) — full parameters:**
+```powershell
+$json = '{"prompt":"Say hello","secrets":{"GOOGLE_API_KEY":"your-api-key"},"groupFolder":"test","chatJid":"tg:123","isMain":false,"isScheduledTask":false,"assistantName":"Evo","evolutionHints":""}'
+$json | docker run -i --rm evoclaw-agent
+```
 
 Expected output:
 ```
