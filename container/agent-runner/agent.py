@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-EvoClaw Agent Runner (Python + Gemini)
-Reads ContainerInput JSON from stdin, runs Gemini agentic loop, outputs to stdout.
+EvoClaw Agent Runner (Python + Gemini / OpenAI-compatible)
+Reads ContainerInput JSON from stdin, runs agentic loop, outputs to stdout.
+Supports Gemini (default) or any OpenAI-compatible API (NVIDIA NIM, OpenAI, Groq, etc.)
 """
 
 import json
@@ -14,13 +15,11 @@ import string
 from pathlib import Path
 from google import genai
 from google.genai import types
-
-# OpenAI-compatible client (used for NIM API and other OpenAI-compatible backends)
 try:
     from openai import OpenAI as OpenAIClient
-    OPENAI_AVAILABLE = True
+    _OPENAI_AVAILABLE = True
 except ImportError:
-    OPENAI_AVAILABLE = False
+    _OPENAI_AVAILABLE = False
 
 # container 輸出的邊界標記，host 用這兩個字串從 stdout 截取 JSON 結果
 # 必須與 container_runner.py 中定義的常數完全一致
@@ -219,60 +218,17 @@ TOOL_DECLARATIONS = [
 ]
 
 
-# OpenAI-compatible tool declarations (mirrors TOOL_DECLARATIONS)
+
+# ── OpenAI-compatible tool declarations ───────────────────────────────────────
+
 OPENAI_TOOL_DECLARATIONS = [
     {"type": "function", "function": {"name": "Bash", "description": "Execute a bash command in /workspace/group.", "parameters": {"type": "object", "properties": {"command": {"type": "string", "description": "The bash command to run"}}, "required": ["command"]}}},
     {"type": "function", "function": {"name": "Read", "description": "Read a file from the filesystem.", "parameters": {"type": "object", "properties": {"file_path": {"type": "string", "description": "Absolute path to the file"}}, "required": ["file_path"]}}},
-    {"type": "function", "function": {"name": "Write", "description": "Write content to a file.", "parameters": {"type": "object", "properties": {"file_path": {"type": "string"}, "content": {"type": "string"}}, "required": ["file_path", "content"]}}},
-    {"type": "function", "function": {"name": "Edit", "description": "Find and replace a string in a file.", "parameters": {"type": "object", "properties": {"file_path": {"type": "string"}, "old_string": {"type": "string"}, "new_string": {"type": "string"}}, "required": ["file_path", "old_string", "new_string"]}}},
-    {"type": "function", "function": {"name": "mcp__evoclaw__send_message", "description": "Send a message to the user.", "parameters": {"type": "object", "properties": {"text": {"type": "string"}, "sender": {"type": "string"}}, "required": ["text"]}}},
-    {"type": "function", "function": {"name": "mcp__evoclaw__schedule_task", "description": "Schedule a task.", "parameters": {"type": "object", "properties": {"prompt": {"type": "string"}, "schedule_type": {"type": "string"}, "schedule_value": {"type": "string"}, "context_mode": {"type": "string"}}, "required": ["prompt", "schedule_type", "schedule_value"]}}},
+    {"type": "function", "function": {"name": "Write", "description": "Write content to a file.", "parameters": {"type": "object", "properties": {"file_path": {"type": "string", "description": "Absolute path to write to"}, "content": {"type": "string", "description": "File content"}}, "required": ["file_path", "content"]}}},
+    {"type": "function", "function": {"name": "Edit", "description": "Find and replace a string in a file.", "parameters": {"type": "object", "properties": {"file_path": {"type": "string", "description": "Path to the file"}, "old_string": {"type": "string", "description": "Exact text to replace"}, "new_string": {"type": "string", "description": "Replacement text"}}, "required": ["file_path", "old_string", "new_string"]}}},
+    {"type": "function", "function": {"name": "mcp__evoclaw__send_message", "description": "Send a message to the user in the chat.", "parameters": {"type": "object", "properties": {"text": {"type": "string", "description": "Message text"}, "sender": {"type": "string", "description": "Optional bot name"}}, "required": ["text"]}}},
+    {"type": "function", "function": {"name": "mcp__evoclaw__schedule_task", "description": "Schedule a recurring or one-time task.", "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "What to do when task runs"}, "schedule_type": {"type": "string", "description": "cron, interval, or once"}, "schedule_value": {"type": "string", "description": "Cron expr, ms, or ISO timestamp"}, "context_mode": {"type": "string", "description": "group or isolated"}}, "required": ["prompt", "schedule_type", "schedule_value"]}}},
 ]
-
-
-def run_agent_openai(client, model: str, system_instruction: str, user_message: str, chat_jid: str) -> str:
-    """
-    OpenAI-compatible agentic loop (for NIM API and other OpenAI-compatible backends).
-    Mirrors run_agent() but uses the OpenAI chat completions API format.
-    """
-    import json as _json
-    history = [
-        {"role": "system", "content": system_instruction},
-        {"role": "user", "content": user_message},
-    ]
-    MAX_ITER = 30
-    final_response = ""
-
-    for _ in range(MAX_ITER):
-        response = client.chat.completions.create(
-            model=model,
-            messages=history,
-            tools=OPENAI_TOOL_DECLARATIONS,
-            tool_choice="auto",
-            temperature=0.7,
-            max_tokens=4096,
-        )
-        msg = response.choices[0].message
-        history.append(msg)
-
-        if not msg.tool_calls:
-            final_response = msg.content or ""
-            break
-
-        # Execute all tool calls
-        for tc in msg.tool_calls:
-            try:
-                args = _json.loads(tc.function.arguments)
-            except Exception:
-                args = {}
-            result = execute_tool(tc.function.name, args, chat_jid)
-            history.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": result,
-            })
-
-    return final_response
 
 
 def execute_tool(name: str, args: dict, chat_jid: str) -> str:
@@ -299,6 +255,60 @@ def execute_tool(name: str, args: dict, chat_jid: str) -> str:
 
 
 # ── Agentic loop ──────────────────────────────────────────────────────────────
+
+def run_agent_openai(client, system_instruction: str, user_message: str, chat_jid: str, model: str) -> str:
+    """
+    OpenAI-compatible agentic loop (NVIDIA NIM / OpenAI / Groq / etc.)
+    Works the same as run_agent but uses OpenAI chat completions API.
+    """
+    import json as _json
+    history = [
+        {"role": "system", "content": system_instruction},
+        {"role": "user", "content": user_message},
+    ]
+    MAX_ITER = 30
+    final_response = ""
+
+    for _ in range(MAX_ITER):
+        response = client.chat.completions.create(
+            model=model,
+            messages=history,
+            tools=OPENAI_TOOL_DECLARATIONS,
+            tool_choice="auto",
+            temperature=0.7,
+            max_tokens=4096,
+        )
+        msg = response.choices[0].message
+
+        # Add assistant message to history
+        msg_dict = {"role": "assistant", "content": msg.content or ""}
+        if msg.tool_calls:
+            msg_dict["tool_calls"] = [
+                {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in msg.tool_calls
+            ]
+        history.append(msg_dict)
+
+        if not msg.tool_calls:
+            final_response = msg.content or ""
+            break
+
+        # Execute all tool calls and add results
+        for tc in msg.tool_calls:
+            try:
+                args = _json.loads(tc.function.arguments)
+            except Exception:
+                args = {}
+            result = execute_tool(tc.function.name, args, chat_jid)
+            history.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": result,
+            })
+
+    return final_response
+
+
 
 def run_agent(client: genai.Client, system_instruction: str, user_message: str, chat_jid: str) -> str:
     """
@@ -429,18 +439,27 @@ def main():
     for k, v in secrets.items():
         os.environ[k] = v
 
-    # Choose backend: NIM (OpenAI-compatible) or Gemini
+    # ── Backend selection: NIM / OpenAI-compatible takes priority ────────────────
     nim_api_key = os.environ.get("NIM_API_KEY", "")
-    nim_base_url = os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
-    nim_model = os.environ.get("NIM_MODEL", "")
-    use_nim = bool(nim_api_key and nim_model and OPENAI_AVAILABLE)
+    openai_api_key = os.environ.get("OPENAI_API_KEY", "")
+    google_api_key = os.environ.get("GOOGLE_API_KEY", "")
 
-    if not use_nim:
-        api_key = os.environ.get("GOOGLE_API_KEY", "")
-        if not api_key:
-            emit({"status": "error", "result": None, "error": "GOOGLE_API_KEY not set. Add it to your .env file."})
-            return
-        client = genai.Client(api_key=api_key)
+    use_openai_compat = bool(nim_api_key or openai_api_key)
+
+    if use_openai_compat and not _OPENAI_AVAILABLE:
+        emit({"status": "error", "result": None, "error": "openai package not installed in container. Rebuild with updated requirements.txt."})
+        return
+
+    if not use_openai_compat and not google_api_key:
+        emit({"status": "error", "result": None, "error": "No API key found. Set GOOGLE_API_KEY, NIM_API_KEY, or OPENAI_API_KEY in .env"})
+        return
+
+    if use_openai_compat:
+        _api_key = nim_api_key or openai_api_key
+        _base_url = os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1") if nim_api_key else os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+        openai_client = OpenAIClient(base_url=_base_url, api_key=_api_key)
+    else:
+        client = genai.Client(api_key=google_api_key)
 
     # 建立系統提示詞：基本角色設定 + 環境資訊 + 群組自訂指令（CLAUDE.md）
     lines = [
@@ -480,17 +499,14 @@ def main():
     system_instruction = "\n".join(lines)
 
     try:
-        if use_nim:
-            nim_client = OpenAIClient(api_key=nim_api_key, base_url=nim_base_url)
-            result = run_agent_openai(nim_client, nim_model, system_instruction, prompt, chat_jid)
+        if use_openai_compat:
+            _model = os.environ.get("NIM_MODEL") or os.environ.get("OPENAI_MODEL") or os.environ.get("GEMINI_MODEL") or "meta/llama-3.3-70b-instruct"
+            result = run_agent_openai(openai_client, system_instruction, prompt, chat_jid, _model)
         else:
             result = run_agent(client, system_instruction, prompt, chat_jid)
         if result:
-            # 若 agent 有產生文字回覆（而非只透過 tool 發送），也透過 IPC 發送
             tool_send_message(chat_jid, result)
-        # 輸出結果 JSON，包含狀態、回覆文字、新的 session ID
-        # newSessionId 讓 host 知道這次對話的 session 識別碼（目前為時間戳記）
-        emit({"status": "success", "result": result, "newSessionId": f"gemini-{int(time.time())}"})
+        emit({"status": "success", "result": result, "newSessionId": f"evoclaw-{int(time.time())}"})
     except Exception as e:
         emit({"status": "error", "result": None, "error": str(e)})
 
