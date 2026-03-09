@@ -12,7 +12,7 @@
   <a href="https://github.com/KeithKeepGoing/evoclaw">GitHub</a>
 </p>
 
-Fork of [nanoclaw](https://github.com/qwibitai/nanoclaw) — fully rewritten in Python with Google Gemini API.
+An AI assistant framework built in Python, powered by Google Gemini API.
 Ships with a built-in **evolution engine** that makes the assistant adapt and improve over time.
 
 ---
@@ -342,21 +342,10 @@ GEMINI_MODEL=gemini-2.0-flash-exp
 
 Ask the agent directly in your main channel: "Why isn't the scheduler running?" "What's in the recent logs?" "Why did this message not get a response?"
 
-**What's the difference between this and nanoclaw?**
-
-| | nanoclaw | evoclaw |
-|--|---------|---------|
-| Language | TypeScript / Node.js | Python |
-| AI Backend | Claude (Anthropic) | Gemini 2.0 Flash (Google) |
-| Setup | Claude Code CLI | `python setup/setup.py` |
-| Channels | WhatsApp, Telegram, Discord, Slack, Gmail | Same |
-| Container | Apple Container / Docker | Docker |
-
 ---
 
 ## Credits
 
-- Built on [nanoclaw](https://github.com/qwibitai/nanoclaw) by qwibitai
 - Powered by [Google Gemini](https://ai.google.dev/) API
 
 ## License

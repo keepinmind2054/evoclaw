@@ -12,7 +12,7 @@
   <a href="https://github.com/KeithKeepGoing/evoclaw">GitHub</a>
 </p>
 
-Fork 自 [nanoclaw](https://github.com/qwibitai/nanoclaw) — 完全以 Python 重寫，使用 Google Gemini API。
+以 Python 打造的 AI 助理框架，使用 Google Gemini API 驅動。
 內建**進化引擎**，讓助手隨著使用自動學習與改進。
 
 ---
@@ -342,21 +342,10 @@ GEMINI_MODEL=gemini-2.0-flash-exp
 
 直接在主頻道問代理：「為什麼排程器沒有執行？」「最近的日誌裡有什麼？」「為什麼這條訊息沒有得到回應？」
 
-**這與 nanoclaw 有什麼不同？**
-
-| | nanoclaw | evoclaw |
-|--|---------|---------|
-| 語言 | TypeScript / Node.js | Python |
-| AI 後端 | Claude（Anthropic） | Gemini 2.0 Flash（Google） |
-| 安裝方式 | Claude Code CLI | `python setup/setup.py` |
-| 支援頻道 | WhatsApp、Telegram、Discord、Slack、Gmail | 相同 |
-| 容器 | Apple Container / Docker | Docker |
-
 ---
 
 ## 致謝
 
-- 基於 [nanoclaw](https://github.com/qwibitai/nanoclaw) by qwibitai
 - 由 [Google Gemini](https://ai.google.dev/) API 驅動
 
 ## 授權
