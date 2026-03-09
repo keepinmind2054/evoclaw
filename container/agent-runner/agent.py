@@ -265,7 +265,7 @@ def run_agent(client: genai.Client, system_instruction: str, user_message: str, 
 
     for _ in range(MAX_ITER):
         response = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
+            model=os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
             contents=history,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
@@ -352,7 +352,7 @@ def main():
     # 演化引擎注入的動態行為提示（表觀遺傳：環境感知 + 群組基因組風格）
     # 若為空字串則不添加任何附加指引
     evolution_hints = inp.get("evolutionHints", "")
-    assistant_name = inp.get("assistantName", "Andy")
+    assistant_name = inp.get("assistantName", "") or "Andy"
 
     # 將 API 金鑰等敏感資料從 stdin JSON 設定到環境變數
     # 這樣 Gemini SDK 等依賴 os.environ 的函式庫就能自動取得
