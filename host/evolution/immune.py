@@ -1,0 +1,178 @@
+"""
+免疫系統模組（Immune System）
+
+生物的免疫系統能識別「非自身」的入侵者（病毒、細菌），
+並在初次接觸後形成「記憶」，下次遇到相同威脅時快速反應。
+
+EvoClaw 的免疫系統類比：
+  - 偵測惡意的 prompt injection（「忽略之前的指令」等攻擊手法）
+  - 偵測重複垃圾訊息（同一內容短時間內大量發送）
+  - 初次偵測記錄「抗體」（threat pattern hash）
+  - 累積到門檻後自動封鎖發送者（免疫記憶啟動）
+
+設計原則：
+  - 寧可放行可疑訊息，也不誤殺正常訊息（低誤判率優先）
+  - check_message 失敗時靜默放行，不影響正常對話流程
+  - 封鎖狀態儲存在 SQLite，重啟後仍然有效（持久免疫記憶）
+"""
+
+import hashlib
+import logging
+import re
+from typing import Optional
+
+log = logging.getLogger(__name__)
+
+# ── Prompt Injection 偵測模式 ───────────────────────────────────────────────────
+# 這些是常見的 LLM 越獄攻擊手法，用正規表達式匹配
+# 故意保持保守（只匹配明確惡意的模式），減少誤判
+# 涵蓋英文與中文兩種攻擊語言
+INJECTION_PATTERNS = [
+    # ── 英文攻擊模式 ──────────────────────────────────────────────────────────
+    r"ignore\s+(all\s+)?(previous|prior|above)\s+instructions?",
+    r"forget\s+(everything|all\s+previous|your\s+instructions?)",
+    r"you\s+are\s+now\s+(a\s+|an\s+)?\w+\s*(mode|ai|bot|assistant)?",
+    r"new\s+system\s+prompt\s*[:：]",
+    r"act\s+as\s+if\s+you\s+(have\s+no|are\s+not)",
+    r"jailbreak",
+    r"\bDAN\b",                                         # DAN / DAN mode
+    r"<\|system\|>",
+    r"\[INST\]\s*<<SYS>>",
+    r"disregard\s+(your\s+)?(previous\s+)?(instructions?|rules?|guidelines?)",
+
+    # ── 中文攻擊模式 ──────────────────────────────────────────────────────────
+    r"忽略.{0,15}(之前|前面|以前|先前|上面).{0,15}(指令|設定|規則|限制|提示)",
+    r"(忘記|忘掉|拋棄|丟掉).{0,15}(規則|限制|指令|設定|約束)",
+    r"(現在|從現在起|你現在).{0,10}(是個?|變成|扮演).{0,15}(沒有限制|不受限|無限制)",
+    r"(越獄|破解|繞過).{0,10}(限制|規則|設定|系統)",
+    r"新的.{0,5}系統.{0,5}(提示|指令|設定)\s*[:：]",
+    r"假裝.{0,10}(沒有|不受|無視).{0,10}(限制|規則|指令)",
+]
+
+# 預先編譯正規表達式以提升效能（每次請求都會呼叫）
+# 注意：中文模式不需要 IGNORECASE，但加上無副作用
+_compiled_patterns = [re.compile(p, re.IGNORECASE) for p in INJECTION_PATTERNS]
+
+# 垃圾訊息門檻：同一發送者在 1 小時內傳送相同內容超過此次數 = 垃圾訊息
+SPAM_THRESHOLD = 10
+
+# 自動封鎖門檻：同一發送者累積超過此次數的威脅記錄 = 自動封鎖
+THREAT_BLOCK_THRESHOLD = 5
+
+
+def check_message(content: str, sender_jid: str) -> tuple[bool, Optional[str]]:
+    """
+    檢查一則訊息是否安全。
+
+    回傳值：
+      (True, None)       — 訊息安全，可以處理
+      (False, "blocked") — 發送者已被封鎖
+      (False, "injection") — 偵測到 prompt injection 攻擊
+      (False, "spam")    — 偵測到垃圾訊息重複攻擊
+
+    此函式設計為「防禦優先但保守」：
+      只封鎖有明確惡意特徵的訊息，
+      模糊案例一律放行（False Negative 比 False Positive 代價小）。
+
+    若資料庫操作失敗，靜默回傳安全（True），
+    避免 DB 故障導致整個系統無法回應訊息。
+    """
+    try:
+        # ── 1. 檢查發送者是否已被封鎖 ────────────────────────────────────────
+        from host import db
+        if db.is_sender_blocked(sender_jid):
+            log.info(f"Blocked sender attempted to message: {sender_jid}")
+            return (False, "blocked")
+
+        # ── 2. Prompt Injection 偵測 ──────────────────────────────────────────
+        content_stripped = content.strip()
+        for pattern in _compiled_patterns:
+            if pattern.search(content_stripped):
+                log.warning(f"Prompt injection detected from {sender_jid}: "
+                            f"pattern={pattern.pattern[:40]}")
+                _record_threat(sender_jid, content, "injection")
+                return (False, "injection")
+
+        # ── 3. 垃圾訊息偵測 ──────────────────────────────────────────────────
+        # 先記錄此訊息（不論是否為威脅），讓所有訊息都能被 spam 計數器追蹤
+        content_hash = _hash(content)
+        _track_message(sender_jid, content_hash)
+        if _is_spam(sender_jid, content_hash):
+            log.warning(f"Spam detected from {sender_jid}")
+            _record_threat(sender_jid, content, "spam")
+            return (False, "spam")
+
+        return (True, None)
+
+    except Exception as e:
+        # 免疫系統故障時靜默放行，確保正常對話不受影響
+        log.warning("Immune check error (allowing through): %s", type(e).__name__)
+        log.debug("Immune check detail: %s", e)
+        return (True, None)
+
+
+def get_immune_status() -> dict:
+    """
+    取得免疫系統的摘要統計資訊。
+    可透過 IPC 工具讓主群組查詢，用於監控安全狀態。
+    """
+    from host import db
+    try:
+        return db.get_immune_stats()
+    except Exception:
+        return {"total_threats": 0, "blocked_senders": 0}
+
+
+# ── 私有輔助函式 ────────────────────────────────────────────────────────────────
+
+def _hash(content: str) -> str:
+    """計算訊息內容的 MD5 hash，用於快速比對重複訊息（不需儲存原文）。"""
+    return hashlib.md5(content.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _track_message(sender_jid: str, content_hash: str) -> None:
+    """
+    每則訊息到來時都記錄其 hash（不論是否為威脅），
+    讓 _is_spam 的計數器能正確偵測正常訊息的重複發送。
+    若 DB 操作失敗，靜默忽略（不影響正常對話流程）。
+    """
+    from host import db
+    try:
+        db.record_immune_threat(sender_jid, content_hash, "seen")
+    except Exception as e:
+        log.debug(f"Failed to track message: {e}")
+
+
+def _is_spam(sender_jid: str, content_hash: str) -> bool:
+    """
+    檢查某個發送者是否在近 1 小時內重複傳送相同內容超過門檻次數。
+
+    使用 content hash 而非原文比較，保護用戶隱私（DB 不儲存完整訊息內容）。
+    1 小時的滑動視窗避免誤判（例如用戶習慣說「謝謝」不算垃圾訊息）。
+    """
+    from host import db
+    try:
+        count = db.get_recent_threat_count(sender_jid, content_hash, hours=1)
+        return count >= SPAM_THRESHOLD
+    except Exception:
+        return False
+
+
+def _record_threat(sender_jid: str, content: str, threat_type: str) -> None:
+    """
+    記錄一次威脅事件，並在累積超過門檻時自動封鎖發送者。
+
+    威脅記錄使用 content hash 去重：同一內容的重複威脅會更新計數而非新增記錄，
+    避免資料庫被同一攻擊者的大量重複請求撐爆。
+    """
+    from host import db
+    try:
+        content_hash = _hash(content)
+        threat_count = db.record_immune_threat(sender_jid, content_hash, threat_type)
+
+        # 累積威脅超過門檻 → 自動封鎖（免疫記憶：形成「抗體」後直接阻擋）
+        if threat_count >= THREAT_BLOCK_THRESHOLD:
+            db.block_sender(sender_jid)
+            log.warning(f"Auto-blocked sender {sender_jid} after {threat_count} threats")
+    except Exception as e:
+        log.debug(f"Failed to record threat: {e}")

@@ -1,0 +1,41 @@
+[project]
+name = "evoclaw"
+version = "1.0.0"
+description = "Gemini-powered personal AI assistant running in isolated Docker containers"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+
+dependencies = [
+    "python-telegram-bot>=21.0",
+    "croniter>=3.0.0",
+    "pyyaml>=6.0",
+    "aiofiles>=23.0",
+    "aiohttp>=3.9.0",
+    # Slack
+    "slack-bolt>=1.18.0",
+    "slack-sdk>=3.27.0",
+    # Discord
+    "discord.py>=2.3.0",
+    # Gmail
+    "google-api-python-client>=2.120.0",
+    "google-auth-httplib2>=0.2.0",
+    "google-auth-oauthlib>=1.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+evoclaw = "host.main:main"
+evoclaw-setup = "setup.setup:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"

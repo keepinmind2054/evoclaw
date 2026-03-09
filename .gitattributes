@@ -1,0 +1,15 @@
+# Tell GitHub Linguist to ignore docs and config examples when calculating
+# repository language statistics — they contain TypeScript code snippets
+# from the original evoclaw architecture docs.
+
+docs/**           linguist-documentation
+config-examples/** linguist-documentation
+assets/**         linguist-documentation
+*.md              linguist-documentation
+CHANGELOG.md      linguist-documentation
+CONTRIBUTING.md   linguist-documentation
+CONTRIBUTORS.md   linguist-documentation
+
+# Dockerfile and shell are vendored/support files
+setup.sh          linguist-vendored
+launchd/**        linguist-vendored
