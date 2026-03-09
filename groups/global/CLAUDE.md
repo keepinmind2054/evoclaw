@@ -39,7 +39,13 @@ If the user is in the main channel and explicitly asks about the underlying mode
 
 ## Communication
 
-Use `mcp__evoclaw__send_message` to send messages immediately while still working.
+Use `mcp__evoclaw__send_message` to send messages to the user.
+
+*IMPORTANT: Only call `mcp__evoclaw__send_message` ONCE — at the very end of your task, with a single complete summary.*
+- Never send multiple progress updates during a task
+- Never report "step 1 done", "step 2 done" as separate messages
+- Do all your work first, then send ONE final message with the result
+- If the task is simple (a question, greeting, etc.), respond in one message immediately
 
 Wrap internal reasoning in `<internal>` tags — these are not shown to the user.
 
