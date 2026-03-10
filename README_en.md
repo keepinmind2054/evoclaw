@@ -69,10 +69,11 @@ The setup wizard handles everything: API keys, Docker, channel registration.
 
 - Python 3.11+
 - Docker
-- An API key for your chosen LLM:
-  - **Gemini** (default, free tier available): [aistudio.google.com](https://aistudio.google.com) → `GOOGLE_API_KEY`
-  - **OpenAI-compatible** (NVIDIA NIM, Groq, etc.): `OPENAI_API_KEY` + `OPENAI_BASE_URL`
-  - **Claude**: [console.anthropic.com](https://console.anthropic.com) → `ANTHROPIC_API_KEY`
+- An API key for your chosen LLM (auto-detected — set whichever key you have):
+  - **Gemini** (default, free tier): [aistudio.google.com](https://aistudio.google.com) → `GOOGLE_API_KEY`
+  - **NVIDIA NIM**: [build.nvidia.com](https://build.nvidia.com) → `NIM_API_KEY`
+  - **OpenAI-compatible** (Groq, etc.): `OPENAI_API_KEY` + `OPENAI_BASE_URL`
+  - **Claude**: [console.anthropic.com](https://console.anthropic.com) → `CLAUDE_API_KEY`
 
 ---
 
@@ -108,10 +109,14 @@ python run.py
 
 > Free tier has generous limits. Separate from Gemini Advanced.
 
+**NVIDIA NIM:**
+1. Go to [build.nvidia.com](https://build.nvidia.com) and get an API key
+2. Add to `.env`: `NIM_API_KEY=nvapi-...` (optionally set `NIM_MODEL`)
+
 **Claude:**
 1. Go to [console.anthropic.com](https://console.anthropic.com)
 2. Create an API key
-3. Add to `.env`: `ANTHROPIC_API_KEY=...` and `LLM_BACKEND=claude`
+3. Add to `.env`: `CLAUDE_API_KEY=...` (optionally set `CLAUDE_MODEL`)
 
 ---
 
@@ -349,10 +354,11 @@ GEMINI_MODEL=gemini-2.0-flash-exp
 
 **Can I use Claude or another LLM instead of Gemini?**
 
-Yes. The agent supports three backends:
+Yes. The agent auto-detects the backend from whichever key is set:
 - **Gemini** (default) — set `GOOGLE_API_KEY`
-- **OpenAI-compatible** (NVIDIA NIM, Groq, OpenAI, etc.) — set `OPENAI_API_KEY` and `OPENAI_BASE_URL`
-- **Claude** — set `ANTHROPIC_API_KEY` and `LLM_BACKEND=claude`
+- **NVIDIA NIM** — set `NIM_API_KEY` (optionally `NIM_MODEL`, `NIM_BASE_URL`)
+- **OpenAI-compatible** (Groq, etc.) — set `OPENAI_API_KEY` + `OPENAI_BASE_URL`
+- **Claude** — set `CLAUDE_API_KEY` (optionally `CLAUDE_MODEL`)
 
 **How do I debug issues?**
 

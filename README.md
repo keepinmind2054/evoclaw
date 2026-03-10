@@ -69,10 +69,11 @@ python setup/setup.py
 
 - Python 3.11+
 - Docker
-- 選擇一個 LLM 的 API 金鑰：
+- 選擇一個 LLM 的 API 金鑰（自動偵測，設定對應的金鑰即可）：
   - **Gemini**（預設，有免費方案）：[aistudio.google.com](https://aistudio.google.com) → `GOOGLE_API_KEY`
-  - **OpenAI 相容**（NVIDIA NIM、Groq 等）：`OPENAI_API_KEY` + `OPENAI_BASE_URL`
-  - **Claude**：[console.anthropic.com](https://console.anthropic.com) → `ANTHROPIC_API_KEY`
+  - **NVIDIA NIM**：[build.nvidia.com](https://build.nvidia.com) → `NIM_API_KEY`
+  - **OpenAI 相容**（Groq 等）：`OPENAI_API_KEY` + `OPENAI_BASE_URL`
+  - **Claude**：[console.anthropic.com](https://console.anthropic.com) → `CLAUDE_API_KEY`
 
 ---
 
@@ -108,10 +109,14 @@ python run.py
 
 > 免費方案用量寬裕，與 Gemini Advanced 訂閱無關。
 
+**NVIDIA NIM：**
+1. 前往 [build.nvidia.com](https://build.nvidia.com) 取得 API 金鑰
+2. 加入 `.env`：`NIM_API_KEY=nvapi-...`（可選設定 `NIM_MODEL`）
+
 **Claude：**
 1. 前往 [console.anthropic.com](https://console.anthropic.com)
 2. 建立 API 金鑰
-3. 加入 `.env`：`ANTHROPIC_API_KEY=...` 及 `LLM_BACKEND=claude`
+3. 加入 `.env`：`CLAUDE_API_KEY=...`（可選設定 `CLAUDE_MODEL`）
 
 ---
 
@@ -349,10 +354,11 @@ GEMINI_MODEL=gemini-2.0-flash-exp
 
 **可以改用 Claude 或其他 LLM 嗎？**
 
-可以。代理支援三種後端：
+可以。代理會自動偵測後端，設定對應的金鑰即可：
 - **Gemini**（預設）— 設定 `GOOGLE_API_KEY`
-- **OpenAI 相容**（NVIDIA NIM、Groq、OpenAI 等）— 設定 `OPENAI_API_KEY` 和 `OPENAI_BASE_URL`
-- **Claude** — 設定 `ANTHROPIC_API_KEY` 及 `LLM_BACKEND=claude`
+- **NVIDIA NIM** — 設定 `NIM_API_KEY`（可選：`NIM_MODEL`、`NIM_BASE_URL`）
+- **OpenAI 相容**（Groq 等）— 設定 `OPENAI_API_KEY` + `OPENAI_BASE_URL`
+- **Claude** — 設定 `CLAUDE_API_KEY`（可選：`CLAUDE_MODEL`）
 
 **如何除錯問題？**
 
