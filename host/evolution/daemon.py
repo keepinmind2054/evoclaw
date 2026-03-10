@@ -96,7 +96,19 @@ def _sync_evolve() -> None:
         return
 
     log.info(f"Evolution cycle: evaluating {len(active_jids)} group(s)")
+
+    # 記錄週期開始
+    try:
+        db.log_evolution_event(
+            jid="__system__",
+            event_type="cycle_start",
+            notes=f"Evaluating {len(active_jids)} group(s)",
+        )
+    except Exception:
+        pass
+
     evolved_count = 0
+    skipped_count = 0
 
     for jid in active_jids:
         try:
@@ -105,6 +117,15 @@ def _sync_evolve() -> None:
             if len(runs) < MIN_SAMPLES:
                 # 樣本不足，跳過此群組（避免少數噪音驅動演化）
                 log.debug(f"Skip {jid}: only {len(runs)} samples (need {MIN_SAMPLES})")
+                skipped_count += 1
+                try:
+                    db.log_evolution_event(
+                        jid=jid,
+                        event_type="skipped_low_samples",
+                        notes=f"Only {len(runs)} samples (need {MIN_SAMPLES})",
+                    )
+                except Exception:
+                    pass
                 continue
 
             # 計算綜合適應度分數
@@ -115,6 +136,7 @@ def _sync_evolve() -> None:
             avg_ms = sum(valid_times) / len(valid_times) if valid_times else 0
 
             # 執行基因組演化（根據適應度和速度調整行為參數）
+            # (此函式內部會呼叫 db.log_evolution_event)
             evolve_genome_from_fitness(jid, fitness, avg_ms)
             evolved_count += 1
 
@@ -125,3 +147,13 @@ def _sync_evolve() -> None:
             continue
 
     log.info(f"Evolution cycle done: {evolved_count}/{len(active_jids)} groups evolved")
+
+    # 記錄週期結束
+    try:
+        db.log_evolution_event(
+            jid="__system__",
+            event_type="cycle_end",
+            notes=f"evolved={evolved_count}, skipped={skipped_count}, total={len(active_jids)}",
+        )
+    except Exception:
+        pass

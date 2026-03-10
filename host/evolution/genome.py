@@ -81,6 +81,7 @@ def evolve_genome_from_fitness(jid: str, fitness: float, avg_response_ms: float)
       fitness        — 最近的適應度分數（0.0~1.0）
       avg_response_ms — 最近的平均回應時間（毫秒）
     """
+    from host import db
     genome = get_genome(jid)
     current_style = genome.get("response_style", "balanced")
     generation = genome.get("generation", 0)
@@ -99,7 +100,8 @@ def evolve_genome_from_fitness(jid: str, fitness: float, avg_response_ms: float)
         elif current_style == "balanced":
             new_style = "detailed"
 
-    if new_style != current_style:
+    changed = new_style != current_style
+    if changed:
         log.info(f"Genome evolution for {jid}: {current_style} → {new_style} "
                  f"(fitness={fitness:.2f}, avg_ms={avg_response_ms:.0f})")
 
@@ -108,3 +110,34 @@ def evolve_genome_from_fitness(jid: str, fitness: float, avg_response_ms: float)
         response_style=new_style,
         generation=generation + 1,
     )
+
+    # 記錄演化歷程
+    genome_before = {
+        "response_style": current_style,
+        "formality": genome.get("formality", 0.5),
+        "technical_depth": genome.get("technical_depth", 0.5),
+        "generation": generation,
+    }
+    genome_after = dict(genome_before)
+    genome_after["response_style"] = new_style
+    genome_after["generation"] = generation + 1
+
+    event_type = "genome_evolved" if changed else "genome_unchanged"
+    notes = (
+        f"style: {current_style} → {new_style}" if changed
+        else f"style unchanged ({current_style}), fitness={fitness:.3f}"
+    )
+    try:
+        db.log_evolution_event(
+            jid=jid,
+            event_type=event_type,
+            generation_before=generation,
+            generation_after=generation + 1,
+            fitness_score=round(fitness, 4),
+            avg_response_ms=round(avg_response_ms, 1),
+            genome_before=genome_before,
+            genome_after=genome_after,
+            notes=notes,
+        )
+    except Exception as e:
+        log.warning(f"Failed to log evolution event for {jid}: {e}")

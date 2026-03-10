@@ -164,6 +164,12 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   {evolution_table}
 </div>
 
+<!-- Evolution Log -->
+<div class="section">
+  <h2>&#129516; Evolution Log (last 30 events)</h2>
+  {evolution_log_table}
+</div>
+
 <!-- Immune Threats -->
 <div class="section">
   <h2>Immune Threats (blocked or count &gt; 3)</h2>
@@ -436,6 +442,51 @@ def _build_evolution_table():
             f'<tbody>{body}</tbody></table>')
 
 
+def _build_evolution_log_table():
+    rows = _fetch(
+        "SELECT timestamp, jid, event_type, fitness_score, avg_response_ms, "
+        "generation_before, generation_after, notes "
+        "FROM evolution_log ORDER BY timestamp DESC LIMIT 30"
+    )
+    if not rows:
+        return ('<table><thead><tr><th>時間</th><th>事件類型</th><th>群組 JID</th>'
+                '<th>適應度</th><th>平均回應</th><th>世代</th><th>備注</th></tr></thead>'
+                '<tbody>' + _empty_row(7) + '</tbody></table>')
+    color_map = {
+        "genome_evolved": "#4ade80",
+        "genome_unchanged": "#94a3b8",
+        "cycle_start": "#60a5fa",
+        "cycle_end": "#a78bfa",
+        "skipped_low_samples": "#f59e0b",
+    }
+    body = ""
+    for entry in rows:
+        ts = str(entry.get("timestamp", ""))[:19]
+        jid = entry.get("jid", "")
+        etype = entry.get("event_type", "")
+        fitness = entry.get("fitness_score")
+        fitness_str = f"{fitness:.3f}" if fitness is not None else "-"
+        avg_ms = entry.get("avg_response_ms")
+        ms_str = f"{avg_ms:.0f}ms" if avg_ms is not None else "-"
+        gen_b = entry.get("generation_before")
+        gen_a = entry.get("generation_after")
+        gen_str = f"{gen_b}&rarr;{gen_a}" if gen_b is not None else "-"
+        notes = _esc(entry.get("notes", ""))
+        color = color_map.get(etype, "#e2e8f0")
+        body += (f"<tr>"
+                 f"<td style='color:#94a3b8'>{_esc(ts)}</td>"
+                 f"<td style='color:{color}'>{_esc(etype)}</td>"
+                 f"<td style='color:#e2e8f0;font-size:11px'>{_esc(jid)}</td>"
+                 f"<td style='color:#fbbf24'>{fitness_str}</td>"
+                 f"<td style='color:#60a5fa'>{ms_str}</td>"
+                 f"<td style='color:#a78bfa'>{gen_str}</td>"
+                 f"<td style='color:#94a3b8;font-size:11px'>{notes}</td>"
+                 f"</tr>")
+    return (f'<table><thead><tr><th>時間</th><th>事件類型</th><th>群組 JID</th>'
+            f'<th>適應度</th><th>平均回應</th><th>世代</th><th>備注</th></tr></thead>'
+            f'<tbody>{body}</tbody></table>')
+
+
 def _build_immune_table():
     rows = _fetch(
         "SELECT sender_jid, threat_type, count, blocked, last_seen "
@@ -632,6 +683,7 @@ class _DashboardHandler(http.server.BaseHTTPRequestHandler):
             sessions_table=_build_sessions_table(),
             messages_table=_build_messages_table(),
             evolution_table=_build_evolution_table(),
+            evolution_log_table=_build_evolution_log_table(),
             immune_table=_build_immune_table(),
         )
         body = html.encode("utf-8")

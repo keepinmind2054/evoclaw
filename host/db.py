@@ -151,6 +151,22 @@ def _create_tables(db: sqlite3.Connection) -> None:
         last_seen TEXT DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_immune_sender ON immune_threats(sender_jid);
+
+    CREATE TABLE IF NOT EXISTS evolution_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT DEFAULT (datetime('now')),
+        jid TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        generation_before INTEGER,
+        generation_after INTEGER,
+        fitness_score REAL,
+        avg_response_ms REAL,
+        genome_before TEXT,
+        genome_after TEXT,
+        notes TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_evo_log_jid ON evolution_log(jid, timestamp);
+    CREATE INDEX IF NOT EXISTS idx_evo_log_type ON evolution_log(event_type, timestamp);
     """)
     db.commit()
 
@@ -569,3 +585,55 @@ def get_immune_stats() -> dict:
         FROM immune_threats
     """).fetchone()
     return dict(row) if row else {"total_threats": 0, "blocked_senders": 0, "total_incidents": 0}
+
+
+def log_evolution_event(jid: str, event_type: str, **kwargs) -> None:
+    """
+    記錄一次演化事件到 evolution_log 表。
+
+    event_type 可為：
+      - "genome_evolved"：基因組發生變化
+      - "genome_unchanged"：評估後基因組未變（已達最佳化）
+      - "cycle_start"：演化週期開始
+      - "cycle_end"：演化週期結束（含統計）
+      - "skipped_low_samples"：樣本不足，跳過演化
+    """
+    db = get_db()
+    allowed = {"generation_before", "generation_after", "fitness_score",
+               "avg_response_ms", "genome_before", "genome_after", "notes"}
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    # genome dicts → JSON strings
+    for key in ("genome_before", "genome_after"):
+        if key in fields and isinstance(fields[key], dict):
+            fields[key] = json.dumps(fields[key], ensure_ascii=False)
+    cols = ", ".join(["jid", "event_type"] + list(fields.keys()))
+    placeholders = ", ".join(["?"] * (2 + len(fields)))
+    values = [jid, event_type] + list(fields.values())
+    db.execute(f"INSERT INTO evolution_log ({cols}) VALUES ({placeholders})", values)
+    db.commit()
+
+
+def get_evolution_log(jid: str = None, limit: int = 100, event_type: str = None) -> list:
+    """
+    查詢演化歷程日誌。
+
+    參數：
+      jid        — 指定群組（None = 所有群組）
+      limit      — 最多回傳幾筆（預設 100）
+      event_type — 過濾特定事件類型（None = 全部）
+    """
+    db = get_db()
+    clauses = []
+    params = []
+    if jid:
+        clauses.append("jid = ?")
+        params.append(jid)
+    if event_type:
+        clauses.append("event_type = ?")
+        params.append(event_type)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    rows = db.execute(
+        f"SELECT * FROM evolution_log {where} ORDER BY timestamp DESC LIMIT ?", params
+    ).fetchall()
+    return [dict(r) for r in rows]
