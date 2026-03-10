@@ -167,6 +167,19 @@ def _create_tables(db: sqlite3.Connection) -> None:
     );
     CREATE INDEX IF NOT EXISTS idx_evo_log_jid ON evolution_log(jid, timestamp);
     CREATE INDEX IF NOT EXISTS idx_evo_log_type ON evolution_log(event_type, timestamp);
+
+-- ── Dev Engine 資料表 ──────────────────────────────────────────────────────
+-- dev_events：記錄 7 階段開發流程的事件
+CREATE TABLE IF NOT EXISTS dev_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT DEFAULT (datetime('now')),
+    jid TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    notes TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_dev_jid ON dev_events(jid);
+CREATE INDEX IF NOT EXISTS idx_dev_stage ON dev_events(stage);
     """)
     db.commit()
 
@@ -635,5 +648,42 @@ def get_evolution_log(jid: str = None, limit: int = 100, event_type: str = None)
     params.append(limit)
     rows = db.execute(
         f"SELECT * FROM evolution_log {where} ORDER BY timestamp DESC LIMIT ?", params
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+# ── Dev Engine ──────────────────────────────────────────────────────────────────
+def log_dev_event(jid: str, event_type: str, stage: str, notes: str) -> None:
+    """
+    記錄開發事件到 dev_events 表。
+    用於追蹤 7 階段開發流程的進度與結果。
+    """
+    db = get_db()
+    db.execute("""
+        INSERT INTO dev_events (jid, event_type, stage, notes)
+        VALUES (?, ?, ?, ?)
+    """, (jid, event_type, stage, notes))
+    db.commit()
+
+def get_dev_events(jid: str = None, limit: int = 100, stage: str = None) -> list:
+    """
+    查詢開發事件日誌。
+    參數：
+    jid — 指定開發者/群組（None = 所有）
+    limit — 最多回傳幾筆（預設 100）
+    stage — 過濾特定階段（None = 全部）
+    """
+    db = get_db()
+    clauses = []
+    params = []
+    if jid:
+        clauses.append("jid = ?")
+        params.append(jid)
+    if stage:
+        clauses.append("stage = ?")
+        params.append(stage)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    rows = db.execute(
+        f"SELECT * FROM dev_events {where} ORDER BY timestamp DESC LIMIT ?", params
     ).fetchall()
     return [dict(r) for r in rows]

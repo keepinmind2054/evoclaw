@@ -51,6 +51,7 @@
 - 🛡️ **增強免疫系統** — 22 種 injection pattern 檢測，防禦提示詞注入攻擊
 - 📊 **Web Dashboard** — 6 個分頁完整監控（狀態、日誌、Agent、設定、對話、進化）
 - 🏥 **健康監控系統** — 即時追蹤 Container 隊列、錯誤率、記憶體使用量
+- 🚀 **DevEngine** — 7 階段自動化開發引擎（Analyze → Deploy），支援 REPL 互動與自動化模式 - 📝 **完整文檔系統** — CHANGELOG.md、RELEASE.md 規範化發布流程
 
 ---
 
