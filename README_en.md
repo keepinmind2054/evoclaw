@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  A Gemini-powered AI assistant that runs agents securely in their own containers.<br>
+  A multi-LLM AI assistant that runs agents securely in their own containers.<br>
   Lightweight, 100% Python, built to be easily understood and completely customized.
 </p>
 
@@ -12,7 +12,7 @@
   <a href="https://github.com/KeithKeepGoing/evoclaw">GitHub</a>
 </p>
 
-An AI assistant framework built in Python, powered by Google Gemini API.
+An AI assistant framework built in Python. Supports Gemini, OpenAI-compatible APIs, and Claude.
 Ships with a built-in **evolution engine** that makes the assistant adapt and improve over time.
 
 ---
@@ -40,13 +40,14 @@ Ships with a built-in **evolution engine** that makes the assistant adapt and im
 
 ## What It Does
 
-- Talk to your AI assistant from **Telegram, WhatsApp, Discord, Slack, or Gmail**
+- Talk to your AI assistant from **Telegram, Discord, Slack, Gmail** or **WhatsApp** (optional skill)
 - Every agent session runs in an **isolated Docker container** (secure by design)
-- Powered by **Google Gemini 2.0 Flash**
+- **Multi-LLM**: Gemini 2.0 Flash (default), any OpenAI-compatible API (NVIDIA NIM, Groq, etc.), or Claude
 - **Scheduled tasks** — cron, interval, one-time
+- **Native multi-turn conversation history** — agent remembers recent context across turns
 - **Per-group memory** via `MEMORY.md` files in each group folder
 - **Agent Swarms** — spin up teams of specialized agents that collaborate on complex tasks
-- Available tools: Bash, Read, Write, Edit, send_message, schedule_task, and more
+- Available tools: Bash, Read, Write, Edit, send_message, schedule_task, list_tasks, cancel_task, and more
 - **100% Python** — no Node.js, no TypeScript, no compilation step
 - 🧬 **Evolution Engine** — AI behavior auto-optimizes with use (see below)
 
@@ -68,7 +69,10 @@ The setup wizard handles everything: API keys, Docker, channel registration.
 
 - Python 3.11+
 - Docker
-- A free **Google Gemini API key** from [aistudio.google.com](https://aistudio.google.com)
+- An API key for your chosen LLM:
+  - **Gemini** (default, free tier available): [aistudio.google.com](https://aistudio.google.com) → `GOOGLE_API_KEY`
+  - **OpenAI-compatible** (NVIDIA NIM, Groq, etc.): `OPENAI_API_KEY` + `OPENAI_BASE_URL`
+  - **Claude**: [console.anthropic.com](https://console.anthropic.com) → `ANTHROPIC_API_KEY`
 
 ---
 
@@ -95,14 +99,19 @@ python run.py
 
 ---
 
-## Getting a Free Gemini API Key
+## Getting an API Key
 
+**Gemini (default, free tier):**
 1. Go to [aistudio.google.com](https://aistudio.google.com)
-2. Sign in with your Google account
-3. Click **Get API key** → **Create API key**
-4. Paste it into your `.env` file as `GOOGLE_API_KEY=...`
+2. Sign in with Google → **Get API key** → **Create API key**
+3. Add to `.env`: `GOOGLE_API_KEY=...`
 
-> This is separate from a Gemini Advanced subscription. The free tier has generous limits.
+> Free tier has generous limits. Separate from Gemini Advanced.
+
+**Claude:**
+1. Go to [console.anthropic.com](https://console.anthropic.com)
+2. Create an API key
+3. Add to `.env`: `ANTHROPIC_API_KEY=...` and `LLM_BACKEND=claude`
 
 ---
 
@@ -141,13 +150,13 @@ Enable channels by setting `ENABLED_CHANNELS` in `.env`:
 ENABLED_CHANNELS=telegram,discord,slack
 ```
 
-| Channel | Required Env Vars |
-|---------|------------------|
-| Telegram | `TELEGRAM_BOT_TOKEN` |
-| WhatsApp | `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN` |
-| Slack | `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` |
-| Discord | `DISCORD_BOT_TOKEN` |
-| Gmail | `GMAIL_CREDENTIALS_FILE`, `GMAIL_TOKEN_FILE` |
+| Channel | Required Env Vars | Notes |
+|---------|------------------|-------|
+| Telegram | `TELEGRAM_BOT_TOKEN` | Built-in |
+| Slack | `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` | Built-in |
+| Discord | `DISCORD_BOT_TOKEN` | Built-in |
+| Gmail | `GMAIL_CREDENTIALS_FILE`, `GMAIL_TOKEN_FILE` | Built-in |
+| WhatsApp | `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN` | Optional skill — run `/add-whatsapp` |
 
 See `.env.example` for all available options.
 
@@ -196,8 +205,8 @@ evoclaw/
 │       └── gmail_channel.py      ← Gmail (OAuth2 polling)
 ├── container/
 │   └── agent-runner/
-│       ├── agent.py              ← Gemini 2.0 Flash agent (Python)
-│       └── requirements.txt      ← google-genai
+│       ├── agent.py              ← Multi-LLM agent (Gemini / OpenAI-compatible / Claude)
+│       └── requirements.txt      ← google-genai, openai, anthropic
 ├── skills_engine/                ← Plugin system (apply/uninstall skills)
 ├── scripts/                      ← CLI utility scripts
 └── groups/
@@ -258,8 +267,8 @@ Telegram / WhatsApp / Discord / Slack / Gmail
                     ↓ spawns (with evolution hints)
            Docker Container (isolated per group)
                     ↓ runs
-           agent.py + Gemini 2.0 Flash
-           + tools (Bash, Read, Write, Edit, send_message, schedule_task, ...)
+           agent.py + Gemini / OpenAI-compatible / Claude
+           + tools (Bash, Read, Write, Edit, send_message, schedule_task, list_tasks, cancel_task, ...)
                     ↓
            Fitness recorded → Response routed back to the right channel
 ```
@@ -338,6 +347,13 @@ Yes. Set `GEMINI_MODEL` in your `.env`:
 GEMINI_MODEL=gemini-2.0-flash-exp
 ```
 
+**Can I use Claude or another LLM instead of Gemini?**
+
+Yes. The agent supports three backends:
+- **Gemini** (default) — set `GOOGLE_API_KEY`
+- **OpenAI-compatible** (NVIDIA NIM, Groq, OpenAI, etc.) — set `OPENAI_API_KEY` and `OPENAI_BASE_URL`
+- **Claude** — set `ANTHROPIC_API_KEY` and `LLM_BACKEND=claude`
+
 **How do I debug issues?**
 
 Ask the agent directly in your main channel: "Why isn't the scheduler running?" "What's in the recent logs?" "Why did this message not get a response?"
@@ -346,7 +362,9 @@ Ask the agent directly in your main channel: "Why isn't the scheduler running?" 
 
 ## Credits
 
-- Powered by [Google Gemini](https://ai.google.dev/) API
+- [Google Gemini](https://ai.google.dev/) API
+- [Anthropic Claude](https://www.anthropic.com/) API
+- [OpenAI](https://openai.com/) compatible APIs (NVIDIA NIM, Groq, etc.)
 
 ## License
 
