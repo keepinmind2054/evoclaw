@@ -65,7 +65,8 @@ async def run_task(task: dict, get_group_fn: Callable, run_agent_fn: Callable) -
 
     group = get_group_fn(jid)
     if not group:
-        log.warning(f"Task {task_id}: group not found for JID {jid}")
+        log.warning(f"Task {task_id}: group not found for JID {jid!r} — disabling task")
+        db.update_task(task_id, status="error", last_result=f"Group not found for JID: {jid!r}")
         return
 
     log.info(f"Running task {task_id} for {group_folder}")

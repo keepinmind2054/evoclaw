@@ -55,6 +55,16 @@ def _load_state() -> None:
     if val:
         _last_timestamp = int(val)
 
+def _cleanup_orphan_tasks() -> None:
+    """啟動時清理 chat_jid 為空的孤兒任務（在 chat_jid 修復前建立的舊任務）。"""
+    all_tasks = db.get_all_tasks()
+    bad = [t for t in all_tasks if not t.get("chat_jid", "").strip()]
+    for t in bad:
+        log.warning(f"Removing orphan task {t['id']}: empty chat_jid")
+        db.delete_task(t["id"])
+    if bad:
+        log.info(f"Cleaned up {len(bad)} orphan task(s) with missing chat_jid")
+
 def _get_groups() -> list[dict]:
     """回傳目前登記的群組清單，供 IPC watcher 等元件查詢。"""
     return _registered_groups
@@ -249,6 +259,7 @@ async def main() -> None:
     db_path = config.STORE_DIR / "messages.db"
     db.init_database(db_path)
     _load_state()
+    _cleanup_orphan_tasks()  # ← add this line
 
     # 從設定檔載入允許傳訊的發送者白名單
     _sender_allowlist = load_sender_allowlist()
