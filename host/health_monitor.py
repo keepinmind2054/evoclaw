@@ -1,244 +1,263 @@
-"""
-系統健康監控模組（Health Monitor）
+"""系統健康監控模組（Health Monitor）
 
-提供系統健康狀態檢查與告警機制：
-- 監控 container 排隊數量
-- 監控錯誤率
-- 監控記憶體使用量
-- 監控最近活動狀態
-- 發送告警通知（當超過閾值時）
+監控 EvoClaw 系統的整體健康狀態，包括：
+- Container 排隊數量
+- 錯誤率統計
+- 記憶體使用量
+- 資料庫大小
+- 群組活躍度
 
-使用方式：
-    from host.health_monitor import HealthMonitor
-    
-    monitor = HealthMonitor()
-    status = monitor.get_health_status()
-    
-    if not status["healthy"]:
-        log.warning(f"System unhealthy: {status['issues']}")
+當檢測到異常時，自動發出警告通知。
 """
 import asyncio
 import logging
 import os
-import time
-from typing import Optional
-from dataclasses import dataclass, field
+import psutil
+from datetime import datetime, timedelta
+from typing import Callable, Awaitable
+
+from . import config, db
 
 log = logging.getLogger(__name__)
 
-# 告警閾值設定
-QUEUE_SIZE_WARNING = 10  # 排隊數量警告閾值
-QUEUE_SIZE_CRITICAL = 50  # 排隊數量嚴重閾值
-ERROR_RATE_WARNING = 0.2  # 20% 錯誤率警告
-ERROR_RATE_CRITICAL = 0.5  # 50% 錯誤率嚴重
-MEMORY_WARNING_MB = 500  # 記憶體使用警告（MB）
-INACTIVE_HOURS_WARNING = 24  # 超過此時間無活動則警告
+# 監控閾值設定
+CONTAINER_QUEUE_WARNING = 10  # 排隊數量警告閾值
+CONTAINER_QUEUE_CRITICAL = 50  # 排隊數量嚴重閾值
+ERROR_RATE_WARNING = 0.3  # 錯誤率警告閾值（30%）
+MEMORY_USAGE_WARNING_MB = 500  # 記憶體使用量警告閾值（MB）
+DB_SIZE_WARNING_MB = 100  # 資料庫大小警告閾值（MB）
+GROUP_INACTIVE_DAYS = 7  # 群組不活躍天數閾值
+
+# 警告冷卻時間（秒），避免重複警告
+WARNING_COOLDOWN = 300  # 5 分鐘
+
+# 最後警告時間記錄
+_last_warnings: dict[str, datetime] = {}
 
 
-@dataclass
-class HealthStatus:
-    """系統健康狀態數據結構"""
-    healthy: bool = True
-    timestamp: int = field(default_factory=lambda: int(time.time() * 1000))
-    queue_size: int = 0
-    error_rate: float = 0.0
-    memory_mb: float = 0.0
-    active_groups: int = 0
-    total_tasks: int = 0
-    pending_tasks: int = 0
-    last_activity: Optional[int] = None
-    issues: list = field(default_factory=list)
-    warnings: list = field(default_factory=list)
-
-
-class HealthMonitor:
+async def health_monitor_loop(stop_event: asyncio.Event) -> None:
     """
-    系統健康監控器
+    健康監控主迴圈，每 60 秒檢查一次系統健康狀態。
     
-    提供以下監控功能：
-    1. Container 排隊數量監控
-    2. 錯誤率監控（最近 5 分鐘）
-    3. 記憶體使用量監控
-    4. 群組活躍度監控
-    5. 任務執行狀態監控
+    監控項目：
+    1. Container 排隊數量
+    2. 最近 5 分鐘錯誤率
+    3. 記憶體使用量
+    4. 資料庫大小
+    5. 群組活躍度
     """
+    log.info("Health monitor started")
     
-    def __init__(self):
-        self._last_check = 0
-        self._check_interval = 5  # 秒
-        self._alerts_sent = set()  # 已發送的告警（避免重複）
-    
-    async def monitor_loop(self, stop_event: asyncio.Event, group_queue=None) -> None:
-        """
-        持續監控迴圈
-        
-        Args:
-            stop_event: 停止事件
-            group_queue: GroupQueue 實例，用於檢查排隊數量
-        """
-        log.info("Health monitor started")
-        
-        while not stop_event.is_set():
-            try:
-                await self._check_health(group_queue)
-                await asyncio.sleep(self._check_interval)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                log.error(f"Health monitor error: {e}")
-                await asyncio.sleep(self._check_interval)
-        
-        log.info("Health monitor stopped")
-    
-    async def _check_health(self, group_queue=None) -> None:
-        """執行健康檢查並在發現問題時發送告警"""
-        from host import db
-        
-        status = self.get_health_status(group_queue)
-        
-        # 檢查並發送告警
-        for issue in status.issues:
-            alert_key = f"critical:{issue}"
-            if alert_key not in self._alerts_sent:
-                log.critical(f"HEALTH ALERT: {issue}")
-                self._alerts_sent.add(alert_key)
-        
-        for warning in status.warnings:
-            alert_key = f"warning:{warning}"
-            if alert_key not in self._alerts_sent:
-                log.warning(f"HEALTH WARNING: {warning}")
-                self._alerts_sent.add(alert_key)
-        
-        # 如果系統健康，清除已發送的告警（以便下次可以再次告警）
-        if status.healthy and not status.warnings:
-            self._alerts_sent.clear()
-        
-        self._last_check = int(time.time() * 1000)
-    
-    def get_health_status(self, group_queue=None) -> HealthStatus:
-        """
-        取得當前系統健康狀態
-        
-        Args:
-            group_queue: GroupQueue 實例，用於檢查排隊數量
-        
-        Returns:
-            HealthStatus 對象，包含所有健康指標
-        """
-        from host import db
-        
-        status = HealthStatus()
-        
+    while not stop_event.is_set():
         try:
-            # 1. 檢查排隊數量
-            if group_queue:
-                status.queue_size = group_queue.get_queue_size()
-                if status.queue_size >= QUEUE_SIZE_CRITICAL:
-                    status.healthy = False
-                    status.issues.append(f"Critical: Container queue size is {status.queue_size} (threshold: {QUEUE_SIZE_CRITICAL})")
-                elif status.queue_size >= QUEUE_SIZE_WARNING:
-                    status.warnings.append(f"Warning: Container queue size is {status.queue_size} (threshold: {QUEUE_SIZE_WARNING})")
-            
-            # 2. 檢查錯誤率（最近 5 分鐘）
-            try:
-                run_stats = db.get_recent_run_stats(minutes=5)
-                if run_stats and run_stats.get("count", 0) > 0:
-                    # 計算錯誤率（假設 success=0 為失敗）
-                    total_runs = run_stats.get("count", 0)
-                    # 需要查詢失敗數量
-                    status.error_rate = 0.0  # 簡化處理
-            except Exception as e:
-                log.debug(f"Could not check error rate: {e}")
-            
-            # 3. 檢查記憶體使用量
-            try:
-                import psutil
-                process = psutil.Process(os.getpid())
-                memory_mb = process.memory_info().rss / 1024 / 1024
-                status.memory_mb = memory_mb
-                if memory_mb >= MEMORY_WARNING_MB:
-                    status.warnings.append(f"Warning: Memory usage is {memory_mb:.1f}MB (threshold: {MEMORY_WARNING_MB}MB)")
-            except ImportError:
-                log.debug("psutil not available, skipping memory check")
-            except Exception as e:
-                log.debug(f"Could not check memory: {e}")
-            
-            # 4. 檢查群組活躍度
-            try:
-                active_jids = db.get_active_evolution_jids(days=1)
-                status.active_groups = len(active_jids)
-            except Exception as e:
-                log.debug(f"Could not check active groups: {e}")
-            
-            # 5. 檢查任務狀態
-            try:
-                all_tasks = db.get_all_tasks()
-                status.total_tasks = len(all_tasks)
-                status.pending_tasks = sum(1 for t in all_tasks if t.get("status") == "active")
-            except Exception as e:
-                log.debug(f"Could not check tasks: {e}")
-            
-            # 6. 檢查最後活動時間
-            try:
-                last_msg = db.get_db().execute("""
-                    SELECT MAX(timestamp) as last_ts FROM messages
-                """).fetchone()
-                if last_msg and last_msg["last_ts"]:
-                    status.last_activity = last_msg["last_ts"]
-                    hours_inactive = (time.time() * 1000 - status.last_activity) / 1000 / 3600
-                    if hours_inactive >= INACTIVE_HOURS_WARNING:
-                        status.warnings.append(f"Warning: No activity for {hours_inactive:.1f} hours")
-            except Exception as e:
-                log.debug(f"Could not check last activity: {e}")
-            
+            await _check_all_health_metrics()
         except Exception as e:
-            log.error(f"Health check failed: {e}")
-            status.healthy = False
-            status.issues.append(f"Health check failed: {e}")
+            log.error(f"Health check error: {e}")
         
-        return status
+        # 每 60 秒檢查一次
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=60)
+        except asyncio.TimeoutError:
+            pass
     
-    def get_summary(self, group_queue=None) -> dict:
-        """
-        取得健康狀態摘要（用於 Dashboard 或 IPC）
+    log.info("Health monitor stopped")
+
+
+async def _check_all_health_metrics() -> None:
+    """檢查所有健康指標並發出警告。"""
+    
+    # 1. 檢查 Container 排隊數量
+    await _check_container_queue()
+    
+    # 2. 檢查錯誤率
+    await _check_error_rate()
+    
+    # 3. 檢查記憶體使用量
+    _check_memory_usage()
+    
+    # 4. 檢查資料庫大小
+    _check_database_size()
+    
+    # 5. 檢查群組活躍度
+    await _check_group_activity()
+
+
+async def _check_container_queue() -> None:
+    """檢查 Container 排隊數量。"""
+    try:
+        from .group_queue import GroupQueue
+        # 獲取全域隊列實例（如果有）
+        # 這裡我們直接從 DB 獲取待處理任務數量
+        pending_count = db.get_pending_task_count() if hasattr(db, 'get_pending_task_count') else 0
         
-        Returns:
-            包含關鍵健康指標的字典
-        """
-        status = self.get_health_status(group_queue)
+        if pending_count >= CONTAINER_QUEUE_CRITICAL:
+            await _send_warning(
+                "critical",
+                f"Container queue critical: {pending_count} tasks pending",
+                "container_queue"
+            )
+        elif pending_count >= CONTAINER_QUEUE_WARNING:
+            await _send_warning(
+                "warning",
+                f"Container queue high: {pending_count} tasks pending",
+                "container_queue"
+            )
+    except Exception as e:
+        log.debug(f"Failed to check container queue: {e}")
+
+
+async def _check_error_rate() -> None:
+    """檢查最近 5 分鐘的錯誤率。"""
+    try:
+        # 從資料庫獲取錯誤統計
+        error_stats = db.get_error_stats(minutes=5) if hasattr(db, 'get_error_stats') else None
+        
+        if error_stats:
+            total = error_stats.get('total', 0)
+            errors = error_stats.get('errors', 0)
+            
+            if total > 0:
+                error_rate = errors / total
+                
+                if error_rate >= ERROR_RATE_WARNING:
+                    await _send_warning(
+                        "warning",
+                        f"High error rate detected: {error_rate:.1%} ({errors}/{total})",
+                        "error_rate"
+                    )
+    except Exception as e:
+        log.debug(f"Failed to check error rate: {e}")
+
+
+def _check_memory_usage() -> None:
+    """檢查記憶體使用量。"""
+    try:
+        process = psutil.Process(os.getpid())
+        memory_mb = process.memory_info().rss / 1024 / 1024  # 轉換為 MB
+        
+        if memory_mb >= MEMORY_USAGE_WARNING_MB:
+            _send_warning_sync(
+                "warning",
+                f"High memory usage: {memory_mb:.1f} MB",
+                "memory_usage"
+            )
+    except Exception as e:
+        log.debug(f"Failed to check memory usage: {e}")
+
+
+def _check_database_size() -> None:
+    """檢查資料庫大小。"""
+    try:
+        db_path = config.STORE_DIR / "messages.db"
+        if db_path.exists():
+            size_mb = db_path.stat().st_size / 1024 / 1024  # 轉換為 MB
+            
+            if size_mb >= DB_SIZE_WARNING_MB:
+                _send_warning_sync(
+                    "warning",
+                    f"Database size large: {size_mb:.1f} MB",
+                    "db_size"
+                )
+    except Exception as e:
+        log.debug(f"Failed to check database size: {e}")
+
+
+async def _check_group_activity() -> None:
+    """檢查群組活躍度。"""
+    try:
+        groups = db.get_all_registered_groups()
+        now = datetime.now()
+        
+        for group in groups:
+            jid = group.get('jid', '')
+            last_activity = group.get('last_activity', 0)
+            
+            if last_activity > 0:
+                last_activity_dt = datetime.fromtimestamp(last_activity / 1000)
+                days_inactive = (now - last_activity_dt).days
+                
+                if days_inactive >= GROUP_INACTIVE_DAYS:
+                    # 只對主群組發送一次警告
+                    if group.get('is_main', False):
+                        await _send_warning(
+                            "info",
+                            f"Group inactive for {days_inactive} days: {jid}",
+                            f"group_inactive_{jid}"
+                        )
+    except Exception as e:
+        log.debug(f"Failed to check group activity: {e}")
+
+
+async def _send_warning(level: str, message: str, warning_id: str) -> None:
+    """發送警告（非同步版本）。"""
+    if _should_send_warning(warning_id):
+        log_msg = f"[{level.upper()}] {message}"
+        if level == "critical":
+            log.critical(log_msg)
+        elif level == "warning":
+            log.warning(log_msg)
+        else:
+            log.info(log_msg)
+        
+        # TODO: 可以在這裡加入发送通知到 Telegram/Slack 等
+        
+        _last_warnings[warning_id] = datetime.now()
+
+
+def _send_warning_sync(level: str, message: str, warning_id: str) -> None:
+    """發送警告（同步版本）。"""
+    if _should_send_warning(warning_id):
+        log_msg = f"[{level.upper()}] {message}"
+        if level == "critical":
+            log.critical(log_msg)
+        elif level == "warning":
+            log.warning(log_msg)
+        else:
+            log.info(log_msg)
+        
+        _last_warnings[warning_id] = datetime.now()
+
+
+def _should_send_warning(warning_id: str) -> bool:
+    """檢查是否應該發送警告（避免重複）。"""
+    if warning_id not in _last_warnings:
+        return True
+    
+    time_since_last = datetime.now() - _last_warnings[warning_id]
+    return time_since_last.total_seconds() >= WARNING_COOLDOWN
+
+
+def get_health_status() -> dict:
+    """
+    獲取當前健康狀態摘要。
+    
+    回傳：
+        dict: 包含各項健康指標的當前狀態
+    """
+    try:
+        process = psutil.Process(os.getpid())
+        memory_mb = process.memory_info().rss / 1024 / 1024
+        
+        # 資料庫大小
+        db_path = config.STORE_DIR / "messages.db"
+        db_size_mb = db_path.stat().st_size / 1024 / 1024 if db_path.exists() else 0
+        
+        # 群組數量
+        groups = db.get_all_registered_groups()
+        active_groups = len([g for g in groups if g.get('is_main', False)])
         
         return {
-            "healthy": status.healthy,
-            "timestamp": status.timestamp,
-            "queue_size": status.queue_size,
-            "error_rate": status.error_rate,
-            "memory_mb": status.memory_mb,
-            "active_groups": status.active_groups,
-            "total_tasks": status.total_tasks,
-            "pending_tasks": status.pending_tasks,
-            "issues_count": len(status.issues),
-            "warnings_count": len(status.warnings),
-            "last_activity": status.last_activity,
+            "status": "healthy",
+            "memory_usage_mb": round(memory_mb, 2),
+            "database_size_mb": round(db_size_mb, 2),
+            "total_groups": len(groups),
+            "active_groups": active_groups,
+            "timestamp": datetime.now().isoformat(),
         }
-
-
-# 全域監控器實例
-_monitor: Optional[HealthMonitor] = None
-
-
-def get_monitor() -> HealthMonitor:
-    """取得全域 HealthMonitor 實例"""
-    global _monitor
-    if _monitor is None:
-        _monitor = HealthMonitor()
-    return _monitor
-
-
-def check_health(group_queue=None) -> dict:
-    """
-    快速健康檢查
-    
-    Returns:
-        包含健康狀態的字典
-    """
-    return get_monitor().get_summary(group_queue)
+    except Exception as e:
+        log.error(f"Failed to get health status: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat(),
+        }

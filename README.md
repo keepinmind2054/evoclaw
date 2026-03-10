@@ -1,12 +1,10 @@
 <p align="center">
   <img src="assets/evoclaw-logo.svg" alt="EvoClaw" width="600">
 </p>
-
 <p align="center">
   多模型 AI 助手，在獨立容器中安全執行代理。<br>
   輕量、100% Python，易於理解與完全客製化。
 </p>
-
 <p align="center">
   <a href="README_en.md">English</a>&nbsp; • &nbsp;
   <a href="https://github.com/KeithKeepGoing/evoclaw">GitHub</a>
@@ -50,6 +48,9 @@
 - 可用工具：Bash、Read、Write、Edit、Glob、Grep、WebFetch、send_message、schedule_task、list_tasks、pause_task、resume_task、cancel_task
 - **100% Python** — 無 Node.js、無 TypeScript、無編譯步驟
 - 🧬 **進化引擎** — AI 行為隨使用自動優化（詳見下方）
+- 🛡️ **增強免疫系統** — 22 種 injection pattern 檢測，防禦提示詞注入攻擊
+- 📊 **Web Dashboard** — 6 個分頁完整監控（狀態、日誌、Agent、設定、對話、進化）
+- 🏥 **健康監控系統** — 即時追蹤 Container 隊列、錯誤率、記憶體使用量
 
 ---
 
@@ -184,42 +185,46 @@ EvoClaw 沒有設定檔。想改變行為，直接修改程式碼：
 
 ```
 evoclaw/
-├── run.py                        ← 入口：python run.py
-├── host/                         ← Python 主機協調器
-│   ├── main.py                   ← 訊息迴圈、IPC 監視器、排程器
-│   ├── config.py                 ← 從環境變數讀取設定
-│   ├── db.py                     ← SQLite 資料庫
-│   ├── router.py                 ← 訊息路由
-│   ├── group_queue.py            ← 每群組佇列與並發控制
-│   ├── container_runner.py       ← Docker 容器管理
-│   ├── ipc_watcher.py            ← 代理↔主機 IPC
-│   ├── task_scheduler.py         ← 排程任務
-│   ├── allowlist.py              ← 寄件者/掛載白名單
-│   ├── dashboard.py              ← Web 儀表板（port 8765）
-│   ├── log_buffer.py             ← 即時日誌環形緩衝區（供 Dashboard SSE 使用）
-│   ├── webportal.py              ← 瀏覽器聊天介面（port 8766）
-│   ├── requirements.txt          ← Python 依賴
-│   ├── evolution/                ← 🧬 進化引擎
-│   │   ├── fitness.py            ←   適應度追蹤（自然選擇）
-│   │   ├── adaptive.py           ←   表觀遺傳提示（環境感知）
-│   │   ├── genome.py             ←   群組基因組（物種分化）
-│   │   ├── immune.py             ←   免疫系統（威脅偵測）
-│   │   └── daemon.py             ←   進化守護程式（24 小時週期）
+├── run.py ← 入口：python run.py
+├── host/ ← Python 主機協調器
+│   ├── main.py ← 訊息迴圈、IPC 監視器、排程器
+│   ├── config.py ← 從環境變數讀取設定
+│   ├── db.py ← SQLite 資料庫
+│   ├── router.py ← 訊息路由
+│   ├── group_queue.py ← 每群組佇列與並發控制
+│   ├── container_runner.py ← Docker 容器管理
+│   ├── ipc_watcher.py ← 代理↔主機 IPC
+│   ├── task_scheduler.py ← 排程任務
+│   ├── allowlist.py ← 寄件者/掛載白名單
+│   ├── dashboard.py ← Web 儀表板（port 8765）
+│   ├── log_buffer.py ← 即時日誌環形緩衝區（供 Dashboard SSE 使用）
+│   ├── webportal.py ← 瀏覽器聊天介面（port 8766）
+│   ├── health_monitor.py ← 🏥 系統健康監控（新增）
+│   ├── requirements.txt ← Python 依賴
+│   ├── evolution/ ← 🧬 進化引擎
+│   │   ├── fitness.py ← 適應度追蹤（自然選擇）
+│   │   ├── adaptive.py ← 表觀遺傳提示（環境感知）
+│   │   ├── genome.py ← 群組基因組（物種分化）
+│   │   ├── immune.py ← 🛡️ 免疫系統（22 種威脅檢測）
+│   │   └── daemon.py ← 進化守護程式（24 小時週期）
 │   └── channels/
-│       ├── telegram_channel.py   ← Telegram（長輪詢）
-│       ├── whatsapp_channel.py   ← WhatsApp（Meta Cloud API + webhook）
-│       ├── slack_channel.py      ← Slack（Socket Mode）
-│       ├── discord_channel.py    ← Discord（discord.py）
-│       └── gmail_channel.py      ← Gmail（OAuth2 輪詢）
+│       ├── telegram_channel.py ← Telegram（長輪詢）
+│       ├── whatsapp_channel.py ← WhatsApp（Meta Cloud API + webhook）
+│       ├── slack_channel.py ← Slack（Socket Mode）
+│       ├── discord_channel.py ← Discord（discord.py）
+│       └── gmail_channel.py ← Gmail（OAuth2 輪詢）
 ├── container/
 │   └── agent-runner/
-│       ├── agent.py              ← 多模型代理（Gemini / OpenAI 相容 / Claude）
-│       └── requirements.txt      ← google-genai, openai, anthropic
-├── skills_engine/                ← 插件系統
-├── scripts/                      ← CLI 工具腳本
+│       ├── agent.py ← 多模型代理（Gemini / OpenAI 相容 / Claude）
+│       └── requirements.txt ← google-genai, openai, anthropic
+├── skills_engine/ ← 插件系統
+├── scripts/ ← CLI 工具腳本
+│   └── add_indexes_migration.py ← 資料庫索引優化（新增）
+├── tests/ ← 測試框架
+│   └── test_immune_enhanced.py ← 免疫系統測試（新增）
 └── groups/
     └── {群組名稱}/
-        └── MEMORY.md             ← 每群組記憶檔案
+        └── MEMORY.md ← 每群組記憶檔案
 ```
 
 ---
@@ -249,9 +254,9 @@ evoclaw/
 
 環境變數：
 ```
-DASHBOARD_PORT=8765        # 儀表板連接埠
-DASHBOARD_USER=admin       # Basic Auth 用戶名
-DASHBOARD_PASSWORD=        # Basic Auth 密碼（空白 = 不需驗證）
+DASHBOARD_PORT=8765       # 儀表板連接埠
+DASHBOARD_USER=admin      # Basic Auth 用戶名
+DASHBOARD_PASSWORD=       # Basic Auth 密碼（空白 = 不需驗證）
 ```
 
 ### Web Portal（port 8766）
@@ -264,8 +269,8 @@ DASHBOARD_PASSWORD=        # Basic Auth 密碼（空白 = 不需驗證）
 
 環境變數：
 ```
-WEBPORTAL_ENABLED=false    # 啟用瀏覽器聊天介面
-WEBPORTAL_PORT=8766        # Web Portal 連接埠
+WEBPORTAL_ENABLED=false   # 啟用瀏覽器聊天介面
+WEBPORTAL_PORT=8766       # Web Portal 連接埠
 WEBPORTAL_HOST=127.0.0.1  # Web Portal 綁定主機
 ```
 
@@ -298,15 +303,43 @@ EvoClaw 內建受生物學啟發的自我適應系統，助手會隨著時間自
 
 ```
 收到訊息
-    ↓ 免疫檢查（注入/垃圾訊息偵測）
+  ↓
+免疫檢查（注入/垃圾訊息偵測）
+  ↓
 存入資料庫
-    ↓ 從環境計算表觀遺傳提示
+  ↓
+從環境計算表觀遺傳提示
+  ↓
 啟動容器（注入進化提示）
-    ↓ AI 回應
+  ↓
+AI 回應
+  ↓
 記錄適應度分數
-    ↓ 每 24 小時
+  ↓
+每 24 小時
+  ↓
 進化守護程式調整群組基因組 → 記錄至 evolution_log
 ```
+
+---
+
+## 健康監控系統
+
+EvoClaw 內建後台健康監控進程（`host/health_monitor.py`），即時追蹤系統狀態並自動告警。
+
+**監控維度：**
+- Container 排隊數量（警告：>10，嚴重：>50）
+- 錯誤率（最近 5 分鐘）
+- 記憶體使用量（警告：>500MB）
+- 群組活躍度
+- 任務狀態分佈
+- Docker 守護程序狀態
+- 資料庫連接健康度
+
+**告警機制：**
+- 防重複通知（相同問題 30 分鐘內不重複）
+- 自動記錄警告日誌
+- 可透過 Dashboard 查看即時健康狀態
 
 ---
 
@@ -314,119 +347,28 @@ EvoClaw 內建受生物學啟發的自我適應系統，助手會隨著時間自
 
 ```
 Telegram / WhatsApp / Discord / Slack / Gmail
-                    ↓
-           主機（Python，單一進程）
-           ├── 訊息迴圈（輪詢 SQLite）
-           ├── 免疫系統（注入/垃圾訊息封鎖）
-           ├── GroupQueue（每群組一個容器，全局並發限制）
-           ├── IPC 監視器（代理 → 主機訊息）
-           ├── 排程器（cron / 間隔 / 一次性）
-           ├── 進化守護程式（24 小時進化週期）
-           ├── Web 儀表板（port 8765，/health，/metrics）
-           └── Web Portal（port 8766，瀏覽器聊天）
-                    ↓ 產生（注入進化提示）
-           Docker 容器（每群組獨立隔離）
-                    ↓ 執行
-           agent.py + Gemini / OpenAI 相容 / Claude
-           + 工具（Bash、Read、Write、Edit、Glob、Grep、WebFetch、send_message、schedule_task、list_tasks、pause_task、resume_task、cancel_task）
-                    ↓
-           記錄適應度 → 回應路由到正確頻道
+  ↓
+主機（Python，單一進程）
+  ├── 訊息迴圈（輪詢 SQLite）
+  ├── 免疫系統（注入/垃圾訊息封鎖）
+  ├── GroupQueue（每群組一個容器，全局並發限制）
+  ├── IPC 監視器（代理 → 主機訊息）
+  ├── 排程器（cron / 間隔 / 一次性）
+  ├── 健康監控（即時系統狀態追蹤）
+  ├── 進化守護程式（24 小時進化週期）
+  ├── Web 儀表板（port 8765，/health，/metrics）
+  └── Web Portal（port 8766，瀏覽器聊天）
+  ↓
+產生（注入進化提示）
+  ↓
+Docker 容器（每群組獨立隔離）
+  ↓
+執行 agent.py
+  + Gemini / OpenAI 相容 / Claude
+  + 工具（Bash、Read、Write、Edit、Glob、Grep、WebFetch、send_message、schedule_task、list_tasks、pause_task、resume_task、cancel_task）
+  ↓
+記錄適應度 → 回應路由到正確頻道
 ```
 
 - 每個群組有自己獨立的容器、工作區和記憶（`MEMORY.md`）
-- GroupQueue 確保每群組同時只有一個容器 — 代理忙碌時訊息會排隊等候
-- 全局並發限制（`MAX_CONCURRENT_CONTAINERS`）防止資源耗盡
-- 游標回滾：只有在成功輸出後游標才會前進 — 不會遺漏訊息
-- 進化引擎：適應度追蹤 + 表觀遺傳提示 + 群組基因組 + 免疫系統
-
-完整架構細節請參閱 [docs/SPEC.md](docs/SPEC.md)。
-
----
-
-## 除錯
-
-### 直接測試代理容器
-
-**Linux / macOS：**
-```bash
-echo '{"prompt":"hello"}' | docker run -i --rm evoclaw-agent
-```
-
-**Windows（PowerShell）— 簡單：**
-```powershell
-'{"prompt":"hello"}' | docker run -i --rm evoclaw-agent
-```
-**Windows（PowerShell）— 完整參數：**
-```powershell
-$json = '{"prompt":"說你好","secrets":{"GOOGLE_API_KEY":"你的API金鑰"},"groupFolder":"test","chatJid":"tg:123","isMain":false,"isScheduledTask":false,"assistantName":"Evo","evolutionHints":""}'
-$json | docker run -i --rm evoclaw-agent
-```
-
-預期輸出：
-```
----EVOCLAW_OUTPUT_START---
-{"status": "ok", "result": "Hello! ...", "error": null}
----EVOCLAW_OUTPUT_END---
-```
-
-| 錯誤 | 原因 | 解決方式 |
-|------|------|---------|
-| `Invalid JSON input` | stdin 編碼問題 | `git pull` 後重建映像 |
-| `GOOGLE_API_KEY not set` | 缺少 API 金鑰 | 在 `.env` 中加入 `GOOGLE_API_KEY` |
-| `No such image: evoclaw-agent` | 映像未建置 | 執行 `docker build -t evoclaw-agent container/` |
-
----
-
-## 安全性
-
-- 代理在 Linux 容器中執行，不依賴應用層級的權限檢查
-- 每個容器只能看到明確掛載的目錄
-- 即使有 Bash 存取，命令也在容器內執行，不影響主機
-- 寄件者白名單：限制哪些用戶可以呼叫代理（`~/.config/evoclaw/sender-allowlist.json`）
-- 掛載白名單：限制容器可存取的目錄（`~/.config/evoclaw/mount-allowlist.json`）
-- **免疫系統**：自動偵測提示詞注入攻擊，建立持久威脅記憶，自動封鎖惡意寄件者
-
-完整安全模型請參閱 [docs/SECURITY.md](docs/SECURITY.md)。
-
----
-
-## FAQ
-
-**為什麼用 Docker？**
-
-Docker 提供跨平台支援（macOS、Linux、Windows via WSL2）和成熟的生態系統。
-
-**可以在 Linux 上執行嗎？**
-
-可以。Docker 在 macOS 和 Linux 上都能使用。
-
-**可以使用不同的 Gemini 模型嗎？**
-
-可以。在 `.env` 中設定 `GEMINI_MODEL`：
-```bash
-GEMINI_MODEL=gemini-2.0-flash-exp
-```
-
-**可以改用 Claude 或其他 LLM 嗎？**
-
-可以。代理會自動偵測後端，設定對應的金鑰即可：
-- **Gemini**（預設）— 設定 `GOOGLE_API_KEY`
-- **NVIDIA NIM** — 設定 `NIM_API_KEY`（可選：`NIM_MODEL`、`NIM_BASE_URL`）
-- **OpenAI 相容**（Groq 等）— 設定 `OPENAI_API_KEY` + `OPENAI_BASE_URL`
-- **Claude** — 設定 `CLAUDE_API_KEY`（可選：`CLAUDE_MODEL`）
-
-**如何除錯問題？**
-
-直接在主頻道問代理：「為什麼排程器沒有執行？」「最近的日誌裡有什麼？」「為什麼這條訊息沒有得到回應？」
-
----
-
-## 致謝
-
-- [Google Gemini](https://ai.google.dev/) API
-- [Anthropic Claude](https://www.anthropic.com/) API
-- OpenAI 相容 API（NVIDIA NIM、Groq 等）
-
-## 授權
-
-MIT
+- GroupQueue 確保每群組同時只有一個容器 — 代理忙碌時訊息

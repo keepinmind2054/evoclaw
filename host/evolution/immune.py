@@ -1,5 +1,5 @@
-"""
-免疫系統模組（Immune System）
+"""免疫系統模組（Immune System）
+
 生物的免疫系統能識別「非自身」的入侵者（病毒、細菌），
 並在初次接觸後形成「記憶」，下次遇到相同威脅時快速反應。
 
@@ -25,7 +25,6 @@ log = logging.getLogger(__name__)
 # 這些是常見的 LLM 越獄攻擊手法，用正規表達式匹配
 # 故意保持保守（只匹配明確惡意的模式），減少誤判
 # 涵蓋英文與中文兩種攻擊語言
-
 INJECTION_PATTERNS = [
     # ── 英文攻擊模式 ──────────────────────────────────────────────────────────
     r"ignore\s+(all\s+)?(previous|prior|above)\s+instructions?",
@@ -42,19 +41,41 @@ INJECTION_PATTERNS = [
     r"bypass\s+(all\s+)?(restrictions?|rules?|safety)",
     r"enter\s+(developer|debug|admin)\s+mode",
     r"switch\s+to\s+(developer|debug|admin)\s+mode",
+    # 新增：更多英文攻擊變體
+    r"override\s+(your\s+)?(previous|prior)\s+instructions?",
+    r"from\s+now\s+on\s+(you\s+are|you\s+will)",
+    r"pretend\s+to\s+be\s+(a\s+|an\s+)?\w+",
+    r"roleplay\s+as\s+(a\s+|an\s+)?\w+",
+    r"comply\s+with\s+the\s+following\s+rules",
+    r"here\s+is\s+the\s+new\s+system\s+prompt",
+    r"you\s+must\s+follow\s+these\s+new\s+instructions",
+    r"safety\s+protocols?\s+(are\s+)?(disabled|off|ignored)",
+    r"ethics?\s+(are\s+)?(disabled|off|ignored)",
+    r"no\s+(limits?|restrictions?|rules?)",
     
-    # ── 中文攻擊模式 ──────────────────────────────────────────────────────────
-    r"忽略.{0,15}(之前 | 前面 | 以前 | 先前 | 上面).{0,15}(指令 | 設定 | 規則 | 限制 | 提示)",
-    r"(忘記 | 忘掉 | 拋棄 | 丟掉).{0,15}(規則 | 限制 | 指令 | 設定 | 約束)",
-    r"(現在 | 從現在起 | 你現在).{0,10}(是個？| 變成 | 扮演).{0,15}(沒有限制 | 不受限 | 無限制)",
-    r"(越獄 | 破解 | 繞過).{0,10}(限制 | 規則 | 設定 | 系統)",
-    r"新的.{0,5}系統.{0,5}(提示 | 指令 | 設定)\s*[:：]",
-    r"假裝.{0,10}(沒有 | 不受 | 無視).{0,10}(限制 | 規則 | 指令)",
-    r"你 (現在 | 已經)(不是 | 不再是).{0,10}(AI|助手 | 模型)",
-    r"(解除 | 關閉 | 停用).{0,10}(安全 | 限制 | 審查)",
-    r"(進入 | 切換).{0,10}(開發者 | 管理員 | 調試).{0,10}(模式 | 狀態)",
-    r"不要遵守.{0,10}(規則 | 限制 | 指引)",
-    r"無視.{0,10}(所有 | 之前的 | 先前的).{0,10}(指示 | 命令 | 要求)",
+    # ── 中文攻擊模式（使用簡單關鍵詞匹配）────────────────────────────────────
+    r"忽略.*(?:之前 | 前面 | 以前 | 先前 | 上面).*?(?:指令 | 設定 | 規則 | 限制 | 提示)",
+    r"(?:忘记 | 忘掉 | 拋棄 | 丢掉).*?(?:規則 | 限制 | 指令 | 設定 | 約束)",
+    r"(?:現在 | 从現在起 | 你現在).*?(?:没有限制 | 不受限 | 無限制)",
+    r"(?:越獄 | 破解 | 繞過).*?(?:限制 | 規則 | 設定 | 系統)",
+    r"新的.*?(?:系統 | 系统).*?(?:提示 | 指令 | 設定)",
+    r"假裝.*?(?:沒有 | 不受 | 無視).*?(?:限制 | 規則 | 指令)",
+    r"你.*?(?:不是 | 不再是).*?(?:AI|助手 | 模型)",
+    r"(?:解除 | 關閉 | 停用).*?(?:安全 | 限制 | 審查)",
+    r"(?:进入 | 切換).*?(?:開發者 | 管理員 | 調試).*?(?:模式 | 狀態)",
+    r"不要遵守.*?(?:規則 | 限制 | 指引)",
+    r"無視.*?(?:所有 | 之前的 | 先前的).*?(?:指示 | 命令 | 要求)",
+    # 新增：更多中文攻擊變體
+    r"覆蓋.*?(?:之前 | 先前).*?(?:指令 | 規則 | 設定)",
+    r"从現在開始.*?(?:你是 | 你將)",
+    r"假扮.*?(?:沒有 | 不受).*?(?:限制 | 約束)",
+    r"角色扮演.*?(?:沒有 | 不受).*?(?:限制 | 約束)",
+    r"遵守.*?(?:以下 | 這些).*?(?:新規則 | 新指令 | 新設定)",
+    r"這是.*?(?:新的 | 更新後).*?(?:系統 | 系统).*?(?:提示 | 指令 | 設定)",
+    r"你必須.*?(?:遵循 | 遵守).*?(?:這些 | 以下).*?(?:新指令 | 新規則)",
+    r"安全.*?(?:機制 | 協議 | 限制).*?(?:已 | 被).*?(?:關閉 | 停用 | 無效)",
+    r"道德.*?(?:規範 | 限制).*?(?:已 | 被).*?(?:關閉 | 停用 | 無效)",
+    r"沒有.*?(?:任何 | 什麼).*?(?:限制 | 約束 | 規範)",
 ]
 
 # 預先編譯正規表達式以提升效能（每次請求都會呼叫）
@@ -71,36 +92,38 @@ THREAT_BLOCK_THRESHOLD = 5
 def check_message(content: str, sender_jid: str) -> tuple[bool, Optional[str]]:
     """
     檢查一則訊息是否安全。
-    
+
     回傳值：
     - (True, None) — 訊息安全，可以處理
     - (False, "blocked") — 發送者已被封鎖
     - (False, "injection") — 偵測到 prompt injection 攻擊
     - (False, "spam") — 偵測到垃圾訊息重複攻擊
-    
+
     此函式設計為「防禦優先但保守」：
     只封鎖有明確惡意特徵的訊息，
     模糊案例一律放行（False Negative 比 False Positive 代價小）。
-    
     若資料庫操作失敗，靜默回傳安全（True），
     避免 DB 故障導致整個系統無法回應訊息。
     """
     try:
         # ── 1. 檢查發送者是否已被封鎖 ────────────────────────────────────────
         from host import db
+
         if db.is_sender_blocked(sender_jid):
             log.info(f"Blocked sender attempted to message: {sender_jid}")
             return (False, "blocked")
-        
+
         # ── 2. Prompt Injection 偵測 ──────────────────────────────────────────
         content_stripped = content.strip()
         for pattern in _compiled_patterns:
             if pattern.search(content_stripped):
-                log.warning(f"Prompt injection detected from {sender_jid}: "
-                           f"pattern={pattern.pattern[:40]}")
+                log.warning(
+                    f"Prompt injection detected from {sender_jid}: "
+                    f"pattern={pattern.pattern[:40]}"
+                )
                 _record_threat(sender_jid, content, "injection")
                 return (False, "injection")
-        
+
         # ── 3. 垃圾訊息偵測 ──────────────────────────────────────────────────
         # 先記錄此訊息（不論是否為威脅），讓所有訊息都能被 spam 計數器追蹤
         content_hash = _hash(content)
@@ -109,7 +132,7 @@ def check_message(content: str, sender_jid: str) -> tuple[bool, Optional[str]]:
             log.warning(f"Spam detected from {sender_jid}")
             _record_threat(sender_jid, content, "spam")
             return (False, "spam")
-        
+
         return (True, None)
     except Exception as e:
         # 免疫系統故障時靜默放行，確保正常對話不受影響
@@ -124,6 +147,7 @@ def get_immune_status() -> dict:
     可透過 IPC 工具讓主群組查詢，用於監控安全狀態。
     """
     from host import db
+
     try:
         return db.get_immune_stats()
     except Exception:
@@ -131,6 +155,7 @@ def get_immune_status() -> dict:
 
 
 # ── 私有輔助函式 ────────────────────────────────────────────────────────────────
+
 
 def _hash(content: str) -> str:
     """計算訊息內容的 MD5 hash，用於快速比對重複訊息（不需儲存原文）。"""
@@ -144,6 +169,7 @@ def _track_message(sender_jid: str, content_hash: str) -> None:
     若 DB 操作失敗，靜默忽略（不影響正常對話流程）。
     """
     from host import db
+
     try:
         db.record_immune_threat(sender_jid, content_hash, "seen")
     except Exception as e:
@@ -157,6 +183,7 @@ def _is_spam(sender_jid: str, content_hash: str) -> bool:
     1 小時的滑動視窗避免誤判（例如用戶習慣說「謝謝」不算垃圾訊息）。
     """
     from host import db
+
     try:
         count = db.get_recent_threat_count(sender_jid, content_hash, hours=1)
         return count >= SPAM_THRESHOLD
@@ -171,6 +198,7 @@ def _record_threat(sender_jid: str, content: str, threat_type: str) -> None:
     避免資料庫被同一攻擊者的大量重複請求撐爆。
     """
     from host import db
+
     try:
         content_hash = _hash(content)
         threat_count = db.record_immune_threat(sender_jid, content_hash, threat_type)
