@@ -1,3 +1,33 @@
+## v1.4.2 — 2026-03-10
+
+> Docker Desktop 日誌即時顯示修正（完整版）
+
+### 修正內容
+
+**Docker Desktop container log 在執行過程中空白**
+
+`agent.py` 整個執行過程（等待 LLM 回應）都沒有寫任何東西到 stdout/stderr，導致 Docker Desktop 日誌介面完全空白。
+
+新增 `_log()` 函式，在以下節點寫入 stderr 進度訊息：
+- `[evoclaw] Input received, parsing...`
+- `[evoclaw] JSON parsed OK`
+- `[evoclaw] Starting | group=xxx | backend=gemini`
+- `[evoclaw] Calling LLM API...`
+- `[evoclaw] Tool: Bash(command=ls -la)` (每次工具呼叫)
+- `[evoclaw] Done | status=success`
+
+### 升級方式
+
+```bash
+git pull
+docker build -t evoclaw-agent container/agent-runner/
+python run.py
+```
+
+*需要重建 Docker image*（修改在 container/agent-runner/agent.py）
+
+---
+
 ## v1.4.1 — 2026-03-10
 
 > Docker Desktop 日誌即時顯示修正

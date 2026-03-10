@@ -44,6 +44,11 @@ IPC_RESULTS_DIR = "/workspace/ipc/results"
 WORKSPACE = "/workspace/group"
 
 
+def _log(msg: str) -> None:
+    """Write a progress message to stderr (visible in Docker Desktop logs)."""
+    print(f"[evoclaw] {msg}", file=sys.stderr, flush=True)
+
+
 # ── Tool implementations ──────────────────────────────────────────────────────
 
 def tool_bash(command: str) -> str:
@@ -636,6 +641,7 @@ def execute_tool(name: str, args: dict, chat_jid: str) -> str:
     根據 Gemini 回傳的 function call 名稱，分派到對應的 tool 實作。
     chat_jid 傳給需要知道發送目標的工具（如 send_message）。
     """
+    _log(f"Tool: {name}({', '.join(f'{k}={str(v)[:40]}' for k, v in args.items())})")
     if name == "Bash":
         return tool_bash(args["command"])
     elif name == "Read":
@@ -827,6 +833,7 @@ def emit(obj: dict):
     host 的 container_runner 會從這兩個標記之間截取 JSON。
     使用 flush=True 確保輸出立即寫入，不被 Python 的緩衝區滯留。
     """
+    _log(f"Done | status={obj.get('status','?')}")
     print(OUTPUT_START, flush=True)
     print(json.dumps(obj), flush=True)
     print(OUTPUT_END, flush=True)
@@ -850,11 +857,13 @@ def main():
     """
     # Read stdin via buffer to handle BOM (Windows Docker pipe may prepend \xef\xbb\xbf)
     raw = sys.stdin.buffer.read().decode("utf-8-sig").strip()
+    _log("Input received, parsing...")
     try:
         inp = json.loads(raw)
     except Exception:
         emit({"status": "error", "result": None, "error": "Invalid JSON input"})
         return
+    _log("JSON parsed OK")
 
     # 將解析後的輸入資料存到全域變數，讓工具函式（如 tool_list_tasks）可以存取
     global _input_data
@@ -884,6 +893,9 @@ def main():
     claude_model = os.environ.get("CLAUDE_MODEL", "claude-3-5-haiku-latest")
     use_openai_compat = bool(nim_api_key or openai_api_key)
     use_claude = bool(claude_api_key and not use_openai_compat)
+
+    backend = "claude" if use_claude else ("openai-compat" if use_openai_compat else "gemini")
+    _log(f"Starting | group={group_folder} | backend={backend}")
 
     if use_openai_compat and not _OPENAI_AVAILABLE:
         emit({"status": "error", "result": None, "error": "openai package not installed in container. Rebuild with updated requirements.txt."})
@@ -953,6 +965,7 @@ def main():
 
     system_instruction = "\n".join(lines)
 
+    _log("Calling LLM API...")
     try:
         if use_openai_compat:
             _model = os.environ.get("NIM_MODEL") or os.environ.get("OPENAI_MODEL") or os.environ.get("GEMINI_MODEL") or "meta/llama-3.3-70b-instruct"

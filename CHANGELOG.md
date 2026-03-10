@@ -5,6 +5,14 @@
 格式基於 [Keep a Changelog](https://keepachangelog.com/)，
 版本號遵循 [語意化版本](https://semver.org/)。
 
+## [1.4.2] — 2026-03-10
+
+### Bug Fixes
+
+- **Docker Desktop 日誌空白修正**：`agent.py` 新增 `_log()` 工具函式，在關鍵節點寫入 stderr 進度訊息（啟動、呼叫 LLM、工具呼叫、完成）。修正 Docker Desktop 日誌介面在 container 執行期間顯示空白的問題（根本原因：整個執行過程直到最後才有任何輸出）。
+
+---
+
 ## [1.4.1] — 2026-03-10
 
 ### Bug Fixes
