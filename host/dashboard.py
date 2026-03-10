@@ -140,12 +140,16 @@ tr:nth-child(even) td{background:#1a1a2e}
     <div class="nav-item" onclick="showTab('settings')" id="nav-settings">
       <span class="icon">⚙️</span><span>系統設定</span>
     </div>
+    <div class="nav-item" onclick="showTab('messages')" id="nav-messages">
+      <span class="icon">💬</span><span>對話訊息</span>
+    </div>
   </div>
   <div id="main">
     <div id="tab-status"></div>
     <div id="tab-logs" style="display:none"></div>
     <div id="tab-manage" style="display:none"></div>
     <div id="tab-settings" style="display:none"></div>
+    <div id="tab-messages" style="display:none"></div>
   </div>
 </div>
 
@@ -164,7 +168,7 @@ let _logEs = null;
 let _autoRefresh = null;
 
 function showTab(name) {
-  ['status','logs','manage','settings'].forEach(t => {
+  ['status','logs','manage','settings','messages'].forEach(t => {
     document.getElementById('tab-'+t).style.display = t===name?'':'none';
     document.getElementById('nav-'+t).classList.toggle('active', t===name);
   });
@@ -175,6 +179,7 @@ function showTab(name) {
   else if (name==='logs') { initLogs(); }
   else if (name==='manage') { loadManage(); _autoRefresh = setInterval(loadManage, 8000); }
   else if (name==='settings') { loadSettings(); }
+  else if (name==='messages') { loadMessages(); _autoRefresh = setInterval(loadMessages, 8000); }
 }
 
 // ── Fetch helper ───────────────────────────────────────────────────────────
@@ -555,6 +560,75 @@ async function saveClaude(path, b64) {
   showMsg(r && r.ok ? 'CLAUDE.md saved' : 'Failed to save', r && r.ok);
 }
 
+// ── Tab 5: 對話訊息 ────────────────────────────────────────────────────────
+let _msgJid = '';
+
+async function loadMessages() {
+  const groups = await api('/api/stats');
+  const groupList = groups && groups.groups ? groups.groups : [];
+
+  // Build group selector
+  const groupOptions = groupList.map(g =>
+    `<option value="${esc(g.jid)}" ${_msgJid===g.jid?'selected':''}>${esc(g.folder)} (${esc(g.jid)})</option>`
+  ).join('');
+
+  const msgs = await api(`/api/messages?jid=${encodeURIComponent(_msgJid)}&limit=100`);
+
+  let html = '<div class="section-title">💬 對話訊息</div>';
+
+  // Filter bar
+  html += `<div class="card" style="padding:10px 16px">
+    <div style="display:flex;gap:12px;align-items:center">
+      <span style="color:#6b7280;font-size:11px">群組：</span>
+      <select id="msg-jid-select" onchange="_msgJid=this.value;loadMessages()"
+        style="background:#0a0a14;border:1px solid #2d2d4e;border-radius:3px;padding:4px 8px;color:#e0e0e0;font-family:inherit;font-size:11px">
+        <option value="">全部群組</option>
+        ${groupOptions}
+      </select>
+      <span style="color:#4b5563;font-size:10px;margin-left:auto">${msgs ? msgs.length : 0} 筆訊息（最新 100 筆）</span>
+    </div>
+  </div>`;
+
+  // Messages table
+  html += '<div class="card">';
+  if (msgs && msgs.length > 0) {
+    html += `<table>
+      <thead><tr>
+        <th style="width:140px">時間</th>
+        <th style="width:80px">方向</th>
+        <th style="width:120px">發送者</th>
+        <th style="width:100px">群組 JID</th>
+        <th>訊息內容</th>
+      </tr></thead>
+      <tbody>`;
+    for (const m of msgs) {
+      const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '—';
+      const isBot = m.is_bot_message;
+      const isMe = m.is_from_me;
+      const direction = isBot
+        ? badge('Bot 回覆', 'purple')
+        : isMe ? badge('我', 'blue') : badge('用戶', 'green');
+      const senderName = m.sender_name || m.sender || '—';
+      const content = m.content || '';
+      // Highlight bot messages differently
+      const rowStyle = isBot ? "background:#1a0a2e" : "";
+      html += `<tr style="${rowStyle}">
+        <td style="font-size:10px;color:#6b7280;white-space:nowrap">${esc(ts)}</td>
+        <td>${direction}</td>
+        <td style="font-size:11px">${esc(senderName)}</td>
+        <td style="font-size:10px;color:#60a5fa">${esc(m.chat_jid)}</td>
+        <td style="font-size:12px;white-space:pre-wrap;word-break:break-word;max-width:500px">${esc(content)}</td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+  } else {
+    html += '<div class="empty">沒有訊息記錄</div>';
+  }
+  html += '</div>';
+
+  document.getElementById('tab-messages').innerHTML = html;
+}
+
 // Initial load
 showTab('status');
 </script>
@@ -819,6 +893,25 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             level = qs.get("level", "ALL")
             limit = int(qs.get("limit", 200))
             self._json(log_buffer.get_logs(since, level, limit))
+
+        elif path == "/api/messages":
+            jid = qs.get("jid", "")
+            limit = int(qs.get("limit", 100))
+            if jid:
+                rows = _fetch(
+                    "SELECT id, chat_jid, sender, sender_name, content, timestamp, "
+                    "is_from_me, is_bot_message FROM messages "
+                    "WHERE chat_jid=? ORDER BY timestamp DESC LIMIT ?",
+                    (jid, limit)
+                )
+            else:
+                rows = _fetch(
+                    "SELECT id, chat_jid, sender, sender_name, content, timestamp, "
+                    "is_from_me, is_bot_message FROM messages "
+                    "ORDER BY timestamp DESC LIMIT ?",
+                    (limit,)
+                )
+            self._json(rows)
 
         elif path == "/api/logs/stream":
             self._handle_sse_logs(qs.get("level", "ALL"))
