@@ -1,0 +1,13 @@
+skill: superpowers-dispatching-parallel-agents
+version: "1.0.0"
+description: "Parallel agent dispatch for independent tasks — use when facing 2+ independent tasks that can be worked on without shared state or sequential dependencies"
+author: "KeithKeepGoing/superpowers"
+source: "https://github.com/KeithKeepGoing/superpowers/tree/main/skills/dispatching-parallel-agents"
+core_version: "1.0.0"
+depends: []
+conflicts: []
+adds:
+  - docs/superpowers/dispatching-parallel-agents/SKILL.md
+modifies: []
+file_ops: []
+test: null

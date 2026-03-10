@@ -415,6 +415,45 @@ EvoClaw 透過 `skills_engine/` 系統支援可插拔的功能擴充（Skill Plu
 
 ---
 
+## Superpowers Integration
+
+EvoClaw now includes 12 installable workflow skill packages from the [Superpowers](https://github.com/KeithKeepGoing/superpowers) methodology. These skills teach Claude Code best-practice engineering workflows and are installable via the `/apply_skill` IPC command from the main group.
+
+### Installing a Superpowers Skill
+
+Send this message to the bot in the main group:
+
+```
+/apply_skill superpowers-brainstorming
+```
+
+Or via IPC:
+
+```json
+{"type": "apply_skill", "skill": "superpowers-brainstorming"}
+```
+
+### Available Superpowers Skills
+
+| Skill | Description |
+|-------|-------------|
+| `superpowers-brainstorming` | Design-first gate before any implementation — explore requirements through collaborative dialogue |
+| `superpowers-dispatching-parallel-agents` | Parallel agent dispatch for independent tasks with no shared state |
+| `superpowers-executing-plans` | Sequential plan execution with review checkpoints and stop conditions |
+| `superpowers-finishing-a-development-branch` | Branch completion workflow: verify tests, then merge/PR/keep/discard |
+| `superpowers-receiving-code-review` | Technical evaluation of code review feedback — verify before implementing |
+| `superpowers-requesting-code-review` | Dispatch a code-reviewer subagent after each task or before merging |
+| `superpowers-subagent-driven-development` | Fresh subagent per task with two-stage review (spec then quality) |
+| `superpowers-systematic-debugging` | 4-phase root cause investigation (Iron Law: no fix without root cause) |
+| `superpowers-test-driven-development` | RED-GREEN-REFACTOR cycle (Iron Law: test first, always) |
+| `superpowers-using-git-worktrees` | Isolated workspace per feature branch with clean baseline verification |
+| `superpowers-verification-before-completion` | Evidence-based gate before claiming completion — run verification first |
+| `superpowers-writing-plans` | Bite-sized atomic task plans with TDD steps, saved to docs/superpowers/plans/ |
+
+Each skill adds a `SKILL.md` file to `docs/superpowers/<name>/` in your project, which Claude Code reads as instructions when that workflow is needed.
+
+---
+
 ## 健康監控系統
 
 EvoClaw 內建後台健康監控進程（`host/health_monitor.py`），系統啟動後自動作為第五個 async 迴圈在背景持續運行，每 60 秒檢查一次系統狀態並自動告警。

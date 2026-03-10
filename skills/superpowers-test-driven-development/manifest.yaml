@@ -1,0 +1,13 @@
+skill: superpowers-test-driven-development
+version: "1.0.0"
+description: "RED-GREEN-REFACTOR cycle (Iron Law: test first always) — use when implementing any feature or bugfix, before writing implementation code"
+author: "KeithKeepGoing/superpowers"
+source: "https://github.com/KeithKeepGoing/superpowers/tree/main/skills/test-driven-development"
+core_version: "1.0.0"
+depends: []
+conflicts: []
+adds:
+  - docs/superpowers/test-driven-development/SKILL.md
+modifies: []
+file_ops: []
+test: null

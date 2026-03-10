@@ -1,0 +1,13 @@
+skill: superpowers-verification-before-completion
+version: "1.0.0"
+description: "Evidence-based gate before claiming completion (Iron Law: no claims without fresh verification) — use before committing or creating PRs"
+author: "KeithKeepGoing/superpowers"
+source: "https://github.com/KeithKeepGoing/superpowers/tree/main/skills/verification-before-completion"
+core_version: "1.0.0"
+depends: []
+conflicts: []
+adds:
+  - docs/superpowers/verification-before-completion/SKILL.md
+modifies: []
+file_ops: []
+test: null

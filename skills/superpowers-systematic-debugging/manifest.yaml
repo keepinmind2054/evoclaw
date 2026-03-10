@@ -1,0 +1,13 @@
+skill: superpowers-systematic-debugging
+version: "1.0.0"
+description: "4-phase root cause investigation (Iron Law: no fix without root cause) — use when encountering any bug, test failure, or unexpected behavior"
+author: "KeithKeepGoing/superpowers"
+source: "https://github.com/KeithKeepGoing/superpowers/tree/main/skills/systematic-debugging"
+core_version: "1.0.0"
+depends: []
+conflicts: []
+adds:
+  - docs/superpowers/systematic-debugging/SKILL.md
+modifies: []
+file_ops: []
+test: null

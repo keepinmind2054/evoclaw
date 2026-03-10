@@ -1,0 +1,13 @@
+skill: superpowers-subagent-driven-development
+version: "1.0.0"
+description: "Fresh subagent per task with 2-stage review (spec then quality) — use when executing implementation plans with independent tasks"
+author: "KeithKeepGoing/superpowers"
+source: "https://github.com/KeithKeepGoing/superpowers/tree/main/skills/subagent-driven-development"
+core_version: "1.0.0"
+depends: []
+conflicts: []
+adds:
+  - docs/superpowers/subagent-driven-development/SKILL.md
+modifies: []
+file_ops: []
+test: null

@@ -1,0 +1,13 @@
+skill: superpowers-receiving-code-review
+version: "1.0.0"
+description: "Technical evaluation of code review feedback — verify before implementing, ask before assuming; use when receiving code review feedback"
+author: "KeithKeepGoing/superpowers"
+source: "https://github.com/KeithKeepGoing/superpowers/tree/main/skills/receiving-code-review"
+core_version: "1.0.0"
+depends: []
+conflicts: []
+adds:
+  - docs/superpowers/receiving-code-review/SKILL.md
+modifies: []
+file_ops: []
+test: null

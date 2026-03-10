@@ -1,0 +1,13 @@
+skill: superpowers-executing-plans
+version: "1.0.0"
+description: "Sequential plan execution with checkpoints — use when you have a written implementation plan to execute in a separate session with review checkpoints"
+author: "KeithKeepGoing/superpowers"
+source: "https://github.com/KeithKeepGoing/superpowers/tree/main/skills/executing-plans"
+core_version: "1.0.0"
+depends: []
+conflicts: []
+adds:
+  - docs/superpowers/executing-plans/SKILL.md
+modifies: []
+file_ops: []
+test: null

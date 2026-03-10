@@ -1,3 +1,59 @@
+# Release Notes
+
+## v1.7.0 — Superpowers Skills Integration (2026-03-11)
+
+This release integrates the [Superpowers](https://github.com/KeithKeepGoing/superpowers) methodology as installable skills packages into EvoClaw's Skills Engine.
+
+### What's New
+
+#### 12 Superpowers Skills as Installable Packages
+
+All 12 Superpowers workflow skills are now packaged for EvoClaw's skills_engine, installable via the `/apply_skill` IPC command from the main group.
+
+| Skill | Purpose |
+|---|---|
+| superpowers-brainstorming | Design-first gate before any implementation |
+| superpowers-dispatching-parallel-agents | Parallel agent dispatch for independent domains |
+| superpowers-executing-plans | Sequential plan execution with review checkpoints |
+| superpowers-finishing-a-development-branch | Verify → choose merge/PR/keep/discard |
+| superpowers-receiving-code-review | Technical evaluation, not performative agreement |
+| superpowers-requesting-code-review | Dispatch code-reviewer subagent after each task |
+| superpowers-subagent-driven-development | Fresh subagent per task + 2-stage review |
+| superpowers-systematic-debugging | 4-phase root cause analysis (Iron Law: no fix without root cause) |
+| superpowers-test-driven-development | RED-GREEN-REFACTOR (Iron Law: test first always) |
+| superpowers-using-git-worktrees | Isolated workspace with clean baseline verification |
+| superpowers-verification-before-completion | Evidence-based gate before claiming completion |
+| superpowers-writing-plans | Bite-sized atomic task plans with TDD steps |
+
+#### Installation
+
+From the main group, send:
+```
+/apply_skill superpowers-brainstorming
+```
+Or via IPC:
+```json
+{"type": "apply_skill", "skill": "superpowers-brainstorming"}
+```
+
+#### Architecture
+
+Each skill package follows the structure:
+```
+skills/superpowers-<name>/
+  manifest.yaml          # Skills engine metadata
+  add/
+    docs/superpowers/
+      <name>/
+        SKILL.md         # Full skill instructions
+```
+
+### Previous Release
+
+See CHANGELOG.md for full history.
+
+---
+
 ## v1.6.1 — 2026-03-10
 
 > Bug Fix 版：Health Monitor 接入、WebPortal 修正、核心測試補齊

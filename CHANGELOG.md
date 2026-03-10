@@ -5,6 +5,27 @@
 格式基於 [Keep a Changelog](https://keepachangelog.com/)，
 版本號遵循 [語意化版本](https://semver.org/)。
 
+## [1.7.0] - 2026-03-11
+
+### Added
+- Superpowers skills integration: 12 installable skill packages from KeithKeepGoing/superpowers
+  - superpowers-brainstorming: Design-first gate before any implementation
+  - superpowers-dispatching-parallel-agents: Parallel agent dispatch for independent tasks
+  - superpowers-executing-plans: Sequential plan execution with checkpoints
+  - superpowers-finishing-a-development-branch: Branch completion workflow
+  - superpowers-receiving-code-review: Technical evaluation of code review feedback
+  - superpowers-requesting-code-review: Dispatch code-reviewer subagent
+  - superpowers-subagent-driven-development: Fresh subagent per task with 2-stage review
+  - superpowers-systematic-debugging: 4-phase root cause investigation (Iron Law)
+  - superpowers-test-driven-development: RED-GREEN-REFACTOR cycle, test first (Iron Law)
+  - superpowers-using-git-worktrees: Isolated workspace per feature branch
+  - superpowers-verification-before-completion: Evidence-based completion gate (Iron Law)
+  - superpowers-writing-plans: Bite-sized implementation plan writing
+- Each skill installable via /apply_skill <skill-name> IPC command (main group only)
+- Skill files added to docs/superpowers/<name>/SKILL.md
+
+---
+
 ## [1.6.1] — 2026-03-10
 
 ### Bug Fixes

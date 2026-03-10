@@ -1,0 +1,13 @@
+skill: superpowers-finishing-a-development-branch
+version: "1.0.0"
+description: "Branch completion workflow — verify tests, then choose merge/PR/keep/discard; use when implementation is complete and all tests pass"
+author: "KeithKeepGoing/superpowers"
+source: "https://github.com/KeithKeepGoing/superpowers/tree/main/skills/finishing-a-development-branch"
+core_version: "1.0.0"
+depends: []
+conflicts: []
+adds:
+  - docs/superpowers/finishing-a-development-branch/SKILL.md
+modifies: []
+file_ops: []
+test: null

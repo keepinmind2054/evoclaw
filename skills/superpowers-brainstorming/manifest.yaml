@@ -1,0 +1,13 @@
+skill: superpowers-brainstorming
+version: "1.0.0"
+description: "Design-first gate before any implementation — explores user intent, requirements and design through collaborative dialogue before writing code"
+author: "KeithKeepGoing/superpowers"
+source: "https://github.com/KeithKeepGoing/superpowers/tree/main/skills/brainstorming"
+core_version: "1.0.0"
+depends: []
+conflicts: []
+adds:
+  - docs/superpowers/brainstorming/SKILL.md
+modifies: []
+file_ops: []
+test: null

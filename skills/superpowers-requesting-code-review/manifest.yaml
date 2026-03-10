@@ -1,0 +1,13 @@
+skill: superpowers-requesting-code-review
+version: "1.0.0"
+description: "Dispatch code-reviewer subagent to catch issues before they cascade — use after each task, major feature, or before merging"
+author: "KeithKeepGoing/superpowers"
+source: "https://github.com/KeithKeepGoing/superpowers/tree/main/skills/requesting-code-review"
+core_version: "1.0.0"
+depends: []
+conflicts: []
+adds:
+  - docs/superpowers/requesting-code-review/SKILL.md
+modifies: []
+file_ops: []
+test: null

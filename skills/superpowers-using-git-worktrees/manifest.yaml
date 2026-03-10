@@ -1,0 +1,13 @@
+skill: superpowers-using-git-worktrees
+version: "1.0.0"
+description: "Isolated workspace per feature branch with clean baseline verification — use when starting feature work that needs isolation from current workspace"
+author: "KeithKeepGoing/superpowers"
+source: "https://github.com/KeithKeepGoing/superpowers/tree/main/skills/using-git-worktrees"
+core_version: "1.0.0"
+depends: []
+conflicts: []
+adds:
+  - docs/superpowers/using-git-worktrees/SKILL.md
+modifies: []
+file_ops: []
+test: null

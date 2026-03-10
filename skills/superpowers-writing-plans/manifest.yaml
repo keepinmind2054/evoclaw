@@ -1,0 +1,13 @@
+skill: superpowers-writing-plans
+version: "1.0.0"
+description: "Bite-sized atomic task implementation plans with TDD steps — use when you have a spec or requirements for a multi-step task, before touching code"
+author: "KeithKeepGoing/superpowers"
+source: "https://github.com/KeithKeepGoing/superpowers/tree/main/skills/writing-plans"
+core_version: "1.0.0"
+depends: []
+conflicts: []
+adds:
+  - docs/superpowers/writing-plans/SKILL.md
+modifies: []
+file_ops: []
+test: null
