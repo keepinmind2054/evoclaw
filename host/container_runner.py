@@ -191,9 +191,9 @@ async def run_container_agent(
                 )
                 return r.stdout, r.stderr
 
-            log.info(f"[DEBUG] Running docker in thread (Windows mode)...")
+            log.debug(f"[DEBUG] Running docker in thread (Windows mode)...")
             stdout_data, stderr_data = await asyncio.to_thread(_sync_docker_run)
-            log.info(f"[DEBUG] Docker thread returned. stdout={len(stdout_data)}b stderr={len(stderr_data)}b")
+            log.debug(f"[DEBUG] Docker thread returned. stdout={len(stdout_data)}b stderr={len(stderr_data)}b")
         else:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -209,9 +209,9 @@ async def run_container_agent(
         stdout = stdout_data.decode(errors="replace")
         stderr = stderr_data.decode(errors="replace")
 
-        log.info(f"[DEBUG] Container stdout preview: {stdout[:200]!r}")
+        log.debug(f"[DEBUG] Container stdout preview: {stdout[:200]!r}")
         if stderr:
-            log.warning(f"[DEBUG] Container stderr: {stderr[:500]}")
+            log.debug(f"[DEBUG] Container stderr: {stderr[:500]}")
 
         # 從 stdout 中尋找輸出標記，截取 JSON 結果
         # agent 可能在標記前後有其他 debug 輸出，只取標記之間的部分
@@ -232,8 +232,9 @@ async def run_container_agent(
             return {"status": "error", "error": f"JSON parse error: {e}", "messages": []}
 
         # 若 container 有產生回覆文字，透過 on_output callback 發送到聊天室
-        if on_output and result.get("result"):
-            await on_output(result["result"])
+        result_text = result.get("result")
+        if on_output and result_text:
+            await on_output(result_text)
 
         # 更新 session ID：agent 執行後可能建立新的 session，存入 DB 供下次使用
         if result.get("newSessionId"):

@@ -39,7 +39,7 @@ TRIGGER_PATTERN = re.compile(rf"^@{re.escape(ASSISTANT_NAME)}\b", re.IGNORECASE)
 # Polling
 POLL_INTERVAL = _env_int("POLL_INTERVAL", 2000) / 1000  # seconds
 SCHEDULER_POLL_INTERVAL = _env_int("SCHEDULER_POLL_INTERVAL", 60000) / 1000
-IPC_POLL_INTERVAL = float(os.environ.get("IPC_POLL_INTERVAL", "1000")) / 1000
+IPC_POLL_INTERVAL = _env_int("IPC_POLL_INTERVAL", 1000) / 1000
 
 # Container
 CONTAINER_IMAGE = os.environ.get("CONTAINER_IMAGE", "evoclaw-agent:latest")

@@ -6,8 +6,6 @@ from typing import Callable
 
 from . import config, db
 
-_running = True
-
 log = logging.getLogger(__name__)
 
 def compute_next_run(schedule_type: str, schedule_value: str, last_run: int | None = None) -> int | None:
@@ -104,7 +102,7 @@ async def start_scheduler_loop(get_group_fn: Callable, run_agent_fn: Callable, s
     實際的 concurrency 控制由 GroupQueue 負責（每群組一次只跑一個 container）。
     """
     log.info("Task scheduler started")
-    while _running:
+    while True:
         try:
             now_ms = int(time.time() * 1000)
             # 查詢所有 next_run <= now_ms 且狀態為 active 的任務

@@ -10,8 +10,6 @@ from typing import Callable, Awaitable
 from . import config, db
 from .group_folder import is_valid_group_folder
 
-_running = True
-
 log = logging.getLogger(__name__)
 
 async def process_ipc_dir(group_folder: str, is_main: bool, route_fn: Callable) -> None:
@@ -88,7 +86,6 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
         schedule_value = payload.get("schedule_value", "")
         # 計算下次執行的 Unix timestamp（毫秒），根據 schedule_type 不同邏輯不同
         next_run = _compute_next_run(schedule_type, schedule_value)
-        group = db.get_registered_group(payload.get("chatJid", ""))
         db.create_task(
             task_id=task_id,
             group_folder=group_folder,
@@ -230,7 +227,7 @@ async def start_ipc_watcher(get_groups_fn: Callable, route_fn: Callable, stop_ev
     是為了保持跨平台相容性，並簡化 container volume mount 的互動邏輯。
     """
     log.info("IPC watcher started")
-    while _running:
+    while True:
         try:
             groups = get_groups_fn()
             for group in groups:
