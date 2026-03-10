@@ -12,6 +12,10 @@ import subprocess
 import time
 import random
 import string
+import glob as _glob_module
+import urllib.request
+import urllib.error
+import html.parser
 from pathlib import Path
 from google import genai
 from google.genai import types
@@ -20,6 +24,11 @@ try:
     _OPENAI_AVAILABLE = True
 except ImportError:
     _OPENAI_AVAILABLE = False
+try:
+    import anthropic
+    _ANTHROPIC_AVAILABLE = True
+except ImportError:
+    _ANTHROPIC_AVAILABLE = False
 
 # container 輸出的邊界標記，host 用這兩個字串從 stdout 截取 JSON 結果
 # 必須與 container_runner.py 中定義的常數完全一致
@@ -48,7 +57,7 @@ def tool_bash(command: str) -> str:
         result = subprocess.run(
             ["bash", "-c", command],
             capture_output=True, text=True,
-            timeout=60, cwd=WORKSPACE,
+            timeout=300, cwd=WORKSPACE,
             shell=False  # safer: exec bash directly, not via /bin/sh -c
         )
         out = result.stdout
@@ -56,7 +65,7 @@ def tool_bash(command: str) -> str:
             out += f"\nSTDERR:\n{result.stderr}"
         return out or "(no output)"
     except subprocess.TimeoutExpired:
-        return "Error: command timed out after 60s"
+        return "Error: command timed out after 300s"
     except Exception as e:
         return f"Error: {e}"
 
@@ -174,6 +183,141 @@ def tool_cancel_task(task_id: str) -> str:
         return f"Error: {e}"
 
 
+def tool_pause_task(task_id: str) -> str:
+    """透過 IPC 暫停指定 ID 的排程任務（status 改為 paused）。"""
+    if not task_id:
+        return "Error: task_id is required."
+    try:
+        Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
+        fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-pause.json"
+        fname.write_text(json.dumps({
+            "type": "pause_task",
+            "task_id": task_id,
+        }), encoding="utf-8")
+        return f"Task {task_id} pause request sent."
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def tool_resume_task(task_id: str) -> str:
+    """透過 IPC 恢復指定 ID 的已暫停排程任務（status 改回 active）。"""
+    if not task_id:
+        return "Error: task_id is required."
+    try:
+        Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
+        fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-resume.json"
+        fname.write_text(json.dumps({
+            "type": "resume_task",
+            "task_id": task_id,
+        }), encoding="utf-8")
+        return f"Task {task_id} resume request sent."
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def tool_glob(pattern: str, path: str = WORKSPACE) -> str:
+    """
+    在指定目錄下尋找符合 glob 模式的檔案（支援 ** 遞迴搜尋）。
+    例如 pattern="**/*.py" 可找出所有 Python 檔案。
+    """
+    try:
+        search_path = os.path.join(path, pattern)
+        matches = _glob_module.glob(search_path, recursive=True)
+        if not matches:
+            return f"No files found matching: {pattern} in {path}"
+        return "\n".join(sorted(matches))
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def tool_grep(pattern: str, path: str = WORKSPACE, include: str = "*") -> str:
+    """
+    在指定目錄下遞迴搜尋符合正規表達式的檔案內容，回傳「檔名:行號:內容」格式。
+    include 參數可過濾副檔名，例如 include="*.py" 只搜尋 Python 檔案。
+    """
+    try:
+        result = subprocess.run(
+            ["grep", "-r", "-n", "--include", include, pattern, path],
+            capture_output=True, text=True, timeout=30
+        )
+        output = result.stdout
+        if result.stderr and not output:
+            output = result.stderr
+        if len(output) > 8000:
+            output = output[:8000] + "\n... (truncated, too many matches)"
+        return output or "(no matches found)"
+    except subprocess.TimeoutExpired:
+        return "Error: grep timed out after 30s"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+class _HTMLTextExtractor(html.parser.HTMLParser):
+    """簡單的 HTML 純文字提取器，過濾掉所有 HTML 標籤。"""
+    def __init__(self):
+        super().__init__()
+        self._parts: list[str] = []
+        self._skip = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style", "noscript"):
+            self._skip = True
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style", "noscript"):
+            self._skip = False
+        if tag in ("p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6"):
+            self._parts.append("\n")
+
+    def handle_data(self, data):
+        if not self._skip:
+            self._parts.append(data)
+
+    def get_text(self) -> str:
+        return "".join(self._parts)
+
+
+def tool_web_fetch(url: str) -> str:
+    """
+    從指定 URL 抓取網頁內容，自動將 HTML 轉換為純文字。
+    適合查閱文件、新聞、GitHub README 等網頁資料。
+    結果最多回傳 12000 字元，超過部分截斷。
+    """
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; EvoClaw-Agent/1.0)",
+                "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
+            }
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            content_type = resp.headers.get("Content-Type", "")
+            raw = resp.read().decode("utf-8", errors="replace")
+
+        if "html" in content_type.lower() or raw.lstrip().startswith("<"):
+            extractor = _HTMLTextExtractor()
+            try:
+                extractor.feed(raw)
+                text = extractor.get_text()
+            except Exception:
+                text = raw
+            lines = [l.strip() for l in text.splitlines()]
+            text = "\n".join(l for l in lines if l)
+        else:
+            text = raw
+
+        if len(text) > 12000:
+            text = text[:12000] + "\n\n... (content truncated)"
+        return text or "(empty response)"
+    except urllib.error.HTTPError as e:
+        return f"HTTP {e.code} error fetching {url}: {e.reason}"
+    except urllib.error.URLError as e:
+        return f"URL error fetching {url}: {e.reason}"
+    except Exception as e:
+        return f"Error fetching {url}: {e}"
+
+
 # ── Tool registry ─────────────────────────────────────────────────────────────
 
 # 向 Gemini function calling API 宣告可用的工具
@@ -267,6 +411,64 @@ TOOL_DECLARATIONS = [
             required=["task_id"],
         ),
     ),
+    types.FunctionDeclaration(
+        name="mcp__evoclaw__pause_task",
+        description="Pause a scheduled task (it will not run until resumed).",
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "task_id": types.Schema(type=types.Type.STRING, description="The task ID to pause"),
+            },
+            required=["task_id"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="mcp__evoclaw__resume_task",
+        description="Resume a previously paused scheduled task.",
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "task_id": types.Schema(type=types.Type.STRING, description="The task ID to resume"),
+            },
+            required=["task_id"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="Glob",
+        description="Find files matching a glob pattern (supports ** for recursive search).",
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "pattern": types.Schema(type=types.Type.STRING, description="Glob pattern, e.g. '**/*.py'"),
+                "path": types.Schema(type=types.Type.STRING, description="Base directory (default: /workspace/group)"),
+            },
+            required=["pattern"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="Grep",
+        description="Search file contents using regex. Returns filename:line:content for each match.",
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "pattern": types.Schema(type=types.Type.STRING, description="Regex pattern to search for"),
+                "path": types.Schema(type=types.Type.STRING, description="Directory to search (default: /workspace/group)"),
+                "include": types.Schema(type=types.Type.STRING, description="File filter e.g. '*.py' (default: all files)"),
+            },
+            required=["pattern"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="WebFetch",
+        description="Fetch content from a URL and return it as plain text. Useful for reading docs, news, GitHub READMEs.",
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "url": types.Schema(type=types.Type.STRING, description="The URL to fetch"),
+            },
+            required=["url"],
+        ),
+    ),
 ]
 
 
@@ -282,6 +484,11 @@ OPENAI_TOOL_DECLARATIONS = [
     {"type": "function", "function": {"name": "mcp__evoclaw__schedule_task", "description": "Schedule a recurring or one-time task.", "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "What to do when task runs"}, "schedule_type": {"type": "string", "description": "cron, interval, or once"}, "schedule_value": {"type": "string", "description": "Cron expr, ms, or ISO timestamp"}, "context_mode": {"type": "string", "description": "group or isolated"}}, "required": ["prompt", "schedule_type", "schedule_value"]}}},
     {"type": "function", "function": {"name": "mcp__evoclaw__list_tasks", "description": "List all scheduled tasks for this group.", "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "mcp__evoclaw__cancel_task", "description": "Cancel (delete) a scheduled task by its ID.", "parameters": {"type": "object", "properties": {"task_id": {"type": "string", "description": "The task ID to cancel"}}, "required": ["task_id"]}}},
+    {"type": "function", "function": {"name": "mcp__evoclaw__pause_task", "description": "Pause a scheduled task.", "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}}},
+    {"type": "function", "function": {"name": "mcp__evoclaw__resume_task", "description": "Resume a paused scheduled task.", "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}}},
+    {"type": "function", "function": {"name": "Glob", "description": "Find files matching a glob pattern (supports ** recursive).", "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}}, "required": ["pattern"]}}},
+    {"type": "function", "function": {"name": "Grep", "description": "Search file contents with regex. Returns filename:line:content.", "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}, "include": {"type": "string"}}, "required": ["pattern"]}}},
+    {"type": "function", "function": {"name": "WebFetch", "description": "Fetch a URL and return its content as plain text.", "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}}},
 ]
 
 
@@ -304,6 +511,11 @@ CLAUDE_TOOL_DECLARATIONS = [
     {"name": "mcp__evoclaw__schedule_task", "description": "Schedule a task.", "input_schema": {"type": "object", "properties": {"prompt": {"type": "string"}, "schedule_type": {"type": "string"}, "schedule_value": {"type": "string"}, "context_mode": {"type": "string"}}, "required": ["prompt", "schedule_type", "schedule_value"]}},
     {"name": "mcp__evoclaw__list_tasks", "description": "List all scheduled tasks for this group.", "input_schema": {"type": "object", "properties": {}}},
     {"name": "mcp__evoclaw__cancel_task", "description": "Cancel (delete) a scheduled task by its ID.", "input_schema": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}},
+    {"name": "mcp__evoclaw__pause_task", "description": "Pause a scheduled task.", "input_schema": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}},
+    {"name": "mcp__evoclaw__resume_task", "description": "Resume a paused scheduled task.", "input_schema": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}},
+    {"name": "Glob", "description": "Find files matching a glob pattern (supports ** recursive).", "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}}, "required": ["pattern"]}},
+    {"name": "Grep", "description": "Search file contents with regex. Returns filename:line:content.", "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}, "include": {"type": "string"}}, "required": ["pattern"]}},
+    {"name": "WebFetch", "description": "Fetch a URL and return its content as plain text.", "input_schema": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}},
 ]
 
 
@@ -392,6 +604,16 @@ def execute_tool(name: str, args: dict, chat_jid: str) -> str:
         return tool_list_tasks()
     elif name == "mcp__evoclaw__cancel_task":
         return tool_cancel_task(args.get("task_id", ""))
+    elif name == "mcp__evoclaw__pause_task":
+        return tool_pause_task(args.get("task_id", ""))
+    elif name == "mcp__evoclaw__resume_task":
+        return tool_resume_task(args.get("task_id", ""))
+    elif name == "Glob":
+        return tool_glob(args["pattern"], args.get("path", WORKSPACE))
+    elif name == "Grep":
+        return tool_grep(args["pattern"], args.get("path", WORKSPACE), args.get("include", "*"))
+    elif name == "WebFetch":
+        return tool_web_fetch(args["url"])
     return f"Unknown tool: {name}"
 
 
@@ -645,8 +867,19 @@ def main():
         f"Chat JID: {chat_jid}",
         f"Date: {time.strftime('%Y-%m-%d')}",
         "",
-        "Use mcp__evoclaw__send_message to send messages to the user.",
-        "Use your tools (Bash, Read, Write, Edit) to help the user.",
+        "## Execution Style",
+        "When given a task, execute it IMMEDIATELY and DIRECTLY. Do NOT ask 'Should I start?', 'Need me to begin?', or 'Want me to proceed?'.",
+        "Complete the full task using your tools, then report the result.",
+        "If you hit a blocker, try to solve it yourself first. Only ask the user if truly stuck.",
+        "",
+        "## Available Tools",
+        "- Bash: run shell commands (git, python, curl, etc.) — timeout 300s",
+        "- Read / Write / Edit: read and modify files",
+        "- Glob: find files by pattern (e.g. '**/*.py')",
+        "- Grep: search file contents by regex",
+        "- WebFetch: fetch any URL and read its content",
+        "- mcp__evoclaw__send_message: send a message to the user",
+        "- mcp__evoclaw__schedule_task / list_tasks / cancel_task / pause_task / resume_task: manage scheduled tasks",
     ]
 
     # 讀取全域和群組專屬的 CLAUDE.md 設定（若存在），附加到系統提示詞末尾

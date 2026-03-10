@@ -1,3 +1,37 @@
+## v1.5.0 — 2026-03-10
+
+### Agent 能力大幅強化
+
+這個版本讓 agent 從「問答機器」升級為「主動執行者」。
+
+#### 新工具
+
+| 工具 | 功能 |
+|------|------|
+| `Glob` | 用 glob 模式尋找檔案（支援 `**` 遞迴） |
+| `Grep` | 用正規表達式搜尋檔案內容 |
+| `WebFetch` | 抓取任意 URL，自動將 HTML 轉為純文字 |
+| `pause_task` | 暫停指定排程任務 |
+| `resume_task` | 恢復已暫停的排程任務 |
+
+#### 完整工具清單（v1.5.0）
+
+*檔案系統*：`Bash`(300s) · `Read` · `Write` · `Edit` · `Glob`★ · `Grep`★
+
+*網路*：`WebFetch`★
+
+*排程*：`send_message` · `schedule_task` · `list_tasks` · `cancel_task` · `pause_task`★ · `resume_task`★
+
+★ = 本版新增
+
+#### 行為改進
+
+*主動執行*：agent 收到任務後直接執行，不再詢問「需要我開始嗎？」
+
+*Bug 修正*：修正 Claude 後端 `_ANTHROPIC_AVAILABLE` NameError。
+
+---
+
 # EvoClaw Release Notes
 
 ## v1.4.0 — 2026-03-10

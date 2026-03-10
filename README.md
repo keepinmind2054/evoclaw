@@ -47,7 +47,7 @@
 - **原生多輪對話歷史** — 代理在每次對話中保留近期上下文記憶
 - **每群組記憶**：各群組資料夾內的 `MEMORY.md` 檔案
 - **代理集群（Agent Swarms）** — 組建專業代理團隊，協作處理複雜任務
-- 可用工具：Bash、Read、Write、Edit、send_message、schedule_task、list_tasks、cancel_task 等
+- 可用工具：Bash、Read、Write、Edit、Glob、Grep、WebFetch、send_message、schedule_task、list_tasks、pause_task、resume_task、cancel_task
 - **100% Python** — 無 Node.js、無 TypeScript、無編譯步驟
 - 🧬 **進化引擎** — AI 行為隨使用自動優化（詳見下方）
 
@@ -328,7 +328,7 @@ Telegram / WhatsApp / Discord / Slack / Gmail
            Docker 容器（每群組獨立隔離）
                     ↓ 執行
            agent.py + Gemini / OpenAI 相容 / Claude
-           + 工具（Bash、Read、Write、Edit、send_message、schedule_task、list_tasks、cancel_task 等）
+           + 工具（Bash、Read、Write、Edit、Glob、Grep、WebFetch、send_message、schedule_task、list_tasks、pause_task、resume_task、cancel_task）
                     ↓
            記錄適應度 → 回應路由到正確頻道
 ```

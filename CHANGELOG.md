@@ -2,6 +2,40 @@
 
 All notable changes to EvoClaw will be documented in this file.
 
+## [1.5.0] — 2026-03-10
+
+### New Features
+
+**Agent 新工具：Glob、Grep、WebFetch**
+- `Glob` — 用 glob 模式搜尋檔案（支援 `**` 遞迴），例如 `**/*.py` 找出所有 Python 檔
+- `Grep` — 用正規表達式搜尋檔案內容，回傳 `檔名:行號:內容` 格式；支援 `include` 過濾副檔名
+- `WebFetch` — 抓取任意 URL 內容並轉換為純文字（自動去除 HTML 標籤），最多回傳 12000 字元
+
+**任務管理工具完整化：pause_task / resume_task**
+- Agent 可以透過 `mcp__evoclaw__pause_task` 暫停排程任務
+- Agent 可以透過 `mcp__evoclaw__resume_task` 恢復已暫停的任務
+- 三種工具宣告（Gemini、OpenAI-compatible、Claude）同步更新
+
+**Bash 逾時提升：60s → 300s**
+- 支援長時間操作：`git clone`、`pip install`、`npm install`、`docker build` 等
+
+**修正 Anthropic import**
+- 補上缺少的 `import anthropic` 及 `_ANTHROPIC_AVAILABLE` 旗標定義
+- 解決使用 Claude 後端時的 `NameError` 崩潰
+
+**主動執行 System Prompt**
+- 系統提示詞新增「Execution Style」區塊：agent 直接執行任務，不詢問「需要我開始嗎？」
+- 列出所有可用工具及說明
+
+**全域 CLAUDE.md 更新**
+- 新增「Execution Style」指令段落
+- 更新「What You Can Do」完整列出所有工具
+
+### Bug Fixes
+- 修正 `_ANTHROPIC_AVAILABLE` 未定義導致 Claude 後端啟動時 `NameError`
+
+---
+
 ## [1.4.0] — 2026-03-10
 
 ### New Features

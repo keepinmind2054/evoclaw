@@ -47,7 +47,7 @@ Ships with a built-in **evolution engine** that makes the assistant adapt and im
 - **Native multi-turn conversation history** — agent remembers recent context across turns
 - **Per-group memory** via `MEMORY.md` files in each group folder
 - **Agent Swarms** — spin up teams of specialized agents that collaborate on complex tasks
-- Available tools: Bash, Read, Write, Edit, send_message, schedule_task, list_tasks, cancel_task, and more
+- Available tools: Bash, Read, Write, Edit, Glob, Grep, WebFetch, send_message, schedule_task, list_tasks, pause_task, resume_task, cancel_task
 - **100% Python** — no Node.js, no TypeScript, no compilation step
 - 🧬 **Evolution Engine** — AI behavior auto-optimizes with use (see below)
 
@@ -340,7 +340,7 @@ Telegram / WhatsApp / Discord / Slack / Gmail
            Docker Container (isolated per group)
                     ↓ runs
            agent.py + Gemini / OpenAI-compatible / Claude
-           + tools (Bash, Read, Write, Edit, send_message, schedule_task, list_tasks, cancel_task, ...)
+           + tools (Bash, Read, Write, Edit, Glob, Grep, WebFetch, send_message, schedule_task, list_tasks, pause_task, resume_task, cancel_task, ...)
                     ↓
            Fitness recorded → Response routed back to the right channel
 ```
