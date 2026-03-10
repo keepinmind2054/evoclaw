@@ -86,10 +86,18 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
         schedule_value = payload.get("schedule_value", "")
         # 計算下次執行的 Unix timestamp（毫秒），根據 schedule_type 不同邏輯不同
         next_run = _compute_next_run(schedule_type, schedule_value)
+        chat_jid = payload.get("chatJid", "")
+        # Fallback: if chatJid missing (e.g. old Docker image), look up from registered_groups
+        if not chat_jid:
+            _groups = db.get_all_registered_groups()
+            _match = next((g for g in _groups if g.get("folder") == group_folder), None)
+            if _match:
+                chat_jid = _match.get("jid", "")
+                log.warning(f"schedule_task: chatJid missing in payload, resolved from DB: {chat_jid!r}")
         db.create_task(
             task_id=task_id,
             group_folder=group_folder,
-            chat_jid=payload.get("chatJid", ""),
+            chat_jid=chat_jid,
             prompt=payload.get("prompt", ""),
             schedule_type=schedule_type,
             schedule_value=schedule_value,
