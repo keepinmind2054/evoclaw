@@ -51,7 +51,7 @@
 - 🛡️ **增強免疫系統** — 22 種 injection pattern 檢測，防禦提示詞注入攻擊
 - 📊 **Web Dashboard** — 6 個分頁完整監控（狀態、日誌、Agent、設定、對話、進化），狀態監控支援 Subagent 親子層級視覺化與即時活動追蹤
 - 🏥 **健康監控系統** — 即時追蹤 Container 隊列、錯誤率、記憶體使用量
-- 🛠️ **DevEngine** — 7 階段 LLM 驅動自動化開發引擎（Analyze → Design → Implement → Test → Review → Document → Deploy），支援 auto/interactive 雙模式，每個階段真正呼叫 LLM 產生 artifact，最終自動寫入檔案
+- 🛠️ **DevEngine** — 7 階段 LLM 驅動自動化開發引擎（Analyze → Design → Implement → Test → Review → Document → Deploy），支援 auto/interactive 雙模式；Dashboard 內建 Prompt 輸入表單、7 階段動態 Badge 指示器、即時日誌終端機、互動模式確認面板、Toast 通知系統
 - 📝 **完整文檔系統** — CHANGELOG.md、RELEASE.md 規範化發布流程
 
 ---
@@ -242,7 +242,7 @@ evoclaw/
 | 分頁 | 功能 |
 |------|------|
 | 📊 狀態監控 | Container 狀態、Active Agent（含 Subagent 親子層級 + 即時活動狀態）、記憶體用量、Session 統計、健康檢查、免疫威脅 |
-| 🛠️ DevEngine | 開發 Session 列表（進度條、階段狀態）、Artifact 預覽、Resume / Cancel 操作 |
+| 🛠️ DevEngine | Prompt 輸入表單直接啟動、7 階段動態 Badge（⬜⏳✅）、即時日誌終端機、互動模式確認面板、Toast 通知、歷史 Session 列表 + Artifact 預覽 |
 | 📋 日誌查看 | SSE 即時日誌串流、等級過濾（DEBUG/INFO/WARNING/ERROR）、暫停/繼續 |
 | 🤖 Agent 管理 | 停止 Container、排程任務 CRUD（取消/更新排程）、任務執行日誌 |
 | ⚙️ 系統設定 | `.env` 查看與編輯（敏感欄位自動遮罩）、CLAUDE.md 多檔編輯器 |

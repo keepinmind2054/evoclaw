@@ -1,3 +1,51 @@
+## v1.6.0 — 2026-03-10
+
+> DevEngine Dashboard 全面現代化 — 直接從 Dashboard 啟動、監控、控制開發流程
+
+### 新功能
+
+**1. 直接從 Dashboard 啟動 DevEngine**
+
+不再需要透過聊天室輸入 IPC 指令。在 🛠️ DevEngine 分頁直接輸入需求、選擇模式，點擊按鈕即可啟動。
+
+**2. 7 階段動態 Badge 指示器**
+
+每個 stage 即時顯示 ⬜ 待處理 / ⏳ 進行中（閃爍動畫）/ ⏸ 暫停 / ✅ 完成。
+
+**3. 即時執行日誌終端機**
+
+黑色背景、等寬字體，每 2 秒自動輪詢新日誌，自動捲動。範例：
+
+```
+[14:23:01] 🚀 DevEngine 啟動（mode=auto）
+[14:23:02] 🔧 [ANALYZE] 開始執行...
+[14:23:18] ✅ [ANALYZE] 完成（1247 字元）
+```
+
+**4. 互動模式確認面板**
+
+Interactive mode 下，每個 stage 完成後 Dashboard 自動出現確認面板，選擇繼續或停止。
+
+**5. Toast 通知系統**
+
+右下角堆疊式 Toast，支援成功/錯誤/資訊，3.5 秒後自動淡出。
+
+### 新 API
+
+| 方法 | 路徑 | 說明 |
+|------|------|------|
+| POST | `/api/dev/start` | 從 Dashboard 建立並觸發 DevEngine session |
+| GET  | `/api/dev/log/<id>?offset=N` | 取得增量日誌行（JSON 字串陣列） |
+
+### 升級方式
+
+```bash
+git pull
+python run.py
+```
+
+---
+
 ## v1.5.1 — 2026-03-10
 
 > 程式碼品質大清理：死碼移除、命名衝突修正、Skills Engine 整合、測試重寫

@@ -25,6 +25,37 @@ from . import config, db
 log = logging.getLogger(__name__)
 
 
+# ── Dev log helpers (per-session file-based log for Dashboard terminal) ────────
+
+def _dev_log_path(session_id: str) -> Path:
+    """Return path to the per-session log file."""
+    log_dir = config.DATA_DIR / "dev_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir / f"{session_id}.log"
+
+
+def _write_dev_log(session_id: str, text: str) -> None:
+    """Append a log line to the session's log file (timestamp prefix)."""
+    try:
+        ts = time.strftime("%H:%M:%S")
+        line = f"[{ts}] {text}\n"
+        _dev_log_path(session_id).open("a", encoding="utf-8").write(line)
+    except Exception:
+        pass
+
+
+def get_dev_logs(session_id: str, offset: int = 0) -> list[str]:
+    """Return log lines starting from *offset* (line index)."""
+    try:
+        p = _dev_log_path(session_id)
+        if not p.exists():
+            return []
+        lines = p.read_text(encoding="utf-8").splitlines()
+        return lines[offset:]
+    except Exception:
+        return []
+
+
 # ── Stage definitions ─────────────────────────────────────────────────────────
 
 class DevStage(Enum):
@@ -488,6 +519,8 @@ class DevEngine:
             mode=mode,
         )
         save_session(session)
+        _write_dev_log(session.session_id, f"🚀 DevEngine session 建立（mode={mode}）")
+        _write_dev_log(session.session_id, f"📝 Prompt: {prompt[:200]}")
         log.info(f"DevEngine: new session {session.session_id} mode={mode}")
         return session
 
@@ -517,12 +550,15 @@ class DevEngine:
             # Skip stages already completed (enables resume)
             if stage.value in session.artifacts:
                 log.debug(f"DevEngine: skip {stage.value} (already done)")
+                _write_dev_log(session.session_id, f"⏭ 跳過（已完成）：{stage.value}")
                 continue
 
             session.current_stage = stage.value
             save_session(session)
 
-            await _notify(f"🔧 *[{stage.value.upper()}]* 開始執行...")
+            stage_label = f"[{stage.value.upper()}]"
+            _write_dev_log(session.session_id, f"🔧 {stage_label} 開始執行...")
+            await _notify(f"🔧 *{stage_label}* 開始執行...")
 
             if stage == DevStage.DEPLOY:
                 ok, msg = _deploy_files(session)
@@ -531,25 +567,32 @@ class DevEngine:
                     session.status = "failed"
                     session.error = msg
                     save_session(session)
+                    _write_dev_log(session.session_id, f"❌ Deploy 失敗：{msg}")
                     await _notify(f"❌ Deploy 失敗：{msg}")
                     return False
+                _write_dev_log(session.session_id, f"✅ {stage_label} 完成 — {msg}")
             else:
                 artifact = await _run_llm_stage(stage, session, group)
                 if not artifact:
                     session.status = "failed"
                     session.error = f"Stage {stage.value} returned no output"
                     save_session(session)
-                    await _notify(f"❌ *[{stage.value.upper()}]* 失敗（LLM 無輸出）")
+                    _write_dev_log(session.session_id, f"❌ {stage_label} 失敗（LLM 無輸出）")
+                    await _notify(f"❌ *{stage_label}* 失敗（LLM 無輸出）")
                     return False
+                _write_dev_log(session.session_id,
+                               f"✅ {stage_label} 完成（{len(artifact)} 字元）")
 
             session.artifacts[stage.value] = artifact
             save_session(session)
-            await _notify(f"✅ *[{stage.value.upper()}]* 完成")
+            await _notify(f"✅ *{stage_label}* 完成")
 
             # Interactive mode: pause and let caller resume
             if session.mode == "interactive":
                 session.status = "paused"
                 save_session(session)
+                _write_dev_log(session.session_id,
+                               f"⏸ 已暫停（interactive mode），等待確認繼續...")
                 await _notify(
                     f"⏸ 已暫停。查看 artifact 後回覆 `continue {session.session_id}` 繼續，"
                     f"或 `cancel {session.session_id}` 取消。"
@@ -560,6 +603,8 @@ class DevEngine:
         session.current_stage = None
         save_session(session)
         stages_done = len(session.artifacts)
+        _write_dev_log(session.session_id,
+                       f"🎉 DevEngine 完成！{stages_done}/7 個階段全部通過。")
         await _notify(
             f"🎉 *DevEngine 完成！* {stages_done}/7 個階段全部通過。\n"
             f"Session ID: `{session.session_id}`"

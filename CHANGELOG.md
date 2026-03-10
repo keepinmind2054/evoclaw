@@ -5,6 +5,25 @@
 格式基於 [Keep a Changelog](https://keepachangelog.com/)，
 版本號遵循 [語意化版本](https://semver.org/)。
 
+## [1.6.0] — 2026-03-10
+
+### Features
+
+- **DevEngine Dashboard 全面現代化**：`host/dashboard.py` 🛠️ DevEngine 分頁完整重寫，新增以下功能：
+  - **Prompt 輸入表單**：直接在 Dashboard 輸入需求 + 選擇模式（auto/interactive）並點擊「▶ 開始建立」啟動 DevEngine，無需透過聊天。對應新 API：`POST /api/dev/start`（自動建立 DevSession 並寫入 IPC 觸發 pipeline）。
+  - **7 階段動態 Badge 指示器**：每個 stage（Analyze/Design/Implement/Test/Review/Document/Deploy）顯示即時狀態：⬜ 待處理 → ⏳ 進行中（含 pulse 動畫）→ ⏸ 已暫停 → ✅ 完成。
+  - **即時執行日誌終端機**：黑色背景終端機風格，每 2 秒輪詢 `/api/dev/log/<session_id>?offset=N`，自動捲動至最新日誌，依日誌類型著色（成功綠、錯誤紅、暫停黃）。
+  - **互動模式確認面板**：session 狀態為 `paused` 時自動出現「▶ 繼續下一階段」+「✕ 停止」按鈕，無需回到聊天室操作。
+  - **Toast 通知系統**：取代原 `showMsg()` 一次性訊息，改為右下角堆疊式 Toast，支援成功（綠）/錯誤（紅）/資訊（藍）三種樣式，3.5 秒後自動淡出。
+  - **進度條動畫**：CSS `transition: width 0.5s` 讓進度條平滑更新；刷新頻率從 6 秒縮短至 4 秒，活躍 session 日誌終端另有 2 秒獨立輪詢。
+  - **Session 分區**：執行中/已暫停的 session 在頂部「Active」卡片顯示，歷史 session（completed/failed/cancelled）分開列表顯示。
+- **DevEngine 日誌寫入**：`host/dev_engine.py` 每個 stage 開始/完成/失敗時呼叫 `_write_dev_log()`，將帶時間戳的日誌追加至 `data/dev_logs/<session_id>.log`，供 Dashboard 終端機即時讀取。新增公開函式 `get_dev_logs(session_id, offset)` 回傳增量日誌行。
+- **新 API**：
+  - `GET /api/dev/log/<session_id>?offset=N` — 回傳從第 N 行起的新日誌行（JSON 字串陣列）
+  - `POST /api/dev/start` — 從 Dashboard 建立並觸發 DevEngine session
+
+---
+
 ## [1.5.1] — 2026-03-10
 
 ### Removed

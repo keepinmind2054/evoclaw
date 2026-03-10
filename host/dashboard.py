@@ -105,6 +105,26 @@ tr:nth-child(even) td{background:#1a1a2e}
 .msg-err{background:#450a0a;color:#f87171;border:1px solid #7f1d1d}
 /* Loading */
 .loading{color:#4b5563;text-align:center;padding:32px;font-style:italic}
+/* DevEngine */
+.dev-textarea{width:100%;background:#0a0a14;border:1px solid #2d2d4e;border-radius:4px;padding:8px;color:#e0e0e0;font-family:'Courier New',monospace;font-size:12px;resize:vertical;line-height:1.5}
+.dev-textarea:focus{outline:none;border-color:#7c3aed}
+.dev-select{background:#0a0a14;border:1px solid #2d2d4e;border-radius:4px;padding:4px 8px;color:#e0e0e0;font-family:inherit;font-size:11px;cursor:pointer}
+.dev-select:focus{outline:none;border-color:#7c3aed}
+.dev-terminal{background:#0a0a14;border:1px solid #2d2d4e;border-radius:4px;height:220px;overflow-y:auto;padding:8px;font-size:11px;line-height:1.7;font-family:'Courier New',monospace}
+.dev-terminal-line{padding:1px 0;white-space:pre-wrap;word-break:break-all}
+.log-success{color:#34d399}
+.stage-badge{display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:4px;font-size:11px;border:1px solid #2d2d4e}
+.stage-pending{background:#1a1a2e;color:#4b5563}
+.stage-running{background:#451a03;color:#fbbf24;border-color:#78350f;animation:pulse 1.2s infinite}
+.stage-paused{background:#1e3a5f;color:#60a5fa;border-color:#1d4ed8}
+.stage-done{background:#064e3b;color:#34d399;border-color:#065f46}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
+/* Toast */
+#toast-container{position:fixed;bottom:20px;right:20px;display:flex;flex-direction:column;gap:8px;z-index:9999;pointer-events:none}
+.toast{padding:10px 16px;border-radius:6px;font-size:12px;max-width:320px;pointer-events:all;transition:opacity 0.4s;word-break:break-word}
+.toast-ok{background:#064e3b;color:#34d399;border:1px solid #065f46}
+.toast-err{background:#450a0a;color:#f87171;border:1px solid #7f1d1d}
+.toast-info{background:#1e3a5f;color:#60a5fa;border:1px solid #1d4ed8}
 </style>
 </head>
 <body>
@@ -162,6 +182,7 @@ tr:nth-child(even) td{background:#1a1a2e}
 </div>
 
 <div id="status-msg"></div>
+<div id="toast-container"></div>
 
 <script>
 // ── Clock ──────────────────────────────────────────────────────────────────
@@ -189,7 +210,7 @@ function showTab(name) {
   else if (name==='settings') { loadSettings(); }
   else if (name==='messages') { loadMessages(); _autoRefresh = setInterval(loadMessages, 8000); }
   else if (name==='evolution') { loadEvolution(); _autoRefresh = setInterval(loadEvolution, 10000); }
-  else if (name==='devengine') { loadDevEngine(); _autoRefresh = setInterval(loadDevEngine, 6000); }
+  else if (name==='devengine') { loadDevEngine(); _autoRefresh = setInterval(loadDevEngine, 4000); }
 }
 
 // ── Fetch helper ───────────────────────────────────────────────────────────
@@ -201,13 +222,15 @@ async function api(path, opts) {
   } catch(e) { return null; }
 }
 
-function showMsg(msg, ok=true) {
-  const el = document.getElementById('status-msg');
+function toast(msg, ok=true, dur=3500) {
+  const container = document.getElementById('toast-container');
+  const el = document.createElement('div');
+  el.className = 'toast ' + (ok === 'info' ? 'toast-info' : ok ? 'toast-ok' : 'toast-err');
   el.textContent = msg;
-  el.className = ok ? 'msg-ok' : 'msg-err';
-  el.style.display = 'block';
-  setTimeout(() => el.style.display='none', 3000);
+  container.appendChild(el);
+  setTimeout(() => { el.style.opacity='0'; setTimeout(()=>el.remove(), 420); }, dur);
 }
+function showMsg(msg, ok=true) { toast(msg, ok); }
 
 function esc(s) {
   if (s==null) return '<span class="na">—</span>';
@@ -769,111 +792,258 @@ async function loadEvolution() {
 }
 
 // ── Tab 7: DevEngine ──────────────────────────────────────────────────────
+const DEV_STAGES = ['analyze','design','implement','test','review','document','deploy'];
+const DEV_ICONS  = {analyze:'🔍',design:'📐',implement:'💻',test:'🧪',review:'🔎',document:'📝',deploy:'🚀'};
+
 let _devSelectedSession = null;
+let _devLogInterval     = null;
+let _devLogOffset       = 0;
+let _devActiveId        = null;  // session being monitored in terminal
 
 async function loadDevEngine() {
   const sessions = await api('/api/dev/sessions');
+
   let html = '<div class="section-title">🛠️ DevEngine — 7 階段自動化開發引擎</div>';
 
-  // How-to card
-  html += `<div class="card"><h3>📖 使用方式</h3>
-  <p style="color:#9ca3af;font-size:12px;margin-bottom:8px">
-    在聊天中使用 IPC 觸發（寫入 dev_task 訊息），或請 agent 啟動開發流程。<br>
-    Pipeline：<strong>Analyze → Design → Implement → Test → Review → Document → Deploy</strong>
-  </p>
-  <div style="background:#0a0a14;border:1px solid #2d2d4e;border-radius:4px;padding:10px;font-size:11px;color:#6b7280">
-    IPC 範例：<code style="color:#a78bfa">{"type":"dev_task","prompt":"Add a metrics endpoint","mode":"auto"}</code><br>
-    Resume：<code style="color:#a78bfa">{"type":"dev_task","session_id":"dev_1234_abc","prompt":""}</code>
-  </div>
+  // ── Start form ────────────────────────────────────────────────────────────
+  html += `<div class="card">
+    <h3>🚀 啟動新開發任務</h3>
+    <textarea id="dev-prompt" class="dev-textarea" rows="3"
+      placeholder="描述你想建立的功能，例如：在 Dashboard 新增 CPU 使用率折線圖..."></textarea>
+    <div style="display:flex;align-items:center;gap:12px;margin-top:8px;flex-wrap:wrap">
+      <label style="color:#6b7280;font-size:11px">模式：</label>
+      <select id="dev-mode" class="dev-select">
+        <option value="auto">🤖 Auto（全自動完成）</option>
+        <option value="interactive">🔍 Interactive（每階段確認）</option>
+      </select>
+      <button class="btn btn-primary" onclick="devStart()">▶ 開始建立</button>
+    </div>
   </div>`;
 
-  // Stage pipeline legend
-  const STAGES = ['analyze','design','implement','test','review','document','deploy'];
-  const STAGE_ICONS = {analyze:'🔍',design:'📐',implement:'💻',test:'🧪',review:'🔎',document:'📝',deploy:'🚀'};
+  // ── Active session monitor ────────────────────────────────────────────────
+  const active = sessions && sessions.find(s => ['running','paused','pending'].includes(s.status));
+  if (active) {
+    const done  = active.stages_done || 0;
+    const pct   = Math.round(done / 7 * 100);
+    const sc    = active.status === 'paused' ? 'blue' : active.status === 'pending' ? 'gray' : 'yellow';
 
-  // Session list
-  html += '<div class="card"><h3>📋 開發 Sessions（最近 30 筆）</h3>';
-  if (sessions && sessions.length > 0) {
-    html += '<table><thead><tr><th>Session</th><th>Prompt</th><th>Mode</th><th>Status</th><th>Progress</th><th>Updated</th><th>Action</th></tr></thead><tbody>';
-    for (const s of sessions) {
-      const statusColor = {completed:'green',failed:'red',running:'yellow',paused:'blue',cancelled:'gray',pending:'gray'}[s.status] || 'gray';
-      const done = s.stages_done || 0;
-      const pct = Math.round(done/7*100);
-      const barFill = `width:${pct}%;background:${pct===100?'#34d399':'#7c3aed'};height:6px;border-radius:3px`;
-      const ts = s.updated_at ? new Date(s.updated_at*1000).toLocaleString() : '';
-      const shortId = s.session_id.replace('dev_','').substring(0,14);
-      let actions = '';
-      if (s.status === 'paused') {
-        actions += `<button class="btn btn-sm" onclick="devResume('${esc(s.session_id)}')" style="background:#3b0764;color:#c084fc;border:1px solid #7c3aed;margin-right:4px">▶ Resume</button>`;
-      }
-      if (['running','paused'].includes(s.status)) {
-        actions += `<button class="btn btn-sm btn-danger" onclick="devCancel('${esc(s.session_id)}')">✕ Cancel</button>`;
-      }
-      actions += `<button class="btn btn-sm" onclick="devShowDetail('${esc(s.session_id)}')" style="background:#1a1a2e;color:#9ca3af;border:1px solid #2d2d4e;margin-left:4px">🔍</button>`;
+    // 7-stage badges
+    let stageBadges = '';
+    DEV_STAGES.forEach((s, i) => {
+      const art  = i < done;
+      const cur  = active.current_stage === s;
+      let cls = 'stage-pending';
+      let ico = '⬜';
+      if (art) { cls = 'stage-done'; ico = '✅'; }
+      else if (cur && active.status === 'running')  { cls = 'stage-running'; ico = '⏳'; }
+      else if (cur && active.status === 'paused')   { cls = 'stage-paused';  ico = '⏸'; }
+      stageBadges += `<div class="stage-badge ${cls}" title="${s}">${DEV_ICONS[s]} <span style="font-size:9px">${s}</span> ${ico}</div>`;
+    });
+
+    // Interactive confirm panel
+    let confirmPanel = '';
+    if (active.status === 'paused') {
+      confirmPanel = `<div style="background:#1a1a28;border:1px solid #3b0764;border-radius:6px;padding:12px;margin-bottom:12px">
+        <div style="color:#c084fc;font-size:12px;margin-bottom:8px">
+          ⏸ 階段 <strong>${active.current_stage || ''}</strong> 已完成，等待確認才繼續
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-success" onclick="devResume('${esc(active.session_id)}')">▶ 繼續下一階段</button>
+          <button class="btn btn-danger"  onclick="devCancel('${esc(active.session_id)}')">✕ 停止</button>
+        </div>
+      </div>`;
+    }
+
+    html += `<div class="card" id="dev-active-card">
+      <h3>⏳ 執行中 &mdash; <code style="color:#a78bfa">${esc(active.session_id.replace('dev_',''))}</code>
+        ${badge(active.status, sc)}</h3>
+      <div style="color:#9ca3af;font-size:11px;margin-bottom:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+           title="${esc(active.prompt)}">${esc(active.prompt)}</div>
+
+      <!-- 7-stage badges -->
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">${stageBadges}</div>
+
+      <!-- Progress bar -->
+      <div style="background:#1a1a2e;border-radius:4px;height:8px;margin-bottom:6px;overflow:hidden">
+        <div style="width:${pct}%;background:${pct===100?'#34d399':'#7c3aed'};height:8px;border-radius:4px;transition:width 0.5s"></div>
+      </div>
+      <div style="font-size:11px;color:#6b7280;margin-bottom:12px">${done}/7 階段完成（${pct}%）</div>
+
+      ${confirmPanel}
+
+      <!-- Log terminal -->
+      <h3 style="margin-bottom:6px">📟 即時執行日誌</h3>
+      <div id="dev-log-terminal" class="dev-terminal">
+        <div class="dev-terminal-line log-INFO">▶ Session ${esc(active.session_id)} 監控中...</div>
+      </div>
+      <button class="btn btn-danger btn-sm" onclick="devCancel('${esc(active.session_id)}')"
+        style="margin-top:8px">✕ 取消此 Session</button>
+    </div>`;
+
+    // Start / restart log polling for this session
+    if (_devActiveId !== active.session_id) {
+      if (_devLogInterval) clearInterval(_devLogInterval);
+      _devLogOffset = 0;
+      _devActiveId  = active.session_id;
+    }
+    clearInterval(_devLogInterval);
+    _devLogInterval = setInterval(() => devPollLogs(active.session_id), 2000);
+    setTimeout(() => devPollLogs(active.session_id), 100);
+
+  } else {
+    // No active session — stop polling
+    if (_devLogInterval) { clearInterval(_devLogInterval); _devLogInterval = null; }
+    _devActiveId = null;
+  }
+
+  // ── Session list (completed / failed / cancelled) ─────────────────────────
+  const pastSessions = sessions ? sessions.filter(s => !['running','paused','pending'].includes(s.status)) : [];
+  html += `<div class="card"><h3>📋 歷史 Sessions（最近 30 筆）</h3>`;
+  if (pastSessions.length > 0) {
+    html += `<table><thead><tr>
+      <th>Session ID</th><th>Prompt</th><th>Mode</th><th>Status</th>
+      <th>Progress</th><th>Updated</th><th>操作</th>
+    </tr></thead><tbody>`;
+    for (const s of pastSessions) {
+      const sc2  = {completed:'green',failed:'red',cancelled:'gray'}[s.status] || 'gray';
+      const done2 = s.stages_done || 0;
+      const pct2  = Math.round(done2 / 7 * 100);
+      const bar2  = `width:${pct2}%;background:${pct2===100?'#34d399':'#7c3aed'};height:6px;border-radius:3px`;
+      const ts   = s.updated_at ? new Date(s.updated_at*1000).toLocaleString() : '';
+      const sid  = esc(s.session_id.replace('dev_','').substring(0,14));
+      const act2 = `<button class="btn btn-sm" onclick="devShowDetail('${esc(s.session_id)}')"
+        style="background:#1a1a2e;color:#9ca3af;border:1px solid #2d2d4e">🔍</button>`;
       html += `<tr>
-        <td><code style="font-size:10px;color:#a78bfa">${esc(shortId)}</code></td>
-        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(s.prompt)}">${esc(s.prompt)}</td>
+        <td><code style="font-size:10px;color:#a78bfa">${sid}</code></td>
+        <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+            title="${esc(s.prompt)}">${esc(s.prompt)}</td>
         <td>${badge(s.mode,'gray')}</td>
-        <td>${badge(s.status,statusColor)}</td>
+        <td>${badge(s.status,sc2)}</td>
         <td style="min-width:80px">
-          <div style="background:#1a1a2e;border-radius:3px;height:6px"><div style="${barFill}"></div></div>
-          <span style="font-size:10px;color:#6b7280">${done}/7</span>
+          <div style="background:#1a1a2e;border-radius:3px;height:6px">
+            <div style="${bar2}"></div></div>
+          <span style="font-size:10px;color:#6b7280">${done2}/7</span>
         </td>
         <td style="font-size:10px;color:#6b7280">${esc(ts)}</td>
-        <td style="white-space:nowrap">${actions}</td>
+        <td>${act2}</td>
       </tr>`;
     }
     html += '</tbody></table>';
   } else {
-    html += '<div class="empty">尚無開發 session。請透過聊天觸發 DevEngine。</div>';
+    html += '<div class="empty">尚無歷史 session。</div>';
   }
   html += '</div>';
 
-  // Session detail (if selected)
+  // ── Session detail ────────────────────────────────────────────────────────
   if (_devSelectedSession) {
-    const detail = await api('/api/dev/session?id='+encodeURIComponent(_devSelectedSession));
-    if (detail) {
-      html += `<div class="card"><h3>🔍 Session 詳情：<code style="color:#a78bfa">${esc(detail.session_id)}</code></h3>`;
-      html += `<p style="color:#9ca3af;font-size:11px;margin-bottom:10px"><strong>Prompt:</strong> ${esc(detail.prompt)}</p>`;
-      if (detail.error) html += `<div style="background:#450a0a;border:1px solid #7f1d1d;padding:8px;border-radius:4px;color:#f87171;margin-bottom:8px;font-size:11px">❌ ${esc(detail.error)}</div>`;
-      // Stage artifact previews
-      html += '<table><thead><tr><th>Stage</th><th>Status</th><th>Preview</th></tr></thead><tbody>';
-      for (const stage of STAGES) {
-        const icon = STAGE_ICONS[stage] || '•';
-        const art = detail.artifacts ? detail.artifacts[stage] : null;
-        const isCurrent = detail.current_stage === stage && detail.status === 'running';
-        const statusIcon = art ? '✅' : (isCurrent ? '⏳' : '⬜');
-        html += `<tr${isCurrent?' style="background:#1a1a28"':''}>
-          <td>${icon} ${stage}</td>
-          <td>${statusIcon}</td>
-          <td style="font-size:10px;color:#9ca3af;max-width:400px;word-break:break-word">${art ? esc(art) : '<span class="na">—</span>'}</td>
+    const detail = await api('/api/dev/session?id=' + encodeURIComponent(_devSelectedSession));
+    if (detail && !detail.error) {
+      html += `<div class="card">
+        <h3>🔍 Session 詳情 &mdash; <code style="color:#a78bfa">${esc(detail.session_id)}</code></h3>
+        <p style="color:#9ca3af;font-size:11px;margin-bottom:10px">
+          <strong>Prompt:</strong> ${esc(detail.prompt)}<br>
+          <strong>Mode:</strong> ${esc(detail.mode)} &nbsp; <strong>Status:</strong> ${esc(detail.status)}
+        </p>
+        ${detail.error ? `<div style="background:#450a0a;border:1px solid #7f1d1d;padding:8px;border-radius:4px;
+          color:#f87171;margin-bottom:8px;font-size:11px">❌ ${esc(detail.error)}</div>` : ''}
+        <table><thead><tr><th>階段</th><th>狀態</th><th>Artifact 預覽（前 500 字）</th></tr></thead><tbody>`;
+      for (const stage of DEV_STAGES) {
+        const art  = detail.artifacts ? detail.artifacts[stage] : null;
+        const cur  = detail.current_stage === stage && detail.status === 'running';
+        const ico  = art ? '✅' : (cur ? '⏳' : '⬜');
+        html += `<tr${cur ? ' style="background:#1a1a28"' : ''}>
+          <td>${DEV_ICONS[stage]} ${stage}</td>
+          <td>${ico}</td>
+          <td style="font-size:10px;color:#9ca3af;max-width:400px;word-break:break-word">
+            ${art ? `<pre style="margin:0;white-space:pre-wrap;font-family:inherit">${esc(art)}</pre>`
+                  : '<span class="na">—</span>'}
+          </td>
         </tr>`;
       }
-      html += '</tbody></table>';
-      html += `<button class="btn btn-sm" onclick="_devSelectedSession=null;loadDevEngine()" style="margin-top:8px;background:#1a1a2e;color:#6b7280;border:1px solid #2d2d4e">✕ 關閉詳情</button>`;
-      html += '</div>';
+      html += `</tbody></table>
+        <button class="btn btn-sm" onclick="_devSelectedSession=null;loadDevEngine()"
+          style="margin-top:8px;background:#1a1a2e;color:#6b7280;border:1px solid #2d2d4e">✕ 關閉</button>
+      </div>`;
     }
   }
 
   document.getElementById('tab-devengine').innerHTML = html;
 }
 
-async function devResume(sessionId) {
-  const r = await api('/api/dev/resume', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({session_id: sessionId})});
-  showMsg(r && r.ok ? '▶ Resume 已送出' : '❌ Resume 失敗', r && r.ok);
-  loadDevEngine();
+// Start a new DevEngine session from the Dashboard form
+async function devStart() {
+  const promptEl = document.getElementById('dev-prompt');
+  const modeEl   = document.getElementById('dev-mode');
+  const prompt   = promptEl ? promptEl.value.trim() : '';
+  const mode     = modeEl   ? modeEl.value           : 'auto';
+  if (!prompt) { toast('請輸入需求描述', false); return; }
+  const r = await api('/api/dev/start', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({prompt, mode}),
+  });
+  if (r && r.ok) {
+    toast(`🚀 DevEngine 啟動！Session: ${r.session_id}`);
+    _devSelectedSession = null;
+    _devLogOffset = 0;
+    loadDevEngine();
+  } else {
+    toast('❌ 啟動失敗：' + (r && r.error || '未知錯誤'), false);
+  }
 }
 
+// Resume a paused session (continue to next stage)
+async function devResume(sessionId) {
+  const r = await api('/api/dev/resume', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({session_id: sessionId}),
+  });
+  toast(r && r.ok ? '▶ 已繼續執行下一階段' : '❌ Resume 失敗', r && r.ok);
+  setTimeout(loadDevEngine, 1200);
+}
+
+// Cancel / stop a session
 async function devCancel(sessionId) {
   if (!confirm('確定要取消這個 DevEngine session？')) return;
-  const r = await api('/api/dev/cancel', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({session_id: sessionId})});
-  showMsg(r && r.ok ? '✕ Session 已取消' : '❌ 取消失敗', r && r.ok);
+  const r = await api('/api/dev/cancel', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({session_id: sessionId}),
+  });
+  toast(r && r.ok ? '✕ Session 已取消' : '❌ 取消失敗', r && r.ok);
+  if (_devLogInterval) { clearInterval(_devLogInterval); _devLogInterval = null; }
+  _devActiveId = null;
   loadDevEngine();
 }
 
+// Show artifact detail for a past session
 function devShowDetail(sessionId) {
-  _devSelectedSession = sessionId;
+  _devSelectedSession = sessionId === _devSelectedSession ? null : sessionId;
   loadDevEngine();
+}
+
+// Poll new log lines from the server and append to terminal
+async function devPollLogs(sessionId) {
+  const terminal = document.getElementById('dev-log-terminal');
+  if (!terminal) {
+    clearInterval(_devLogInterval); _devLogInterval = null; return;
+  }
+  const lines = await api(`/api/dev/log/${encodeURIComponent(sessionId)}?offset=${_devLogOffset}`);
+  if (lines && Array.isArray(lines) && lines.length > 0) {
+    for (const line of lines) {
+      const el = document.createElement('div');
+      el.className = 'dev-terminal-line ' + (
+        line.includes('❌') ? 'log-ERROR'   :
+        line.includes('✅') ? 'log-success' :
+        line.includes('⏸') ? 'log-WARNING' : 'log-INFO'
+      );
+      el.textContent = line;
+      terminal.appendChild(el);
+    }
+    _devLogOffset += lines.length;
+    terminal.scrollTop = terminal.scrollHeight;
+  }
 }
 
 // Initial load
@@ -1215,6 +1385,16 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"error": str(e)})
 
+        elif path.startswith("/api/dev/log/"):
+            # GET /api/dev/log/<session_id>?offset=N  → returns list of new log lines
+            session_id = path[len("/api/dev/log/"):]
+            try:
+                offset = int(qs.get("offset", "0"))
+                from .dev_engine import get_dev_logs
+                self._json(get_dev_logs(session_id, offset))
+            except Exception as e:
+                self._json([])
+
         elif path == "/health":
             h = _get_health()
             self._json(h, 200 if h["status"]=="ok" else 503)
@@ -1277,6 +1457,50 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     new_lines.append(f'{key}="{value}"')
                 env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
                 self._json({"ok": True})
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)})
+
+        # POST /api/dev/start — create a new DevEngine session and trigger via IPC
+        elif path == "/api/dev/start":
+            body = self._read_body()
+            prompt = body.get("prompt", "").strip()
+            mode   = body.get("mode", "auto")
+            if not prompt:
+                self._json({"ok": False, "error": "prompt required"}); return
+            try:
+                from .dev_engine import DevEngine, DevSession, save_session, _write_dev_log
+                import uuid as _uuid
+                session = DevSession(
+                    session_id=f"dev_{int(time.time())}_{_uuid.uuid4().hex[:6]}",
+                    prompt=prompt,
+                    jid="dashboard",
+                    mode=mode,
+                )
+                save_session(session)
+                _write_dev_log(session.session_id, f"🚀 DevEngine 啟動（mode={mode}）")
+                _write_dev_log(session.session_id, f"📝 Prompt: {prompt[:200]}")
+                # Find main group and write IPC dev_task file to trigger the pipeline
+                from . import db as _db
+                groups = _db.get_all_registered_groups()
+                main_group = next((g for g in groups if g.get("is_main")), None)
+                if not main_group:
+                    # No main group found – try first group
+                    main_group = groups[0] if groups else None
+                if main_group:
+                    ipc_dir = config.DATA_DIR / "ipc" / main_group["folder"] / "tasks"
+                    ipc_dir.mkdir(parents=True, exist_ok=True)
+                    fname = ipc_dir / f"{int(time.time()*1000)}_devstart.json"
+                    fname.write_text(json.dumps({
+                        "type": "dev_task",
+                        "session_id": session.session_id,
+                        "prompt": "",  # session already has prompt
+                        "mode": mode,
+                    }), encoding="utf-8")
+                    self._json({"ok": True, "session_id": session.session_id})
+                else:
+                    # No groups configured — return session_id anyway so dashboard shows it
+                    self._json({"ok": True, "session_id": session.session_id,
+                                "warning": "No group configured — pipeline cannot auto-start"})
             except Exception as e:
                 self._json({"ok": False, "error": str(e)})
 
