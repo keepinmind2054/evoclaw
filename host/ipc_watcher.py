@@ -1,5 +1,6 @@
 """IPC file watcher — processes agent-to-host messages"""
 import asyncio
+import importlib.util
 import json
 import logging
 import time
@@ -12,6 +13,46 @@ from .group_folder import is_valid_group_folder
 import asyncio as _asyncio
 
 log = logging.getLogger(__name__)
+
+# ── skills_engine importlib loader (avoids sys.path pollution) ─────────────────
+_SKILLS_ENGINE_DIR = Path(__file__).parent.parent / "skills_engine"
+_skills_engine_mod = None
+
+def _get_skills_engine():
+    """Lazily load skills_engine via importlib without mutating sys.path."""
+    global _skills_engine_mod
+    if _skills_engine_mod is None:
+        init_path = _SKILLS_ENGINE_DIR / "__init__.py"
+        spec = importlib.util.spec_from_file_location("skills_engine", init_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _skills_engine_mod = mod
+    return _skills_engine_mod
+
+# Module-level lock to prevent concurrent skill installs/uninstalls
+_skills_lock = asyncio.Lock()
+
+
+def _notify_main_group_error(filename: str, error: str) -> None:
+    """Send IPC error notification to main group by writing a new IPC message file."""
+    try:
+        groups = db.get_all_registered_groups()
+        main = next((g for g in groups if g.get("is_main")), None)
+        if not main:
+            return
+        ipc_dir = config.DATA_DIR / "ipc" / main["folder"] / "messages"
+        if not ipc_dir.exists():
+            return
+        payload = {
+            "type": "message",
+            "chatJid": main["jid"],
+            "text": f"IPC Error: failed to process `{filename}`\n```\n{error[:300]}\n```",
+        }
+        out = ipc_dir / f"ipc_error_alert_{int(time.time() * 1000)}.json"
+        out.write_text(json.dumps(payload), encoding="utf-8")
+    except Exception as exc:
+        log.debug("_notify_main_group_error failed: %s", exc)
+
 
 async def process_ipc_dir(group_folder: str, is_main: bool, route_fn: Callable) -> None:
     """
@@ -57,6 +98,11 @@ async def process_ipc_dir(group_folder: str, is_main: bool, route_fn: Callable) 
                     f.rename(err_dir / f.name)
                 except Exception:
                     f.unlink(missing_ok=True)  # 若 rename 也失敗才刪除
+                # Alert main group about the IPC processing failure
+                try:
+                    _notify_main_group_error(f.name, str(e))
+                except Exception:
+                    pass
 
 async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn: Callable) -> None:
     """
@@ -266,48 +312,45 @@ async def _run_apply_skill(
     """
     在 thread executor 中執行 skills_engine.apply_skill()（同步函式）。
     完成後透過 route_fn 發送結果，並（若提供 requestId）寫入 results 目錄。
+    Uses _skills_lock to prevent concurrent skill installs/uninstalls.
     """
-    import sys, os
-    # 確保 skills_engine 在 Python path 中（從 host/ 往上一層找）
-    root_dir = str(Path(__file__).parent.parent)
-    if root_dir not in sys.path:
-        sys.path.insert(0, root_dir)
-    try:
-        from skills_engine import apply_skill
-        groups = db.get_all_registered_groups()
-        group = next((g for g in groups if g["folder"] == group_folder), None)
-        jid = group["jid"] if group else ""
+    async with _skills_lock:
+        try:
+            apply_skill = _get_skills_engine().apply_skill
+            groups = db.get_all_registered_groups()
+            group = next((g for g in groups if g["folder"] == group_folder), None)
+            jid = group["jid"] if group else ""
 
-        # skills_engine.apply_skill 是同步函式，用 executor 避免阻塞 event loop
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, apply_skill, skill_path)
+            # skills_engine.apply_skill 是同步函式，用 executor 避免阻塞 event loop
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, apply_skill, skill_path)
 
-        if result.success:
-            msg = f"✅ Skill applied: {result.skill} v{result.version}"
-        else:
-            msg = f"❌ Skill apply failed: {result.error}"
-            if result.merge_conflicts:
-                msg += f"\nConflicts: {', '.join(result.merge_conflicts)}"
+            if result.success:
+                msg = f"✅ Skill applied: {result.skill} v{result.version}"
+            else:
+                msg = f"❌ Skill apply failed: {result.error}"
+                if result.merge_conflicts:
+                    msg += f"\nConflicts: {', '.join(result.merge_conflicts)}"
 
-        if jid:
-            await route_fn(jid, msg)
+            if jid:
+                await route_fn(jid, msg)
 
-        # 若有 requestId，將結果寫入 results 目錄供 container 輪詢讀取
-        if request_id:
-            result_dir = config.DATA_DIR / "ipc" / group_folder / "results"
-            result_dir.mkdir(parents=True, exist_ok=True)
-            (result_dir / f"{request_id}.json").write_text(
-                json.dumps({
-                    "requestId": request_id,
-                    "output": msg,
-                    "success": result.success,
-                    "skill": result.skill,
-                    "version": result.version,
-                }),
-                encoding="utf-8",
-            )
-    except Exception as e:
-        log.error(f"apply_skill IPC error: {e}")
+            # 若有 requestId，將結果寫入 results 目錄供 container 輪詢讀取
+            if request_id:
+                result_dir = config.DATA_DIR / "ipc" / group_folder / "results"
+                result_dir.mkdir(parents=True, exist_ok=True)
+                (result_dir / f"{request_id}.json").write_text(
+                    json.dumps({
+                        "requestId": request_id,
+                        "output": msg,
+                        "success": result.success,
+                        "skill": result.skill,
+                        "version": result.version,
+                    }),
+                    encoding="utf-8",
+                )
+        except Exception as e:
+            log.error(f"apply_skill IPC error: {e}")
 
 
 async def _run_uninstall_skill(
@@ -315,43 +358,41 @@ async def _run_uninstall_skill(
 ) -> None:
     """
     在 thread executor 中執行 skills_engine.uninstall_skill()（同步函式）。
+    Uses _skills_lock to prevent concurrent skill installs/uninstalls.
     """
-    import sys
-    root_dir = str(Path(__file__).parent.parent)
-    if root_dir not in sys.path:
-        sys.path.insert(0, root_dir)
-    try:
-        from skills_engine import uninstall_skill
-        groups = db.get_all_registered_groups()
-        group = next((g for g in groups if g["folder"] == group_folder), None)
-        jid = group["jid"] if group else ""
+    async with _skills_lock:
+        try:
+            uninstall_skill = _get_skills_engine().uninstall_skill
+            groups = db.get_all_registered_groups()
+            group = next((g for g in groups if g["folder"] == group_folder), None)
+            jid = group["jid"] if group else ""
 
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, uninstall_skill, skill_name)
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, uninstall_skill, skill_name)
 
-        if result.success:
-            msg = f"✅ Skill uninstalled: {result.skill}"
-            if result.custom_patch_warning:
-                msg += f"\n⚠️ {result.custom_patch_warning}"
-        else:
-            msg = f"❌ Skill uninstall failed: {result.error}"
+            if result.success:
+                msg = f"✅ Skill uninstalled: {result.skill}"
+                if result.custom_patch_warning:
+                    msg += f"\n⚠️ {result.custom_patch_warning}"
+            else:
+                msg = f"❌ Skill uninstall failed: {result.error}"
 
-        if jid:
-            await route_fn(jid, msg)
+            if jid:
+                await route_fn(jid, msg)
 
-        if request_id:
-            result_dir = config.DATA_DIR / "ipc" / group_folder / "results"
-            result_dir.mkdir(parents=True, exist_ok=True)
-            (result_dir / f"{request_id}.json").write_text(
-                json.dumps({
-                    "requestId": request_id,
-                    "output": msg,
-                    "success": result.success,
-                }),
-                encoding="utf-8",
-            )
-    except Exception as e:
-        log.error(f"uninstall_skill IPC error: {e}")
+            if request_id:
+                result_dir = config.DATA_DIR / "ipc" / group_folder / "results"
+                result_dir.mkdir(parents=True, exist_ok=True)
+                (result_dir / f"{request_id}.json").write_text(
+                    json.dumps({
+                        "requestId": request_id,
+                        "output": msg,
+                        "success": result.success,
+                    }),
+                    encoding="utf-8",
+                )
+        except Exception as e:
+            log.error(f"uninstall_skill IPC error: {e}")
 
 
 async def _run_list_skills(
@@ -360,12 +401,8 @@ async def _run_list_skills(
     """
     列出已安裝的 Skills，將結果寫入 results 目錄（唯讀，任何群組均可查詢）。
     """
-    import sys
-    root_dir = str(Path(__file__).parent.parent)
-    if root_dir not in sys.path:
-        sys.path.insert(0, root_dir)
     try:
-        from skills_engine import get_applied_skills
+        get_applied_skills = _get_skills_engine().get_applied_skills
         loop = asyncio.get_event_loop()
         skills = await loop.run_in_executor(None, get_applied_skills)
 

@@ -22,6 +22,28 @@ log = logging.getLogger(__name__)
 _active_containers: dict[str, dict] = {}  # container_name → info dict
 _active_lock = _threading.Lock()
 
+# ── Docker circuit breaker ─────────────────────────────────────────────────────
+_docker_failures = 0
+_docker_failure_lock = _threading.Lock()
+_DOCKER_CIRCUIT_THRESHOLD = 3  # open circuit after this many consecutive failures
+
+
+def _record_docker_success() -> None:
+    global _docker_failures
+    with _docker_failure_lock:
+        _docker_failures = 0
+
+
+def _record_docker_failure() -> None:
+    global _docker_failures
+    with _docker_failure_lock:
+        _docker_failures += 1
+
+
+def _docker_circuit_open() -> bool:
+    with _docker_failure_lock:
+        return _docker_failures >= _DOCKER_CIRCUIT_THRESHOLD
+
 
 def get_active_containers() -> list[dict]:
     """Return a snapshot of currently running evoclaw containers."""
@@ -129,6 +151,12 @@ async def run_container_agent(
     讓呼叫方（通常是 _message_loop）安全地推進游標。
     若 container 逾時或解析失敗，不呼叫 on_success，保留 rollback 安全性。
     """
+    if _docker_circuit_open():
+        raise RuntimeError(
+            f"Docker circuit breaker open: {_docker_failures} consecutive failures. "
+            "Check Docker daemon status."
+        )
+
     folder = group["folder"]
     jid = group["jid"]
     # 用時間戳記讓 container 名稱唯一，方便 debug 與孤兒清理
@@ -310,6 +338,7 @@ async def run_container_agent(
         response_ms = int((time.time() - t0) * 1000)
         # 記錄成功執行數據到演化引擎（適應度追蹤）
         record_run(jid, run_id, response_ms, retry_count=0, success=True)
+        _record_docker_success()
 
         if on_success:
             await on_success()
@@ -322,12 +351,14 @@ async def run_container_agent(
         await _stop_container(container_name)
         # 記錄超時失敗數據（適應度扣分）
         record_run(jid, run_id, int(config.CONTAINER_TIMEOUT * 1000), retry_count=0, success=False)
+        _record_docker_failure()
         return {"status": "error", "result": None, "error": "Container timed out"}
     except Exception as e:
         log.error(f"Container {folder} error: {e}")
         response_ms = int((time.time() - t0) * 1000)
         # 記錄異常失敗數據
         record_run(jid, run_id, response_ms, retry_count=0, success=False)
+        _record_docker_failure()
         return {"status": "error", "result": None, "error": str(e)}
     finally:
         with _active_lock:

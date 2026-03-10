@@ -336,8 +336,14 @@ def set_registered_group(jid: str, name: str, folder: str, trigger_pattern: Opti
     container_config 以 JSON 字串儲存（未來用於自訂 container 設定）。
     added_at 記錄登記時間（毫秒 Unix timestamp）。
     INSERT OR REPLACE 確保相同 JID 的群組設定可以被覆寫更新。
+
+    Enforces single-main-group invariant: if is_main=True, all other groups
+    are demoted to is_main=False before inserting/updating this record.
     """
     db = get_db()
+    if is_main:
+        # Enforce single main group invariant — demote all other groups
+        db.execute("UPDATE registered_groups SET is_main = 0 WHERE jid != ?", (jid,))
     db.execute("""
         INSERT OR REPLACE INTO registered_groups
         (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main)

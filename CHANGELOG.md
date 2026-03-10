@@ -5,6 +5,21 @@
 格式基於 [Keep a Changelog](https://keepachangelog.com/)，
 版本號遵循 [語意化版本](https://semver.org/)。
 
+## [1.8.0] - 2026-03-11
+
+### Fixed
+- Fix #1: Version alignment — pyproject.toml now correctly reports v1.8.0
+- Fix #2: Remove sys.path manipulation in ipc_watcher.py, use importlib for skills_engine
+- Fix #3: Add periodic orphan container cleanup loop (every 5 min) alongside startup cleanup
+- Fix #4: IPC error alerting — failed IPC files now trigger warning message to main group
+- Fix #5: Circuit breaker for Docker — opens after 3 consecutive failures, prevents cascade
+- Fix #6: Asyncio lock on apply_skill/uninstall_skill — prevents concurrent skill modification races
+- Fix #7: Main group uniqueness guard — registering a new main group auto-demotes old main
+- Fix #8: Expanded test coverage — new test_infrastructure.py covering channels, group_queue, webportal, circuit breaker, IPC errors, main group guard
+- Fix #9: Container run timeout watchdog — 5-minute timeout with cursor advancement fallback prevents message loss on crash
+
+---
+
 ## [1.7.0] - 2026-03-11
 
 ### Added

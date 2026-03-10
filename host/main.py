@@ -76,6 +76,14 @@ def _get_group_by_jid(jid: str) -> dict | None:
     return next((g for g in _registered_groups if g["jid"] == jid), None)
 
 
+def get_main_group(groups: list[dict]) -> dict | None:
+    """Return the single main group. Logs a warning if multiple mains exist."""
+    mains = [g for g in groups if g.get("is_main")]
+    if len(mains) > 1:
+        log.warning("Multiple main groups found (%d), using most recent", len(mains))
+    return mains[0] if mains else None
+
+
 # ── Message handling ──────────────────────────────────────────────────────────
 
 async def _on_message(jid: str, sender: str, sender_name: str, content: str,
@@ -180,14 +188,25 @@ async def _process_group_messages(group: dict, messages: list[dict],
         except Exception:
             pass
 
-    await run_container_agent(
-        group=group,
-        prompt=prompt,
-        conversation_history=conversation_history,
-        on_output=on_output,
-        session_id=session_id,
-        on_success=on_success,
-    )
+    try:
+        await asyncio.wait_for(
+            run_container_agent(
+                group=group,
+                prompt=prompt,
+                conversation_history=conversation_history,
+                on_output=on_output,
+                session_id=session_id,
+                on_success=on_success,
+            ),
+            timeout=300.0,  # 5-minute timeout per container run
+        )
+    except asyncio.TimeoutError:
+        log.error(
+            "Container run timed out for group %s, advancing cursor anyway to prevent message stuck",
+            jid,
+        )
+        if on_success:
+            await on_success()  # Prevent message from being stuck forever
 
 
 async def _message_loop() -> None:
@@ -253,6 +272,19 @@ async def _message_loop() -> None:
             await asyncio.wait_for(_stop_event.wait(), timeout=config.POLL_INTERVAL)
         except asyncio.TimeoutError:
             pass  # Normal poll cycle
+
+
+async def _orphan_cleanup_loop(stop_event: asyncio.Event) -> None:
+    """Periodically clean up orphaned Docker containers every 5 minutes."""
+    while not stop_event.is_set():
+        try:
+            await cleanup_orphans()
+        except Exception as exc:
+            log.warning("orphan cleanup error: %s", exc)
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=300.0)
+        except asyncio.TimeoutError:
+            pass
 
 
 async def _ipc_route_fn(jid: str, text: str, sender: str | None = None) -> None:
@@ -407,6 +439,7 @@ async def main() -> None:
             start_scheduler_loop(_get_group_by_jid, run_container_agent, _stop_event),
             evolution_loop(_stop_event),
             health_monitor_loop(_stop_event),
+            _orphan_cleanup_loop(_stop_event),
         )
     finally:
         # 確保所有頻道在離開時都乾淨地斷線
