@@ -1,3 +1,38 @@
+## v1.4.3 — 2026-03-10
+
+> Subagent 親子層級追蹤 + 即時 Container 活動捕捉
+
+### 新功能
+
+**Dashboard 現在可以看到 Subagent 在幹嘛**
+
+過去 Dashboard 只能看到有幾個 container 在跑，無法分辨哪些是主 agent、哪些是 subagent，也看不到 container 目前正在執行什麼動作。
+
+這次全面改善：
+
+**① 親子關係追蹤**
+`_active_containers` 新增 `parent_container` 欄位。主 agent 為 `None`，subagent 記錄父 container 名稱。`ipc_watcher` 在 `spawn_agent` 時自動找出父 container 並傳入。
+
+**② 即時 stderr 串流**
+`container_runner.py` 非 Windows 路徑改用串流讀取 stderr（`_stream_stderr()`），不再等 container 結束才讀取。`agent.py` 的每一行 `_log()` 輸出（Input received → Calling LLM → Tool: Bash → Done）即時更新至 `current_activity` 欄位。
+
+**③ Dashboard 視覺化層級**
+「Active Agent Containers」表格：
+- 新增 *Activity* 欄：即時顯示最新 `_log()` 訊息
+- Subagent 以 `↳` 縮排顯示在父 container 下方
+- 色碼徽章：🟡 subagent / 🟣 scheduled / 🔵 message
+
+### 升級方式
+
+```bash
+git pull
+python run.py
+```
+
+不需重建 Docker image（所有修改均在 host 端）。
+
+---
+
 ## v1.4.2 — 2026-03-10
 
 > Docker Desktop 日誌即時顯示修正（完整版）
