@@ -937,6 +937,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # suppress access log
 
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            pass  # client disconnected mid-response — ignore on Windows
+
     def _auth(self) -> bool:
         if not config.DASHBOARD_PASSWORD:
             return True
