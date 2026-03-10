@@ -23,7 +23,7 @@ SLACK_SIGNING_SECRET=your-signing-secret
 import asyncio, logging
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
-from . import register_channel
+from . import register_channel_class as register_channel
 from ..env import read_env_file
 
 log = logging.getLogger(__name__)

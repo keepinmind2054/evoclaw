@@ -5,6 +5,30 @@
 格式基於 [Keep a Changelog](https://keepachangelog.com/)，
 版本號遵循 [語意化版本](https://semver.org/)。
 
+## [1.5.1] — 2026-03-10
+
+### Removed
+
+- **清除死碼**：刪除 `host/web_dashboard.py`（aiohttp 版儀表板，從未被 import）、`host/dashboard_charts.py`（未使用的設定 dict）、整個 `host/stages/` 目錄（8 個全是 TODO 佔位符的 stage 模組，已由 `dev_engine.py` 取代）。
+
+### Bug Fixes
+
+- **`register_channel` 命名衝突**：`host/channels/__init__.py` 的 `register_channel(name, cls)` 改名為 `register_channel_class(name, cls)`，消除與 `host/router.py` 中 `register_channel(ch)`（接受實例）的命名衝突。更新 `host/channels/gmail_channel.py`、`discord_channel.py`、`slack_channel.py`，改以 `from . import register_channel_class as register_channel` 匯入。更新 `skills/` 文件。
+
+### Features
+
+- **Skills Engine IPC 整合**：`host/ipc_watcher.py` 新增 3 種 IPC 訊息類型，讓 agent 可以直接管理 Skill Plugins：
+  - `apply_skill`：安裝 Skill Plugin（**僅主群組可用**），payload: `{"type":"apply_skill","skill_path":"skills/add-slack.md","requestId":"r1"}`
+  - `uninstall_skill`：移除 Skill Plugin（**僅主群組可用**），payload: `{"type":"uninstall_skill","skill_name":"add-slack","requestId":"r2"}`
+  - `list_skills`：列出已安裝的 Skills（任何群組均可查詢），payload: `{"type":"list_skills","requestId":"r3"}`
+  - 結果寫入 `data/ipc/<group>/results/<requestId>.json`，同時透過 `route_fn` 發送通知訊息。
+
+### Tests
+
+- **`tests/test_dev_engine.py` 完整重寫**：改用新 API（`DevSession`、`engine.start()`、`engine.run()`、`load_session()`）；移除對已刪除的 `DevContext`、`run_pipeline()`、`engine.context` 的所有引用。新增 `in_memory_db` fixture 確保測試隔離（不污染真實 DB）；用 `unittest.mock.patch` mock LLM 呼叫與 Docker（`_run_llm_stage`、`_deploy_files`），測試不需要 Docker 或 API key 即可執行。
+
+---
+
 ## [1.5.0] — 2026-03-10
 
 ### Features

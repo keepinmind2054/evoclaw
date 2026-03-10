@@ -20,7 +20,7 @@ DISCORD_BOT_TOKEN=your_token_here
 """Discord channel using discord.py"""
 import logging
 import discord
-from . import register_channel
+from . import register_channel_class as register_channel
 from ..env import read_env_file
 
 log = logging.getLogger(__name__)

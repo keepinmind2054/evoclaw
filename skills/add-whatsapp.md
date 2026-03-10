@@ -15,7 +15,7 @@ npm install whatsapp-web.js qrcode-terminal
 ```python
 """WhatsApp channel via whatsapp-web.js subprocess bridge"""
 import asyncio, json, logging, subprocess
-from . import register_channel
+from . import register_channel_class as register_channel
 
 log = logging.getLogger(__name__)
 

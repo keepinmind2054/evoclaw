@@ -28,7 +28,7 @@ from email.mime.text import MIMEText
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-from . import register_channel
+from . import register_channel_class as register_channel
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 log = logging.getLogger(__name__)

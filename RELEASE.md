@@ -1,3 +1,50 @@
+## v1.5.1 — 2026-03-10
+
+> 程式碼品質大清理：死碼移除、命名衝突修正、Skills Engine 整合、測試重寫
+
+### 主要變更
+
+**死碼清理**
+- 刪除 `host/web_dashboard.py`（438 行 aiohttp 版儀表板，從未被任何模組 import）
+- 刪除 `host/dashboard_charts.py`（37 行，只有設定 dict，從未被 import）
+- 刪除整個 `host/stages/` 目錄（8 個 stage 模組，全部是 `return "TODO: ..."` 佔位符，已由 v1.5.0 DevEngine 完整取代）
+
+**`register_channel` 命名衝突修正**
+
+`channels/__init__.py` 的 `register_channel(name, cls)` 與 `router.py` 的 `register_channel(ch)` 語義完全不同（前者接受 class，後者接受 instance），原本共用同名造成混淆。本版本將前者改名為 `register_channel_class()`，消除歧義。
+
+**Skills Engine IPC 整合**
+
+Skills Engine（`skills_engine/`）現在已接入 IPC 訊息流，agent 可在對話中直接管理 Skill Plugins：
+
+```json
+// 安裝 skill（主群組限定）
+{"type":"apply_skill","skill_path":"skills/add-slack.md","requestId":"r1"}
+
+// 移除 skill（主群組限定）
+{"type":"uninstall_skill","skill_name":"add-slack","requestId":"r2"}
+
+// 列出已安裝 skills（任何群組）
+{"type":"list_skills","requestId":"r3"}
+```
+
+結果寫入 `data/ipc/<group>/results/<requestId>.json`。
+
+**測試重寫**
+
+`tests/test_dev_engine.py` 完整重寫以對應 v1.5.0 引入的新 DevEngine API，不再測試已刪除的 `DevContext`、`run_pipeline()` 等舊介面。
+
+### 升級方式
+
+```bash
+git pull
+python run.py
+```
+
+不需重建 Docker image。
+
+---
+
 ## v1.5.0 — 2026-03-10
 
 > DevEngine：7 階段 LLM 驅動自動化開發引擎

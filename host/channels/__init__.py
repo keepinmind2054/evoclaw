@@ -11,7 +11,7 @@ class Channel(Protocol):
 
 _registry: dict[str, type] = {}
 
-def register_channel(name: str, cls: type) -> None:
+def register_channel_class(name: str, cls: type) -> None:
     _registry[name] = cls
 
 def get_channel_class(name: str):

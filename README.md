@@ -237,7 +237,7 @@ evoclaw/
 
 `host/dashboard.py` 提供純 Python stdlib 實作的單頁應用程式（SPA）監控儀表板，無需額外依賴。
 
-**6 個側邊欄分頁：**
+**7 個側邊欄分頁：**
 
 | 分頁 | 功能 |
 |------|------|
@@ -367,6 +367,49 @@ DevEngine tab（🛠️）顯示：
 - 所有 session 的進度條（n/7 完成）
 - 各階段 Artifact 預覽（前 500 字元）
 - Resume / Cancel 操作按鈕
+
+---
+
+## Skills Engine — Skill Plugin 管理
+
+EvoClaw 透過 `skills_engine/` 系統支援可插拔的功能擴充（Skill Plugins）。**v1.5.1 起，agent 可透過 IPC 直接管理 Skills**，無需手動執行命令。
+
+### IPC 操作
+
+| type | 說明 | 權限 |
+|------|------|------|
+| `apply_skill` | 安裝 Skill Plugin | 僅主群組 |
+| `uninstall_skill` | 移除 Skill Plugin | 僅主群組 |
+| `list_skills` | 列出已安裝的 Skills | 任何群組 |
+
+**安裝 Skill（主群組限定）：**
+
+```json
+{"type": "apply_skill", "skill_path": "skills/add-slack.md", "requestId": "r1"}
+```
+
+**移除 Skill（主群組限定）：**
+
+```json
+{"type": "uninstall_skill", "skill_name": "add-slack", "requestId": "r2"}
+```
+
+**列出已安裝 Skills（任何群組）：**
+
+```json
+{"type": "list_skills", "requestId": "r3"}
+```
+
+結果寫入 `data/ipc/<group>/results/<requestId>.json`，同時透過頻道發送通知訊息。
+
+### 內建 Skills
+
+| Skill | 說明 |
+|-------|------|
+| `skills/add-whatsapp.md` | 新增 WhatsApp 頻道 |
+| `skills/add-slack.md` | 新增 Slack 頻道（Socket Mode） |
+| `skills/add-discord.md` | 新增 Discord 頻道 |
+| `skills/add-gmail.md` | 新增 Gmail 頻道 |
 
 ---
 

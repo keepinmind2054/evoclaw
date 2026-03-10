@@ -6,7 +6,7 @@ from typing import Callable, Optional
 
 import discord
 
-from . import register_channel
+from . import register_channel_class as register_channel
 from .. import config
 from ..env import read_env_file
 

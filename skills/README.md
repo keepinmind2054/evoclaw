@@ -27,6 +27,6 @@ Each skill file contains:
 
 1. Create `host/channels/your_channel.py`
 2. Implement the `Channel` protocol (connect, send_message, owns_jid, is_connected, disconnect)
-3. Call `register_channel("name", YourChannel)` at the bottom
+3. Call `register_channel_class("name", YourChannel)` at the bottom
 4. Import it in `host/main.py`
 5. Instantiate and `await channel.connect()` in `main()`
