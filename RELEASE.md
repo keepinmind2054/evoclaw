@@ -20,7 +20,7 @@
 
 ```bash
 git pull
-docker build -t evoclaw-agent container/agent-runner/
+docker build -t evoclaw-agent container/
 python run.py
 ```
 

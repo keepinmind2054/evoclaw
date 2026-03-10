@@ -117,7 +117,7 @@ python scripts/register_group.py --jid "tg:123456789" --name "Main" --folder "te
 python -m host.main
 
 # Build agent container
-docker build -t evoclaw-agent container/agent-runner/
+docker build -t evoclaw-agent container/
 
 # Register group
 python scripts/register_group.py --jid "tg:YOUR_ID" --name "Me" --folder "telegram_me" --main
