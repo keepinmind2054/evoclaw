@@ -197,29 +197,90 @@ The `conversations/` folder contains searchable history of past conversations.
 
 When you learn something important, save it to a file for future reference.
 
-## File Delivery
+## 檔案傳送（File Delivery）
 
-To send a file to the user, you MUST create the output directory first, then write the file, then call the send tool.
+### ⚠️ 重要規則
 
-*Step 1*: Create the output directory and write the file
+*絕對不要* 在容器內直接呼叫 Telegram API、使用 `requests` 發送檔案，或嘗試讀取 `TELEGRAM_BOT_TOKEN` 環境變數。
+這些在 Docker 容器內都不可用。檔案傳送由 *host 負責*，容器只需寫 IPC 訊息通知 host。
+
+### ✅ 正確做法
+
+**Step 1：把檔案寫入 `/workspace/group/output/`**
+
 ```python
 import os
+
+# 必須先建立目錄
 os.makedirs("/workspace/group/output", exist_ok=True)
-# Write your file
-with open("/workspace/group/output/report.pptx", "wb") as f:
-    f.write(pptx_bytes)
+
+# 寫入你的檔案
+output_path = "/workspace/group/output/your_file.pptx"
+with open(output_path, "wb") as f:
+    f.write(file_bytes)
+
+print(f"File written: {os.path.getsize(output_path)} bytes")
 ```
 
-*Step 2*: Send via the tool (chat_jid is auto-detected from input — you may omit it)
+**Step 2：用 `mcp__evoclaw__send_file` 工具通知 host 傳送**
+
 ```python
 mcp__evoclaw__send_file(
-    file_path="/workspace/group/output/report.pptx",
-    caption="Here's your PowerPoint presentation!"
+    file_path="/workspace/group/output/your_file.pptx",
+    caption="📊 您的檔案已生成！"
 )
+# chat_jid 自動從輸入取得，不需手動傳入
 ```
 
-Important notes:
-• Always call `os.makedirs("/workspace/group/output", exist_ok=True)` before writing — the directory may not exist
-• `file_path` must be an absolute path starting with `/workspace/group/output/`
-• `chat_jid` is optional — the system auto-detects it from the input JSON
-• Files written to `/workspace/group/output/` are mapped to the host filesystem via Docker volume mount and deliverable via Telegram
+Host 收到通知後會透過 Telegram bot 自動傳送給用戶。
+
+### ❌ 禁止做法
+
+```python
+# ❌ 不要這樣做
+import requests
+bot_token = os.getenv("TELEGRAM_BOT_TOKEN")  # 容器內永遠是空的
+requests.post(f"https://api.telegram.org/bot{bot_token}/sendDocument", ...)
+
+# ❌ 不要這樣做
+import telegram
+bot = telegram.Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))  # 不可用
+
+# ❌ 不要直接讀取任何 API 金鑰環境變數
+# 容器內沒有 TELEGRAM_BOT_TOKEN, CLAUDE_API_KEY 等環境變數
+```
+
+### 支援的檔案格式
+
+任何格式皆可：`.pptx`, `.pdf`, `.xlsx`, `.docx`, `.png`, `.jpg`, `.zip` 等。
+Telegram 單檔上限 50MB。
+
+### 完整範例（生成 PPT 並傳送）
+
+```python
+import os
+import json
+import time
+import pathlib
+
+# 1. 生成檔案
+os.makedirs("/workspace/group/output", exist_ok=True)
+output_path = "/workspace/group/output/report.pptx"
+
+# ... 你的檔案生成邏輯 ...
+with open(output_path, "wb") as f:
+    f.write(pptx_bytes)
+
+# 2. 確認檔案存在
+if not os.path.exists(output_path):
+    print("ERROR: File was not created!")
+else:
+    size = os.path.getsize(output_path)
+    print(f"File ready: {size} bytes")
+
+    # 3. 透過 IPC 請 host 傳送
+    mcp__evoclaw__send_file(
+        file_path=output_path,
+        caption=f"📊 報告已生成（{size // 1024}KB）"
+    )
+```

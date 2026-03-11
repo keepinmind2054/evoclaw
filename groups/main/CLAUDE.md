@@ -244,3 +244,10 @@ When scheduling tasks for other groups, use the `target_group_jid` parameter wit
 - `schedule_task(prompt: "...", schedule_type: "cron", schedule_value: "0 9 * * 1", target_group_jid: "120363336345536173@g.us")`
 
 The task will run in that group's context with access to their files and memory.
+
+---
+
+## 檔案傳送
+
+參見 `/workspace/global/CLAUDE.md` 的「檔案傳送」章節。
+重點：絕對不要在容器內直接呼叫 Telegram API，使用 `mcp__evoclaw__send_file` 工具即可。
