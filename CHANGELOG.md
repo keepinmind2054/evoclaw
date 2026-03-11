@@ -5,6 +5,20 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.10] - 2026-03-12
+
+### Fixed
+- 修正 JSON 輸出無大小限制（加入 2MB 上限防止 DoS）
+- 修正 circuit breaker 競態條件（asyncio.Lock 保護全域 dict）
+- 修正 DB connection 未關閉造成的 file lock 殘留（atexit 正確關閉）
+- 修正 stderr streaming 無 timeout（readline 加入 30s 超時）
+- 新增 evolution_runs DB index（jid, timestamp）提升查詢效能
+- 修正 container timeout 無限重試（超時後推進 cursor 並通知用戶）
+- 新增 Secret key 驗證（啟動時早期檢測缺少的 API key）
+- 修正 group folder 路徑穿越漏洞（加入格式驗證）
+- 修正 session ID 在 timeout 時遺失的問題
+- 修正孤立任務清理不完整（同時清理已刪除 group 的任務）
+
 ## [1.10.9] - 2026-03-11
 
 ### Fixed

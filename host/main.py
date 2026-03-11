@@ -13,6 +13,7 @@ from pathlib import Path
 # ── Per-group consecutive failure tracking (prevents infinite retry loops) ────
 _group_fail_counts: dict[str, int] = {}
 _group_fail_timestamps: dict[str, float] = {}
+_group_fail_lock: asyncio.Lock | None = None  # initialized in main() after event loop starts
 _GROUP_MAX_FAILS = 5
 _GROUP_FAIL_COOLDOWN = 60.0  # seconds
 
@@ -64,14 +65,22 @@ def _load_state() -> None:
         _last_timestamp = int(val)
 
 def _cleanup_orphan_tasks() -> None:
-    """啟動時清理 chat_jid 為空的孤兒任務（在 chat_jid 修復前建立的舊任務）。"""
+    """啟動時清理孤兒任務：
+    1. chat_jid 為空的舊任務（在 chat_jid 修復前建立）
+    2. 屬於已刪除群組（不在 registered_groups 中）的任務
+    """
     all_tasks = db.get_all_tasks()
-    bad = [t for t in all_tasks if not t.get("chat_jid", "").strip()]
+    registered_jids = {g["jid"] for g in db.get_all_registered_groups()}
+    bad = [
+        t for t in all_tasks
+        if not t.get("chat_jid", "").strip()
+        or t.get("chat_jid") not in registered_jids
+    ]
     for t in bad:
-        log.warning(f"Removing orphan task {t['id']}: empty chat_jid")
+        log.warning(f"Removing orphan task {t['id']}: chat_jid={t.get('chat_jid')!r}")
         db.delete_task(t["id"])
     if bad:
-        log.info(f"Cleaned up {len(bad)} orphan task(s) with missing chat_jid")
+        log.info(f"Cleaned up {len(bad)} orphan task(s)")
 
 def _get_groups() -> list[dict]:
     """回傳目前登記的群組清單，供 IPC watcher 等元件查詢。"""
@@ -143,19 +152,20 @@ async def _process_group_messages(group: dict, messages: list[dict],
     jid = group["jid"]
 
     # ── Consecutive failure guard: prevent infinite retry loops ───────────────
-    fail_count = _group_fail_counts.get(jid, 0)
-    last_fail = _group_fail_timestamps.get(jid, 0.0)
-    if fail_count >= _GROUP_MAX_FAILS:
-        if time.time() - last_fail < _GROUP_FAIL_COOLDOWN:
-            log.warning(
-                "Group %s has failed %d times consecutively, cooling down for %ds",
-                jid, fail_count, int(_GROUP_FAIL_COOLDOWN - (time.time() - last_fail))
-            )
-            return
-        else:
-            # Cooldown expired — reset counter and allow retry
-            _group_fail_counts[jid] = 0
-            _group_fail_timestamps.pop(jid, None)
+    async with _group_fail_lock:
+        fail_count = _group_fail_counts.get(jid, 0)
+        last_fail = _group_fail_timestamps.get(jid, 0.0)
+        if fail_count >= _GROUP_MAX_FAILS:
+            if time.time() - last_fail < _GROUP_FAIL_COOLDOWN:
+                log.warning(
+                    "Group %s has failed %d times consecutively, cooling down for %ds",
+                    jid, fail_count, int(_GROUP_FAIL_COOLDOWN - (time.time() - last_fail))
+                )
+                return
+            else:
+                # Cooldown expired — reset counter and allow retry
+                _group_fail_counts[jid] = 0
+                _group_fail_timestamps.pop(jid, None)
 
     requires_trigger = bool(group.get("requires_trigger", True))
     is_main = bool(group.get("is_main"))
@@ -215,8 +225,9 @@ async def _process_group_messages(group: dict, messages: list[dict],
     async def _on_success_tracked():
         nonlocal _run_succeeded
         _run_succeeded = True
-        _group_fail_counts.pop(jid, None)
-        _group_fail_timestamps.pop(jid, None)
+        async with _group_fail_lock:
+            _group_fail_counts.pop(jid, None)
+            _group_fail_timestamps.pop(jid, None)
         if on_success:
             await on_success()
 
@@ -234,15 +245,17 @@ async def _process_group_messages(group: dict, messages: list[dict],
         )
         # run_container_agent returns {"status": "error", ...} when no output markers found
         if not _run_succeeded and isinstance(result, dict) and result.get("status") == "error":
-            _group_fail_counts[jid] = _group_fail_counts.get(jid, 0) + 1
-            _group_fail_timestamps[jid] = time.time()
+            async with _group_fail_lock:
+                _group_fail_counts[jid] = _group_fail_counts.get(jid, 0) + 1
+                _group_fail_timestamps[jid] = time.time()
     except asyncio.TimeoutError:
         log.error(
             "Container run timed out after 300s for group %s — message NOT dropped, "
             "will be retried on next poll cycle", jid
         )
-        _group_fail_counts[jid] = _group_fail_counts.get(jid, 0) + 1
-        _group_fail_timestamps[jid] = time.time()
+        async with _group_fail_lock:
+            _group_fail_counts[jid] = _group_fail_counts.get(jid, 0) + 1
+            _group_fail_timestamps[jid] = time.time()
         # DO NOT call on_success() — cursor stays behind so message is retried
         # Notify user that we're still working
         try:
@@ -356,8 +369,9 @@ async def main() -> None:
     6. 設定 SIGTERM/SIGINT 優雅關機處理器
     7. 同時啟動訊息輪詢、IPC watcher 及排程器三個背景迴圈
     """
-    global _registered_groups, _sender_allowlist, _stop_event
+    global _registered_groups, _sender_allowlist, _stop_event, _group_fail_lock
     _stop_event = asyncio.Event()
+    _group_fail_lock = asyncio.Lock()
 
     log.info("EvoClaw starting up...")
 

@@ -1,4 +1,6 @@
 """EvoClaw SQLite database layer"""
+import atexit
+import re
 import sqlite3
 import json
 import time
@@ -330,6 +332,14 @@ def get_registered_group(jid: str) -> Optional[dict]:
     row = db.execute("SELECT * FROM registered_groups WHERE jid=?", (jid,)).fetchone()
     return dict(row) if row else None
 
+def _validate_folder(folder: str) -> str:
+    """Validate folder name to prevent path traversal attacks."""
+    if not folder or ".." in folder or "/" in folder or "\\" in folder:
+        raise ValueError(f"Invalid folder name: {folder!r}")
+    if not re.match(r'^[\w\-]+$', folder):
+        raise ValueError(f"Folder name contains invalid characters: {folder!r}")
+    return folder
+
 def set_registered_group(jid: str, name: str, folder: str, trigger_pattern: Optional[str],
                           container_config: Optional[dict], requires_trigger: bool,
                           is_main: bool) -> None:
@@ -343,6 +353,7 @@ def set_registered_group(jid: str, name: str, folder: str, trigger_pattern: Opti
     Enforces single-main-group invariant: if is_main=True, all other groups
     are demoted to is_main=False before inserting/updating this record.
     """
+    _validate_folder(folder)
     db = get_db()
     if is_main:
         # Enforce single main group invariant — demote all other groups
@@ -711,3 +722,18 @@ def get_dev_events(jid: str = None, limit: int = 100, stage: str = None) -> list
         f"SELECT * FROM dev_events {where} ORDER BY timestamp DESC LIMIT ?", params
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── Shutdown cleanup ───────────────────────────────────────────────────────────
+
+def _close_connections() -> None:
+    """Close the global DB connection on shutdown to prevent file lock residue."""
+    global _db
+    if _db is not None:
+        try:
+            _db.close()
+        except Exception:
+            pass
+        _db = None
+
+atexit.register(_close_connections)

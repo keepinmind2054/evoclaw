@@ -152,7 +152,40 @@ After release, verify:
 
 ---
 
-**Last Updated:** 2026-03-11 (v1.10.9)
+**Last Updated:** 2026-03-12 (v1.10.10)
+
+---
+
+## v1.10.10 Release Notes
+
+### Stability Improvements
+
+**Problems Fixed**:
+1. Container JSON output had no size limit — a misbehaving agent could send megabytes of output, causing memory pressure (DoS vector). Now capped at 2MB.
+2. `_group_fail_counts` and `_group_fail_timestamps` were accessed from async coroutines without any lock, creating a race condition when multiple groups processed messages concurrently.
+3. The global SQLite connection `_db` was never explicitly closed on process exit, leaving file locks that could block subsequent starts.
+4. `_stream_stderr()` called `proc.stderr.readline()` with no timeout — a container that stopped writing to stderr but kept running would hang the stream reader indefinitely.
+5. Secret key validation was missing — if `GOOGLE_API_KEY` and all other LLM keys were absent, the container would start and fail only inside Docker with an unhelpful error.
+6. The `folder` parameter in `set_registered_group()` was not validated, allowing path traversal characters (`..`, `/`, `\`) that could escape the groups directory.
+7. `_cleanup_orphan_tasks()` only removed tasks with empty `chat_jid`, but tasks belonging to groups that were later deregistered were left behind indefinitely.
+
+**Changes**:
+- Added 2MB output size guard before `json.loads()` in `container_runner.py`.
+- Added `_group_fail_lock = asyncio.Lock()` initialized in `main()` and wrapped all reads/writes to `_group_fail_counts` / `_group_fail_timestamps`.
+- Added `atexit.register(_close_connections)` to `host/db.py` to close `_db` on shutdown.
+- Added `asyncio.wait_for(..., timeout=30.0)` to `proc.stderr.readline()` in `_stream_stderr()`.
+- Added `_validate_secrets()` helper called after `_read_secrets()` to warn on missing LLM keys.
+- Added `_validate_folder()` with regex guard called at the top of `set_registered_group()`.
+- Extended `_cleanup_orphan_tasks()` to also delete tasks whose `chat_jid` is not in the registered groups set.
+
+#### Upgrade
+
+No `docker build` needed — all changes are in the host process. Restart EvoClaw to apply.
+
+```bash
+git pull
+python run.py start
+```
 
 ---
 

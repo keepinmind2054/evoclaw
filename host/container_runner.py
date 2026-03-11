@@ -93,6 +93,21 @@ def _read_secrets() -> dict:
     """從 .env 檔案讀取敏感金鑰（API key 等），以字典形式回傳給 container。"""
     return read_env_file(["GOOGLE_API_KEY", "TELEGRAM_BOT_TOKEN", "GEMINI_MODEL", "ASSISTANT_NAME", "NIM_API_KEY", "NIM_MODEL", "NIM_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL", "CLAUDE_API_KEY", "CLAUDE_MODEL"])
 
+def _validate_secrets(secrets: dict) -> None:
+    """Validate that at least one LLM API key is present; warn on startup for missing keys."""
+    llm_keys = ["GOOGLE_API_KEY", "NIM_API_KEY", "OPENAI_API_KEY", "CLAUDE_API_KEY"]
+    has_any = any(secrets.get(k, "").strip() for k in llm_keys)
+    if not has_any:
+        log.warning(
+            "Secret validation: none of the LLM API keys are set (%s). "
+            "Container agent will fail to call any LLM.",
+            ", ".join(llm_keys)
+        )
+    for key in llm_keys:
+        val = secrets.get(key, "").strip()
+        if key == "GOOGLE_API_KEY" and not val:
+            log.warning("Secret %s is missing or empty", key)
+
 def _build_volume_mounts(group: dict) -> list[str]:
     """
     根據群組設定建立 Docker volume mount 參數清單。
@@ -236,6 +251,7 @@ async def run_container_agent(
 
     # 將 API 金鑰等敏感資料包進 input_data，透過 stdin 傳給 container
     secrets = _read_secrets()
+    _validate_secrets(secrets)
     # 取得最近對話歷史（最多 50 則），提供給 agent 作為上下文記憶
     # history_lookback_hours 可在 group config 中設定（預設 4 小時）
     history_lookback = group.get("history_lookback_hours", 4) * 3600  # configurable, default 4h
@@ -342,7 +358,11 @@ async def run_container_agent(
                 assert proc.stderr is not None
                 _EMOJI_TAGS = ("🚀","📥","💬","🤖","🧠","🔧","📨","📎","📤","❌","🏁","⚠️")
                 while True:
-                    line_bytes = await proc.stderr.readline()
+                    try:
+                        line_bytes = await asyncio.wait_for(proc.stderr.readline(), timeout=30.0)
+                    except asyncio.TimeoutError:
+                        log.warning("Stderr readline timed out, stopping stream")
+                        break
                     if not line_bytes:
                         break
                     line = line_bytes.decode(errors="replace").rstrip()
@@ -394,6 +414,10 @@ async def run_container_agent(
 
         # 截取兩個標記之間的內容並解析為 JSON
         raw = stdout[start_idx + len(OUTPUT_START):end_idx].strip()
+        MAX_OUTPUT_SIZE = 2 * 1024 * 1024  # 2MB
+        if len(raw) > MAX_OUTPUT_SIZE:
+            log.error("Container output too large (%d bytes), truncating", len(raw))
+            return {"status": "error", "result": "Output too large"}
         try:
             result = json.loads(raw)
         except json.JSONDecodeError as e:
