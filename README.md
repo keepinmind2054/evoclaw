@@ -13,7 +13,7 @@
 以 Python 打造的 AI 助理框架，支援 Gemini、OpenAI 相容 API 及 Claude。
 內建**進化引擎**，讓助手隨著使用自動學習與改進。
 
-**v1.8.0** — 9 項架構可靠性改進：Docker circuit breaker、IPC 錯誤警報、技能並發鎖、孤兒容器定期清理、容器執行逾時守門、主群組唯一性保護等。
+**v1.9.0** — 安全強化 + 可靠性改進：Dashboard 預設綁定 127.0.0.1、.env 容器遮蔽、XSS 修復、skills_engine 正確相對導入、dev_task 並發序列化、逾時不丟訊息、SQLite WAL 模式等。
 
 ---
 

@@ -1,8 +1,10 @@
 """IPC file watcher — processes agent-to-host messages"""
 import asyncio
-import importlib.util
+import importlib
 import json
 import logging
+import sys as _sys
+import pathlib as _pathlib
 import time
 import uuid
 from pathlib import Path
@@ -14,23 +16,26 @@ import asyncio as _asyncio
 
 log = logging.getLogger(__name__)
 
-# ── skills_engine importlib loader (avoids sys.path pollution) ─────────────────
-_SKILLS_ENGINE_DIR = Path(__file__).parent.parent / "skills_engine"
+# ── skills_engine loader: add repo root to sys.path once at module load ────────
+_REPO_ROOT = _pathlib.Path(__file__).parent.parent
+if str(_REPO_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_REPO_ROOT))
+
 _skills_engine_mod = None
 
 def _get_skills_engine():
-    """Lazily load skills_engine via importlib without mutating sys.path."""
+    """Lazily load skills_engine via importlib.import_module (handles relative imports correctly)."""
     global _skills_engine_mod
     if _skills_engine_mod is None:
-        init_path = _SKILLS_ENGINE_DIR / "__init__.py"
-        spec = importlib.util.spec_from_file_location("skills_engine", init_path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _skills_engine_mod = mod
+        _skills_engine_mod = importlib.import_module("skills_engine")
     return _skills_engine_mod
 
 # Module-level lock to prevent concurrent skill installs/uninstalls
 _skills_lock = asyncio.Lock()
+
+# ── dev_task concurrency guard ─────────────────────────────────────────────────
+_dev_task_active: set[str] = set()
+_dev_task_lock = asyncio.Lock()
 
 
 def _notify_main_group_error(filename: str, error: str) -> None:
@@ -259,24 +264,35 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
         mode = payload.get("mode", "auto")  # "auto" | "interactive"
         session_id = payload.get("session_id", "")  # 若提供則 resume，否則新建
         if dev_prompt or session_id:
+            groups = db.get_all_registered_groups()
+            _dev_group = next((g for g in groups if g["folder"] == group_folder), None)
+            _dev_group_jid = _dev_group["jid"] if _dev_group else group_folder
             _asyncio.ensure_future(_run_dev_task(
-                dev_prompt, mode, session_id, group_folder, route_fn
+                {"prompt": dev_prompt, "mode": mode, "session_id": session_id},
+                _dev_group_jid,
+                route_fn,
             ))
 
-async def _run_dev_task(
-    prompt: str, mode: str, session_id: str,
-    group_folder: str, route_fn,
-) -> None:
+async def _run_dev_task(payload: dict, group_jid: str, route_fn) -> None:
     """
     在背景執行 DevEngine 7 階段開發流程。
     每個階段完成後透過 route_fn 發送進度通知給用戶。
+    Uses _dev_task_lock to prevent concurrent dev_task invocations per group.
     """
-    from .dev_engine import DevEngine, load_session
+    async with _dev_task_lock:
+        if group_jid in _dev_task_active:
+            await route_fn(group_jid, "⚙️ A dev task is already running for this group. Please wait.")
+            return
+        _dev_task_active.add(group_jid)
     try:
+        from .dev_engine import DevEngine, load_session
+        prompt = payload.get("prompt", "")
+        mode = payload.get("mode", "auto")
+        session_id = payload.get("session_id", "")
         groups = db.get_all_registered_groups()
-        group = next((g for g in groups if g["folder"] == group_folder), None)
+        group = next((g for g in groups if g["jid"] == group_jid), None)
         if not group:
-            log.error(f"DevEngine IPC: group {group_folder} not found")
+            log.error(f"DevEngine IPC: group with jid {group_jid} not found")
             return
 
         jid = group["jid"]
@@ -304,6 +320,9 @@ async def _run_dev_task(
 
     except Exception as e:
         log.error(f"DevEngine IPC error: {e}")
+    finally:
+        async with _dev_task_lock:
+            _dev_task_active.discard(group_jid)
 
 
 async def _run_apply_skill(

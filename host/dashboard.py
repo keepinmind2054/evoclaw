@@ -234,7 +234,12 @@ function showMsg(msg, ok=true) { toast(msg, ok); }
 
 function esc(s) {
   if (s==null) return '<span class="na">—</span>';
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return String(s)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
 }
 function trunc(s, n=80) {
   if (s==null) return '<span class="na">—</span>';
@@ -1609,12 +1614,17 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
 def start_dashboard(stop_event=None):
     """Start the dashboard in a daemon background thread."""
-    server = http.server.ThreadingHTTPServer(("0.0.0.0", config.DASHBOARD_PORT), _Handler)
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+    if not config.DASHBOARD_PASSWORD:
+        _log.warning(
+            "DASHBOARD_PASSWORD not set — dashboard is unprotected. "
+            "Set DASHBOARD_PASSWORD env var to enable authentication."
+        )
+    server = http.server.ThreadingHTTPServer((config.DASHBOARD_HOST, config.DASHBOARD_PORT), _Handler)
 
     def _run():
-        import logging as _logging
-        _log = _logging.getLogger(__name__)
-        _log.info(f"Dashboard started on http://0.0.0.0:{config.DASHBOARD_PORT}")
+        _log.info(f"Dashboard started on http://{config.DASHBOARD_HOST}:{config.DASHBOARD_PORT}")
         try:
             server.serve_forever()
         except Exception as exc:

@@ -60,6 +60,7 @@ GMAIL_POLL_INTERVAL = _env_int("GMAIL_POLL_INTERVAL", 30)
 WHATSAPP_WEBHOOK_PORT = _env_int("WHATSAPP_WEBHOOK_PORT", 8080)
 
 # Dashboard
+DASHBOARD_HOST: str = os.getenv("DASHBOARD_HOST", "127.0.0.1")
 DASHBOARD_PORT = _env_int("DASHBOARD_PORT", 8765)
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")  # If set, enables HTTP Basic Auth
 DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "admin")

@@ -1,5 +1,48 @@
 # Release Notes
 
+## v1.9.0 — Security Hardening + Reliability Improvements (2026-03-11)
+
+This release focuses on two critical security fixes and several high/medium reliability improvements across the host daemon.
+
+### Security Fixes
+
+#### CRITICAL: Dashboard Network Exposure
+The dashboard previously bound to `0.0.0.0`, making it accessible on all network interfaces including external ones. It now defaults to `127.0.0.1` (localhost only). The bind address is configurable via the `DASHBOARD_HOST` environment variable. Additionally, a startup warning is now logged when `DASHBOARD_PASSWORD` is not set, making unprotected dashboard instances visible in logs.
+
+#### MEDIUM: .env Exposure via :ro Container Mount
+The main group's agent container mounts the project root read-only. If a `.env` file exists in the project root, it was readable inside the container. A startup security warning is now logged, and the `.env` file is shadowed using a bind mount from `/dev/null`, preventing container access to host secrets.
+
+#### MEDIUM: Dashboard XSS in Attribute Contexts
+The JavaScript `esc()` function in the dashboard SPA now escapes double quotes (`"` → `&quot;`) and single quotes (`'` → `&#39;`) in addition to `&`, `<`, `>`. This prevents XSS in HTML attribute contexts such as `value="${esc(...)}"`.
+
+### Reliability Fixes
+
+#### HIGH: skills_engine Import Fix
+The previous `importlib.util.spec_from_file_location` approach for loading `skills_engine` did not register the package's submodules, causing `from .apply import apply_skill` to fail with ImportError. The fix adds the repo root to `sys.path` once at module load time (not repeated on each call), then uses standard `importlib.import_module("skills_engine")` which correctly handles package-relative imports.
+
+#### HIGH: DevEngine Concurrent Task Serialization
+Multiple concurrent `dev_task` IPC messages for the same group could race, launching multiple DevEngine pipelines simultaneously. An asyncio lock and active-JID set now ensure only one dev_task runs per group at a time. Additional requests receive a user-visible notification to wait.
+
+#### HIGH: Timeout Watchdog No Longer Drops Messages
+The 300-second container timeout previously called `on_success()` on timeout to prevent messages from being "stuck forever." This silently discarded messages. The cursor is now NOT advanced on timeout, preserving the at-least-once delivery guarantee. The user receives a notification that the request will be retried automatically.
+
+#### HIGH: _write_dev_log File Handle Leak
+The dev engine log writer opened a file handle without a `with` statement, leaking file descriptors under high dev session load. Fixed with a proper `with` context manager.
+
+#### MEDIUM: SQLite WAL Mode
+The SQLite database now enables WAL (Write-Ahead Logging) mode, `synchronous=NORMAL`, and `busy_timeout=5000ms`. WAL allows concurrent reads alongside writes, preventing `SQLITE_BUSY` errors when the dashboard thread reads while the message loop writes.
+
+#### MEDIUM: Parallel stdout/stderr Collection
+The container runner's `_collect()` function previously awaited `proc.stdout.read()` before streaming stderr, meaning the dashboard activity counter (fed by stderr) did not update until stdout was fully read. Both are now gathered concurrently via `asyncio.gather`.
+
+#### MEDIUM: Test Parameter Fixes
+`test_core.py` used `since_timestamp=` keyword (wrong parameter name, correct is `last_timestamp`) and called `get_due_tasks()` with no argument (signature requires `now_ms: int`). Both are corrected.
+
+#### MEDIUM: Cursor Advancement Consolidated
+The `_message_loop` function previously computed `new_max_timestamp` and an `advance_cursor` closure that were never used (dead code) — the actual cursor advancement happened exclusively in `_process_messages_for_jid`. The dead code is removed; there is now a single authoritative cursor computation path.
+
+---
+
 ## v1.8.0 — Architecture Reliability Improvements (2026-03-11)
 
 ### Fixed

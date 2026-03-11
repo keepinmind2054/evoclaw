@@ -93,6 +93,20 @@ def _build_volume_mounts(group: dict) -> list[str]:
             f"{_docker_path(base_dir)}:/workspace/project:ro",
             f"{_docker_path(groups_dir)}/{folder}:/workspace/group:rw",
         ]
+        # Security: shadow .env to prevent container access to host secrets.
+        # The project dir is mounted :ro above, so .env is readable inside the container
+        # unless we shadow it. Binding /dev/null over the target path hides the file.
+        env_file = base_dir / ".env"
+        if env_file.exists():
+            log.warning(
+                "SECURITY: .env file found in project root (%s). "
+                "This file is mounted read-only into agent containers. "
+                "Move secrets outside the project directory or use Docker secrets.",
+                env_file
+            )
+            mounts.append(
+                f"--mount type=bind,source=/dev/null,target=/workspace/project/.env,readonly"
+            )
     else:
         # 一般群組只能存取自己的資料夾與全域共享設定，無法觸碰原始碼
         mounts += [
@@ -166,7 +180,12 @@ async def run_container_agent(
     mounts = _build_volume_mounts(group)
     mount_args = []
     for m in mounts:
-        mount_args += ["-v", m]
+        if m.startswith("--mount "):
+            # Shadow mount entries use --mount syntax rather than -v
+            _, rest = m.split(" ", 1)
+            mount_args += ["--mount", rest]
+        else:
+            mount_args += ["-v", m]
 
     # ── 演化提示（表觀遺傳）：根據環境和群組基因組動態附加提示 ─────────────────
     # 這些提示不修改 CLAUDE.md，只在本次 container 執行時附加，
@@ -290,8 +309,9 @@ async def run_container_agent(
                                 _active_containers[container_name]["current_activity"] = line
 
             async def _collect() -> tuple[bytes, bytes]:
-                stdout_data = await proc.stdout.read()
-                await _stream_stderr()
+                stdout_task = asyncio.create_task(proc.stdout.read())
+                stderr_task = asyncio.create_task(_stream_stderr())
+                stdout_data, _ = await asyncio.gather(stdout_task, stderr_task)
                 return stdout_data, b"\n".join(l.encode() for l in stderr_lines)
 
             stdout_data, stderr_data = await asyncio.wait_for(

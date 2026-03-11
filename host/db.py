@@ -32,6 +32,9 @@ def init_database(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     _db = sqlite3.connect(str(db_path), check_same_thread=False)
     _db.row_factory = sqlite3.Row
+    _db.execute("PRAGMA journal_mode=WAL")
+    _db.execute("PRAGMA synchronous=NORMAL")
+    _db.execute("PRAGMA busy_timeout=5000")  # 5s retry on SQLITE_BUSY
     _create_tables(_db)
     log.info(f"Database initialized: {db_path}")
 

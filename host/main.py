@@ -202,11 +202,18 @@ async def _process_group_messages(group: dict, messages: list[dict],
         )
     except asyncio.TimeoutError:
         log.error(
-            "Container run timed out for group %s, advancing cursor anyway to prevent message stuck",
-            jid,
+            "Container run timed out after 300s for group %s — message NOT dropped, "
+            "will be retried on next poll cycle", jid
         )
-        if on_success:
-            await on_success()  # Prevent message from being stuck forever
+        # DO NOT call on_success() — cursor stays behind so message is retried
+        # Notify user that we're still working
+        try:
+            await route_outbound(
+                jid,
+                "⏱️ This request is taking longer than expected. It will be retried automatically."
+            )
+        except Exception:
+            pass
 
 
 async def _message_loop() -> None:
@@ -236,35 +243,21 @@ async def _message_loop() -> None:
 
             jids = [g["jid"] for g in _registered_groups]
             if jids:
+                # Check if any new messages exist (single source of truth for cursor
+                # is in _process_messages_for_jid — no duplicate computation here)
                 messages = db.get_new_messages(jids, _last_timestamp)
                 if messages:
-                    # 將訊息按照 JID 分群，讓不同群組可以平行處理
-                    # 此時「不」推進游標 — 等 container 成功後才推進（rollback 安全）
-                    by_jid: dict[str, list] = {}
+                    # Collect unique JIDs that have new messages, then trigger
+                    # GroupQueue for each. Cursor advancement is handled exclusively
+                    # in _process_messages_for_jid via the on_success callback.
+                    active_jids: set[str] = set()
                     for m in messages:
-                        if "chat_jid" not in m:
-                            continue
-                        by_jid.setdefault(m["chat_jid"], []).append(m)
-
-                    valid_msgs = [m for m in messages if "timestamp" in m]
-                    if not valid_msgs:
-                        try:
-                            await asyncio.wait_for(_stop_event.wait(), timeout=config.POLL_INTERVAL)
-                        except asyncio.TimeoutError:
-                            pass
-                        continue
-                    new_max_timestamp = max(m["timestamp"] for m in valid_msgs)
-
-                    async def advance_cursor(ts: int = new_max_timestamp) -> None:
-                        """container 成功後呼叫，正式推進時間戳記游標並持久化到 DB。"""
-                        global _last_timestamp
-                        _last_timestamp = max(_last_timestamp, ts)
-                        db.set_state("lastTimestamp", str(_last_timestamp))
-
-                    for jid, msgs in by_jid.items():
+                        if "chat_jid" in m:
+                            active_jids.add(m["chat_jid"])
+                    for jid in active_jids:
                         group = _get_group_by_jid(jid)
                         if group:
-                            # 透過 GroupQueue 排程，確保同一群組同時只跑一個 container
+                            # GroupQueue ensures only one container runs per group
                             _group_queue.enqueue_message_check(jid)
         except Exception as e:
             log.error(f"Message loop error: {e}")

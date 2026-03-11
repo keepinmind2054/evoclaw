@@ -67,7 +67,7 @@ class TestDatabase:
             msg_id, jid, sender="user1", sender_name="Alice",
             content="Hello world", timestamp=1_700_000_000_000,
         )
-        msgs = fresh_db.get_new_messages([jid], since_timestamp=0)
+        msgs = fresh_db.get_new_messages([jid], last_timestamp=0)
         assert len(msgs) == 1
         assert msgs[0]["content"] == "Hello world"
         assert msgs[0]["sender"] == "user1"
@@ -80,7 +80,7 @@ class TestDatabase:
             content="Bot reply", timestamp=2_000_000_000_000,
             is_from_me=True, is_bot_message=True,
         )
-        msgs = fresh_db.get_new_messages([jid], since_timestamp=0)
+        msgs = fresh_db.get_new_messages([jid], last_timestamp=0)
         # Bot messages should NOT be returned as new messages to process
         assert all(not m.get("is_bot_message") for m in msgs)
 
@@ -90,7 +90,7 @@ class TestDatabase:
             fresh_db.store_message(str(uuid.uuid4()), jid,
                                    sender="u", sender_name="U",
                                    content=f"msg{i}", timestamp=ts)
-        msgs = fresh_db.get_new_messages([jid], since_timestamp=1500)
+        msgs = fresh_db.get_new_messages([jid], last_timestamp=1500)
         assert len(msgs) == 2
         assert all(m["timestamp"] > 1500 for m in msgs)
 
@@ -192,7 +192,7 @@ class TestDatabase:
             next_run=past_time,
             context_mode="isolated",
         )
-        due = fresh_db.get_due_tasks()
+        due = fresh_db.get_due_tasks(int(time.time() * 1000))
         assert any(t["id"] == task_id for t in due)
 
     def test_get_due_tasks_excludes_future(self, fresh_db):
@@ -205,7 +205,7 @@ class TestDatabase:
             next_run=future_time,
             context_mode="isolated",
         )
-        due = fresh_db.get_due_tasks()
+        due = fresh_db.get_due_tasks(int(time.time() * 1000))
         assert not any(t["id"] == task_id for t in due)
 
 

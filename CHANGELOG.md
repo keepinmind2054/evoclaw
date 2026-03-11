@@ -5,6 +5,26 @@
 格式基於 [Keep a Changelog](https://keepachangelog.com/)，
 版本號遵循 [語意化版本](https://semver.org/)。
 
+## [1.9.0] - 2026-03-11
+
+### Security
+- CRITICAL: Dashboard now binds to 127.0.0.1 by default (was 0.0.0.0), add DASHBOARD_HOST env var
+- CRITICAL: Warning logged at startup when DASHBOARD_PASSWORD not set
+- MEDIUM: .env file in project root now shadowed from container mounts + startup security warning
+- MEDIUM: Dashboard esc() now escapes double and single quotes, preventing XSS in attribute contexts
+
+### Fixed
+- HIGH: skills_engine importlib loader now correctly handles package relative imports via sys.path + importlib.import_module
+- HIGH: DevEngine concurrent dev_task invocations now serialized per group with asyncio lock + user notification
+- HIGH: Timeout watchdog no longer silently drops messages — cursor NOT advanced on timeout, user notified instead
+- HIGH: _write_dev_log now uses context manager (with statement) to properly close file handles
+- MEDIUM: SQLite WAL mode + busy_timeout=5000ms — prevents SQLITE_BUSY under concurrent dashboard/message-loop access
+- MEDIUM: _collect() now gathers stdout and stderr truly in parallel — dashboard activity counter updates in real time
+- MEDIUM: Fixed test_core.py parameter name mismatches (last_timestamp, get_due_tasks(now_ms))
+- MEDIUM: Cursor advancement consolidated to single computation path in main.py
+
+---
+
 ## [1.8.0] - 2026-03-11
 
 ### Fixed

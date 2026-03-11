@@ -39,7 +39,8 @@ def _write_dev_log(session_id: str, text: str) -> None:
     try:
         ts = time.strftime("%H:%M:%S")
         line = f"[{ts}] {text}\n"
-        _dev_log_path(session_id).open("a", encoding="utf-8").write(line)
+        with _dev_log_path(session_id).open("a", encoding="utf-8") as f:
+            f.write(line)
     except Exception:
         pass
 
