@@ -3,6 +3,7 @@ import atexit
 import re
 import sqlite3
 import json
+import threading
 import time
 import logging
 from pathlib import Path
@@ -14,8 +15,27 @@ log = logging.getLogger(__name__)
 # 全域 SQLite 連線，由 init_database() 初始化後供所有函式共用
 _db: Optional[sqlite3.Connection] = None
 
+# Threading lock protecting the shared _db connection.
+# Although asyncio is single-threaded, several components run DB calls from
+# background threads (evolution daemon via asyncio.to_thread, dashboard thread,
+# webportal thread).  check_same_thread=False disables SQLite's own check but
+# does NOT make the Connection thread-safe — the lock provides that guarantee.
+_db_lock: threading.Lock = threading.Lock()
+
 def get_db() -> sqlite3.Connection:
-    """取得全域 DB 連線，若尚未初始化則拋出例外。"""
+    """取得全域 DB 連線，若尚未初始化則拋出例外。
+
+    Callers that execute queries from background threads (dashboard, webportal,
+    evolution daemon) MUST hold _db_lock for the duration of the query + commit:
+
+        with _db_lock:
+            db = get_db()
+            db.execute(...)
+            db.commit()
+
+    Within the asyncio event loop (single-threaded) the lock is uncontested and
+    adds negligible overhead.
+    """
     global _db
     if _db is None:
         raise RuntimeError("Database not initialized. Call init_database() first.")
@@ -217,12 +237,13 @@ def store_message(msg_id: str, chat_jid: str, sender: str, sender_name: str,
     is_from_me / is_bot_message：用於在 get_new_messages 時過濾掉
     系統自己發出的訊息，避免 bot 回覆自己觸發無限迴圈。
     """
-    db = get_db()
-    db.execute("""
-        INSERT OR IGNORE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (msg_id, chat_jid, sender, sender_name, content, timestamp, int(is_from_me), int(is_bot_message)))
-    db.commit()
+    with _db_lock:
+        db = get_db()
+        db.execute("""
+            INSERT OR IGNORE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (msg_id, chat_jid, sender, sender_name, content, timestamp, int(is_from_me), int(is_bot_message)))
+        db.commit()
 
 def get_new_messages(jids: list[str], last_timestamp: int) -> list[dict]:
     """
@@ -282,13 +303,14 @@ def store_chat_metadata(jid: str, name: str, timestamp: int, channel: str, is_gr
     ON CONFLICT DO UPDATE：若 JID 已存在，只更新名稱和最後訊息時間，
     不覆蓋 channel 和 is_group（這些在建立後不應改變）。
     """
-    db = get_db()
-    db.execute("""
-        INSERT INTO chats (jid, name, last_message_time, channel, is_group)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(jid) DO UPDATE SET name=excluded.name, last_message_time=excluded.last_message_time
-    """, (jid, name, timestamp, channel, int(is_group)))
-    db.commit()
+    with _db_lock:
+        db = get_db()
+        db.execute("""
+            INSERT INTO chats (jid, name, last_message_time, channel, is_group)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(jid) DO UPDATE SET name=excluded.name, last_message_time=excluded.last_message_time
+        """, (jid, name, timestamp, channel, int(is_group)))
+        db.commit()
 
 # ── Router state ──────────────────────────────────────────────────────────────
 
@@ -300,9 +322,10 @@ def get_state(key: str) -> Optional[str]:
 
 def set_state(key: str, value: str) -> None:
     """寫入或更新 router_state 表中的 key-value 狀態。"""
-    db = get_db()
-    db.execute("INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)", (key, value))
-    db.commit()
+    with _db_lock:
+        db = get_db()
+        db.execute("INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)", (key, value))
+        db.commit()
 
 # ── Sessions ──────────────────────────────────────────────────────────────────
 
@@ -440,12 +463,13 @@ def log_task_run(task_id: str, run_at: int, duration_ms: int, status: str,
     方便監控任務是否正常執行、失敗原因為何。
     duration_ms 是執行時間（毫秒），可用於分析效能瓶頸。
     """
-    db = get_db()
-    db.execute("""
-        INSERT INTO task_run_logs (task_id, run_at, duration_ms, status, result, error)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (task_id, run_at, duration_ms, status, result, error))
-    db.commit()
+    with _db_lock:
+        db = get_db()
+        db.execute("""
+            INSERT INTO task_run_logs (task_id, run_at, duration_ms, status, result, error)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (task_id, run_at, duration_ms, status, result, error))
+        db.commit()
 
 
 # ── Evolution Engine ───────────────────────────────────────────────────────────
@@ -458,12 +482,13 @@ def record_evolution_run(jid: str, run_id: str, response_ms: int,
     每次 run_container_agent() 完成後呼叫，無論成功或失敗都記錄，
     確保適應度計算有完整的成功率樣本。
     """
-    db = get_db()
-    db.execute("""
-        INSERT INTO evolution_runs (jid, run_id, response_ms, retry_count, success)
-        VALUES (?, ?, ?, ?, ?)
-    """, (jid, run_id, response_ms, retry_count, int(success)))
-    db.commit()
+    with _db_lock:
+        db = get_db()
+        db.execute("""
+            INSERT INTO evolution_runs (jid, run_id, response_ms, retry_count, success)
+            VALUES (?, ?, ?, ?, ?)
+        """, (jid, run_id, response_ms, retry_count, int(success)))
+        db.commit()
 
 
 def get_evolution_runs(jid: str, days: int = 7) -> list[dict]:
@@ -722,6 +747,33 @@ def get_dev_events(jid: str = None, limit: int = 100, stage: str = None) -> list
         f"SELECT * FROM dev_events {where} ORDER BY timestamp DESC LIMIT ?", params
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── Maintenance ────────────────────────────────────────────────────────────────
+
+def prune_old_logs(days: int = 30) -> None:
+    """Delete old rows from append-only log tables to prevent unbounded disk growth.
+
+    Prunes:
+    - task_run_logs: rows older than `days` days (keyed by run_at in ms)
+    - evolution_runs: rows older than `days` days (keyed by timestamp TEXT)
+
+    Safe to call at startup or from a periodic maintenance loop.
+    On a deployment with 5 groups and per-minute tasks, 30 days retention keeps
+    roughly 216,000 task_run_log rows — manageable for SQLite.
+    """
+    with _db_lock:
+        db = get_db()
+        # task_run_logs.run_at is stored as ms epoch integer
+        cutoff_ms = int((time.time() - days * 86400) * 1000)
+        db.execute("DELETE FROM task_run_logs WHERE run_at < ?", (cutoff_ms,))
+        # evolution_runs.timestamp is a TEXT field in SQLite datetime format
+        db.execute(
+            "DELETE FROM evolution_runs WHERE timestamp < datetime('now', ?)",
+            (f"-{days} days",),
+        )
+        db.commit()
+    log.info("Pruned logs older than %d days (task_run_logs + evolution_runs)", days)
 
 
 # ── Shutdown cleanup ───────────────────────────────────────────────────────────

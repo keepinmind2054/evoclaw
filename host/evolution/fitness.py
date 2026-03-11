@@ -81,7 +81,10 @@ def compute_fitness(jid: str, window_days: int = 7) -> float:
     success_rate = sum(1 for r in rows if r.get("success", 1)) / n
 
     # 速度分數：線性映射，目標 5 秒 = 1.0，30 秒以上 = 0.0
-    valid_times = [r["response_ms"] for r in rows if r.get("response_ms")]
+    # Only include successful runs with positive response times.
+    # Failed runs report response_ms=0 (timeout) which would incorrectly score as
+    # perfect speed (1.0) due to the formula producing a value > 1.0 before clamping.
+    valid_times = [r["response_ms"] for r in rows if r.get("response_ms") and r["response_ms"] > 0 and r.get("success")]
     if valid_times:
         avg_ms = sum(valid_times) / len(valid_times)
         speed_score = 1.0 - (avg_ms - SPEED_TARGET_MS) / (SPEED_FLOOR_MS - SPEED_TARGET_MS)

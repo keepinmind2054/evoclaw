@@ -52,6 +52,15 @@ TIMEZONE = os.environ.get("TZ", os.environ.get("TIMEZONE", "UTC"))
 
 # Logging
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+# Set LOG_FORMAT=json to emit newline-delimited JSON logs compatible with Loki/Datadog.
+# Default is "text" (human-readable).
+LOG_FORMAT = os.environ.get("LOG_FORMAT", "text").lower()
+
+# Per-group message rate limiting (sliding window)
+# A group that sends more than RATE_LIMIT_MAX_MSGS within RATE_LIMIT_WINDOW_SECS
+# will have excess messages dropped to protect system fairness.
+RATE_LIMIT_MAX_MSGS = _env_int("RATE_LIMIT_MAX_MSGS", 20)
+RATE_LIMIT_WINDOW_SECS = _env_int("RATE_LIMIT_WINDOW_SECS", 60)
 
 # Gmail
 GMAIL_POLL_INTERVAL = _env_int("GMAIL_POLL_INTERVAL", 30)

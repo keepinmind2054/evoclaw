@@ -5,6 +5,23 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.12] - 2026-03-12
+
+### Security
+- WebPortal now enforces Basic Auth when `DASHBOARD_PASSWORD` is set, preventing unauthenticated access to group list and message injection (Issue #12)
+
+### Fixed
+- Fitness `speed_score` formula now excludes failed runs (response_ms=0) from the average, preventing broken groups from being scored as "perfect speed" (Issue #18)
+- SQLite connection now protected by `threading.Lock` on all write operations, preventing `database is locked` errors when dashboard/webportal/evolution threads write concurrently (Issue #15)
+- `task_run_logs` and `evolution_runs` tables now pruned at startup (30-day retention) to prevent unbounded disk growth (Issue #19)
+
+### Added
+- Per-group message rate limiting (sliding window: 20 msgs/60s by default, configurable via `RATE_LIMIT_MAX_MSGS` / `RATE_LIMIT_WINDOW_SECS`) to prevent one group from starving others (Issue #16)
+- `GroupQueue` backpressure: `pending_tasks` capped at 50 per group, `_waiting_groups` capped at 100 entries — excess tasks are dropped with a warning (Issue #14)
+- Structured log format support: set `LOG_FORMAT=json` to emit newline-delimited JSON logs for Loki/Datadog/CloudWatch (requires `python-json-logger`) (Issue #17)
+- Container image pin warning: logs a `WARNING` at startup when `CONTAINER_IMAGE` uses the mutable `:latest` tag (Issue #13)
+- `db.prune_old_logs(days=30)` maintenance function for log table housekeeping
+
 ## [1.10.11] - 2026-03-12
 
 ### Architecture Improvements

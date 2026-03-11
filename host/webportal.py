@@ -3,6 +3,7 @@ EvoClaw Web Portal — Browser-based chat interface (stdlib only, no FastAPI)
 Uses HTTP polling instead of WebSocket for simplicity.
 Endpoint: http://localhost:8766/
 """
+import base64
 import http.server
 import json
 import logging
@@ -45,24 +46,57 @@ def _get_registered_groups() -> list[dict]:
         return []
 
 
+def _check_auth(handler: "http.server.BaseHTTPRequestHandler") -> bool:
+    """Return True if the request is authenticated (or if auth is disabled).
+
+    Authentication is enabled when DASHBOARD_PASSWORD is non-empty (re-uses the
+    same credential already configured for the dashboard).  Sends a 401 with
+    WWW-Authenticate header when the credential is missing or wrong.
+    """
+    password = config.DASHBOARD_PASSWORD
+    if not password:
+        return True  # Auth disabled — allow all requests
+    auth_header = handler.headers.get("Authorization", "")
+    if auth_header.startswith("Basic "):
+        try:
+            decoded = base64.b64decode(auth_header[6:]).decode("utf-8", errors="replace")
+            username, _, provided_pw = decoded.partition(":")
+            if provided_pw == password:
+                return True
+        except Exception:
+            pass
+    # Send 401 Unauthorized
+    handler.send_response(401)
+    handler.send_header("WWW-Authenticate", 'Basic realm="EvoClaw Web Portal"')
+    handler.send_header("Content-Length", "0")
+    handler.end_headers()
+    return False
+
+
 class _WebPortalHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         log.debug(f"WebPortal: {fmt % args}")
 
     def do_GET(self):
+        # /health is unauthenticated (used by health checkers)
+        if self.path == "/health":
+            self._send_json({"status": "ok"})
+            return
+        if not _check_auth(self):
+            return
         if self.path == "/" or self.path == "/index.html":
             self._serve_html()
         elif self.path.startswith("/api/groups"):
             self._api_groups()
         elif self.path.startswith("/api/poll"):
             self._api_poll()
-        elif self.path == "/health":
-            self._send_json({"status": "ok"})
         else:
             self.send_response(404)
             self.end_headers()
 
     def do_POST(self):
+        if not _check_auth(self):
+            return
         if self.path == "/api/send":
             self._api_send()
         elif self.path == "/api/session":

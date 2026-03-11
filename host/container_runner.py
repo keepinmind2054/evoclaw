@@ -24,6 +24,22 @@ def _is_windows() -> bool:
 
 log = logging.getLogger(__name__)
 
+# ── Container image version pin warning ───────────────────────────────────────
+# Log a warning at import time when the image tag uses the mutable ':latest' tag.
+# Operators should pin to a specific version or digest to prevent silent behavioral
+# regressions when the image is rebuilt (e.g. CONTAINER_IMAGE=evoclaw-agent:1.10.12).
+def _warn_if_latest_image() -> None:
+    img = config.CONTAINER_IMAGE
+    if img.endswith(":latest") or ":" not in img:
+        log.warning(
+            "CONTAINER_IMAGE is using an unpinned tag (%r). "
+            "A 'docker pull' or rebuild can silently change agent behavior. "
+            "Consider pinning to a specific version tag, e.g. evoclaw-agent:1.10.12",
+            img,
+        )
+
+_warn_if_latest_image()
+
 # ── Active container tracking (for dashboard) ─────────────────────────────────
 _active_containers: dict[str, dict] = {}  # container_name → info dict
 _active_lock = asyncio.Lock()  # asyncio.Lock for use in async coroutines

@@ -152,6 +152,45 @@ After release, verify:
 
 ---
 
+**Last Updated:** 2026-03-12 (v1.10.12)
+
+---
+
+## v1.10.12 Release Notes
+
+### Security, Stability, and Observability Improvements
+
+**Problems Fixed**:
+
+1. *WebPortal auth bypass* (Issue #12): The Web Portal had no authentication. Any host-network user could list all groups and inject messages, bypassing the allowlist and immune system. Basic Auth is now enforced when `DASHBOARD_PASSWORD` is set.
+
+2. *Fitness speed_score wrong for failed runs* (Issue #18): `compute_fitness()` included zero-ms values (from timed-out containers) in the speed average, making fully broken groups appear fast. The formula now excludes zero-ms unsuccessful runs.
+
+3. *SQLite thread-safety* (Issue #15): The shared `_db` connection was written concurrently from the dashboard, webportal, and evolution daemon threads without any locking. All write operations now acquire `_db_lock` (a `threading.Lock`), preventing `database is locked` errors.
+
+4. *Unbounded log table growth* (Issue #19): `task_run_logs` and `evolution_runs` grew forever. A new `prune_old_logs(days=30)` function is called at startup to cap retention.
+
+**Added**:
+
+5. *Per-group rate limiting* (Issue #16): A sliding-window rate limiter (default 20 msgs/60s) in `_on_message()` prevents one talkative group from starving others. Configurable via `RATE_LIMIT_MAX_MSGS` and `RATE_LIMIT_WINDOW_SECS`.
+
+6. *GroupQueue backpressure* (Issue #14): `pending_tasks` is capped at 50 per group and `_waiting_groups` at 100 entries, preventing unbounded memory growth under sustained load.
+
+7. *JSON structured logging* (Issue #17): `LOG_FORMAT=json` enables newline-delimited JSON output compatible with Loki, Datadog, and CloudWatch Logs Insights (requires `python-json-logger`).
+
+8. *Container image pin warning* (Issue #13): A startup warning is emitted when `CONTAINER_IMAGE` uses the mutable `:latest` tag, prompting operators to pin to a versioned tag.
+
+**Upgrade**:
+
+No `docker build` needed — all changes are in the host process. Restart EvoClaw to apply.
+
+```bash
+git pull
+python run.py start
+```
+
+---
+
 **Last Updated:** 2026-03-12 (v1.10.10)
 
 ---

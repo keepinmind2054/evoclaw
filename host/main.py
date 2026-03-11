@@ -10,6 +10,7 @@ import logging
 import signal
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 
 # ── Per-group consecutive failure tracking (prevents infinite retry loops) ────
@@ -30,10 +31,33 @@ from .router import register_channel, route_outbound, format_messages, find_chan
 from .evolution import check_message as immune_check, evolution_loop
 from .health_monitor import health_monitor_loop
 
-logging.basicConfig(
-    level=getattr(logging, config.LOG_LEVEL, logging.INFO),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+def _configure_logging() -> None:
+    """Configure logging format based on LOG_FORMAT env var.
+
+    LOG_FORMAT=json  → emit newline-delimited JSON (compatible with Loki/Datadog/CloudWatch)
+    LOG_FORMAT=text  → human-readable text (default)
+    """
+    level = getattr(logging, config.LOG_LEVEL, logging.INFO)
+    if config.LOG_FORMAT == "json":
+        try:
+            from pythonjsonlogger import jsonlogger  # type: ignore
+            handler = logging.StreamHandler()
+            handler.setFormatter(
+                jsonlogger.JsonFormatter(
+                    "%(asctime)s %(levelname)s %(name)s %(message)s"
+                )
+            )
+            logging.root.setLevel(level)
+            logging.root.addHandler(handler)
+            return
+        except ImportError:
+            pass  # python-json-logger not installed — fall back to text
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+_configure_logging()
 log = logging.getLogger("evoclaw")
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -56,6 +80,33 @@ _sender_allowlist: set[str] = set()
 
 # 全域的 GroupQueue 實例，負責控制每個群組的 container 並發數量
 _group_queue = GroupQueue()
+
+# ── Per-group rate limiting ────────────────────────────────────────────────────
+# Sliding-window rate limiter to prevent a single group from flooding the system.
+# A group that exceeds RATE_LIMIT_MAX_MSGS messages within RATE_LIMIT_WINDOW_SECS
+# will have excess messages silently dropped until the window slides forward.
+# Values are intentionally permissive — they guard against abuse, not normal chat.
+_group_msg_timestamps: dict[str, deque] = {}  # jid → deque of float timestamps
+
+
+def _is_rate_limited(jid: str) -> bool:
+    """Return True if the group has exceeded the per-group message rate limit.
+
+    Values are read from config so operators can tune via env vars:
+      RATE_LIMIT_MAX_MSGS     (default 20)
+      RATE_LIMIT_WINDOW_SECS  (default 60)
+    """
+    now = time.time()
+    q = _group_msg_timestamps.setdefault(jid, deque())
+    window = float(config.RATE_LIMIT_WINDOW_SECS)
+    # Evict timestamps outside the rolling window
+    while q and now - q[0] > window:
+        q.popleft()
+    if len(q) >= config.RATE_LIMIT_MAX_MSGS:
+        return True
+    q.append(now)
+    return False
+
 
 # ── Message deduplication fence ───────────────────────────────────────────────
 # Short-lived in-memory set of recently-seen message fingerprints.
@@ -140,6 +191,14 @@ async def _on_message(jid: str, sender: str, sender_name: str, content: str,
     """
     if not is_sender_allowed(sender, _sender_allowlist):
         log.debug(f"Sender {sender} blocked by allowlist")
+        return
+
+    # Per-group rate limit: drop excess messages to prevent one group from
+    # starving others.  Logged at DEBUG to avoid log spam under sustained load.
+    if _is_rate_limited(jid):
+        log.debug(
+            "Rate limit exceeded for group %s (sender=%s) — message dropped", jid, sender
+        )
         return
 
     # 去重複檢查：防止頻道 webhook 重試造成相同訊息被處理兩次
@@ -412,6 +471,13 @@ async def main() -> None:
     from . import log_buffer
     log_buffer.install()
     _load_state()
+
+    # Prune old log rows at startup to prevent unbounded disk growth.
+    # Keeps last 30 days of task_run_logs and evolution_runs by default.
+    try:
+        db.prune_old_logs(days=30)
+    except Exception as _prune_exc:
+        log.warning("Log pruning failed (non-fatal): %s", _prune_exc)
 
     # 啟動 Web dashboard（背景 daemon thread，port DASHBOARD_PORT）
     start_dashboard(_stop_event)

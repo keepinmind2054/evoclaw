@@ -19,6 +19,12 @@ log = logging.getLogger(__name__)
 MAX_RETRIES = 5
 # 第一次重試的等待秒數，之後每次倍增（指數退避 exponential backoff）
 BASE_RETRY_SECS = 5.0
+# Backpressure: maximum pending tasks per group before new ones are dropped.
+# Prevents unbounded memory growth when the scheduler fires faster than containers complete.
+MAX_PENDING_TASKS_PER_GROUP = 50
+# Maximum number of groups waiting for a concurrency slot (FIFO waiting list cap).
+# Prevents _waiting_groups from growing without bound under heavy load.
+MAX_WAITING_GROUPS = 100
 
 
 @dataclass
@@ -110,7 +116,13 @@ class GroupQueue:
             # 全域並發已滿，加入等待佇列（FIFO，避免飢餓）
             state.pending_messages = True
             if group_jid not in self._waiting_groups:
-                self._waiting_groups.append(group_jid)
+                if len(self._waiting_groups) < MAX_WAITING_GROUPS:
+                    self._waiting_groups.append(group_jid)
+                else:
+                    log.warning(
+                        "[%s] _waiting_groups at cap (%d), message will be retried on next poll",
+                        group_jid, MAX_WAITING_GROUPS,
+                    )
             log.debug(f"[{group_jid}] At concurrency limit ({self._active_count}) — message queued")
             return
 
@@ -147,15 +159,33 @@ class GroupQueue:
 
         if state.active:
             # 有 container 在跑，任務先排入 pending_tasks 佇列
+            if len(state.pending_tasks) >= MAX_PENDING_TASKS_PER_GROUP:
+                log.warning(
+                    "[%s] pending_tasks full (%d/%d), dropping task %s",
+                    group_jid, len(state.pending_tasks), MAX_PENDING_TASKS_PER_GROUP, task_id,
+                )
+                return
             state.pending_tasks.append(task)
             log.debug(f"[{group_jid}] Container active — task {task_id} queued")
             return
 
         if self._active_count >= config.MAX_CONCURRENT_CONTAINERS:
             # 全域並發已滿，也加入等待佇列
+            if len(state.pending_tasks) >= MAX_PENDING_TASKS_PER_GROUP:
+                log.warning(
+                    "[%s] pending_tasks full (%d/%d), dropping task %s",
+                    group_jid, len(state.pending_tasks), MAX_PENDING_TASKS_PER_GROUP, task_id,
+                )
+                return
             state.pending_tasks.append(task)
             if group_jid not in self._waiting_groups:
-                self._waiting_groups.append(group_jid)
+                if len(self._waiting_groups) < MAX_WAITING_GROUPS:
+                    self._waiting_groups.append(group_jid)
+                else:
+                    log.warning(
+                        "[%s] _waiting_groups at cap (%d), group will not be queued",
+                        group_jid, MAX_WAITING_GROUPS,
+                    )
             log.debug(f"[{group_jid}] At concurrency limit — task {task_id} queued")
             return
 
