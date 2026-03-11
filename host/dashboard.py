@@ -1539,7 +1539,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 session = load_session(session_id)
                 if session and session.status == "paused":
                     # Write a dev_task IPC file to the group's tasks dir to resume via ipc_watcher
-                    ipc_dir = config.DATA_DIR / "ipc" / session.jid.replace(":", "-").replace("@", "-") / "tasks"
+                    # Look up group folder from JID — ipc_watcher scans by folder name, not mangled JID
+                    from . import db as _db
+                    _groups = _db.get_all_registered_groups()
+                    _group = next((g for g in _groups if g.get("jid") == session.jid), None)
+                    if not _group:
+                        self._json({"ok": False, "error": "group not found"}); return
+                    ipc_dir = config.DATA_DIR / "ipc" / _group["folder"] / "tasks"
                     ipc_dir.mkdir(parents=True, exist_ok=True)
                     import json as _json, time as _time
                     fname = ipc_dir / f"{int(_time.time()*1000)}_devresume.json"

@@ -567,6 +567,10 @@ def _resolve_container_path(container_path: str, group_folder: str) -> str | Non
 
     Uses pathlib.Path throughout for correct Windows backslash handling.
     """
+    if not group_folder:
+        logger.warning("_resolve_container_path: empty group_folder for path %r", container_path)
+        return None
+
     import pathlib
 
     # Normalize to forward slashes for prefix matching (container paths are always POSIX)

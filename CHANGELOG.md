@@ -5,6 +5,17 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.6] - 2026-03-11
+
+### Fixed (Code Review Findings)
+- CRASH: .env shadow mount no longer double-prefixes `-v` flag (containers were failing to start on Linux/macOS)
+- ERROR: run_container_agent now catches asyncio.CancelledError and calls _stop_container (outer timeout no longer creates zombie containers)
+- ERROR: /api/dev/resume now writes IPC file to correct group folder path (DevEngine resume was silently broken)
+- WARNING: cleanup_orphans now awaits proc.wait() after docker rm
+- Minor: send_file tool schema — chat_jid removed from required[] (auto-detected from input)
+- Minor: _resolve_container_path guards against empty group_folder
+- Minor: TelegramChannel.send_file removes redundant filename parameter
+
 ## [1.10.5] - 2026-03-11
 
 ### Added

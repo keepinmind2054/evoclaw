@@ -135,7 +135,7 @@ def _build_volume_mounts(group: dict) -> list[str]:
                     env_file
                 )
                 mounts.append(
-                    f"-v {_docker_path(empty_env)}:/workspace/project/.env:ro"
+                    f"{_docker_path(empty_env)}:/workspace/project/.env:ro"
                 )
             else:
                 log.warning(
@@ -421,6 +421,14 @@ async def run_container_agent(
         record_run(jid, run_id, int(config.CONTAINER_TIMEOUT * 1000), retry_count=0, success=False)
         _record_docker_failure()
         return {"status": "error", "result": None, "error": "Container timed out"}
+    except asyncio.CancelledError:
+        # Outer timeout from main.py's asyncio.wait_for — stop the container
+        log.warning("Container %s cancelled (outer timeout), stopping...", container_name)
+        try:
+            await _stop_container(container_name)
+        except Exception:
+            pass
+        raise  # Must re-raise CancelledError
     except Exception as e:
         log.error(f"Container {folder} error: {e}")
         response_ms = int((time.time() - t0) * 1000)
@@ -459,7 +467,11 @@ async def cleanup_orphans() -> None:
         out, _ = await proc.communicate()
         ids = out.decode().split()
         if ids:
-            await asyncio.create_subprocess_exec("docker", "rm", "-f", *ids)
-            log.info(f"Cleaned up {len(ids)} orphan containers")
+            rm_proc = await asyncio.create_subprocess_exec("docker", "rm", "-f", *ids,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await rm_proc.wait()
+            log.info("Cleaned up %d orphan containers", len(ids))
     except Exception as e:
         log.warning(f"Orphan cleanup failed: {e}")

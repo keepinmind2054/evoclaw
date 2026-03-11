@@ -132,7 +132,6 @@ class TelegramChannel:
             await self._app.bot.send_document(
                 chat_id=chat_id,
                 document=input_file,
-                filename=p.name,
                 caption=caption or f"📎 {p.name}",
                 disable_content_type_detection=True,  # Prevents Telegram from re-encoding
             )
