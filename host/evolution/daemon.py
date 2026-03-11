@@ -73,8 +73,7 @@ async def _run_cycle() -> None:
     DB 查詢都是同步的（sqlite3），用 executor 避免阻塞 event loop。
     """
     log.info("Evolution cycle starting")
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, _sync_evolve)
+    await asyncio.to_thread(_sync_evolve)
     log.info("Evolution cycle complete")
 
 

@@ -4,6 +4,8 @@ EvoClaw Host — Main Entry Point
 Orchestrates message polling, container execution, IPC, and scheduling.
 """
 import asyncio
+import collections
+import hashlib
 import logging
 import signal
 import time
@@ -54,6 +56,30 @@ _sender_allowlist: set[str] = set()
 
 # 全域的 GroupQueue 實例，負責控制每個群組的 container 並發數量
 _group_queue = GroupQueue()
+
+# ── Message deduplication fence ───────────────────────────────────────────────
+# Short-lived in-memory set of recently-seen message fingerprints.
+# Prevents duplicate processing caused by webhook retries or channel double-delivery.
+# Uses an OrderedDict as a bounded LRU cache: oldest entries are evicted when full.
+_DEDUP_MAX = 1000  # maximum entries before oldest is evicted
+_seen_msg_fingerprints: collections.OrderedDict = collections.OrderedDict()
+
+
+def _is_duplicate_message(jid: str, sender: str, content: str) -> bool:
+    """Return True if this (jid, sender, content) combination was seen recently.
+
+    A SHA-256 fingerprint of the three values is used as the key to bound memory
+    usage. If the dedup set is full, the oldest entry is evicted (LRU eviction).
+    """
+    raw = f"{jid}\x00{sender}\x00{content}"
+    fp = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()
+    if fp in _seen_msg_fingerprints:
+        _seen_msg_fingerprints.move_to_end(fp)  # mark as recently used
+        return True
+    _seen_msg_fingerprints[fp] = True
+    if len(_seen_msg_fingerprints) > _DEDUP_MAX:
+        _seen_msg_fingerprints.popitem(last=False)  # evict oldest
+    return False
 
 
 def _load_state() -> None:
@@ -114,6 +140,11 @@ async def _on_message(jid: str, sender: str, sender_name: str, content: str,
     """
     if not is_sender_allowed(sender, _sender_allowlist):
         log.debug(f"Sender {sender} blocked by allowlist")
+        return
+
+    # 去重複檢查：防止頻道 webhook 重試造成相同訊息被處理兩次
+    if _is_duplicate_message(jid, sender, content):
+        log.debug("Duplicate message fingerprint detected from %s in %s — skipping", sender, jid)
         return
 
     # 免疫系統檢查：偵測 prompt injection 攻擊或垃圾訊息
@@ -241,7 +272,7 @@ async def _process_group_messages(group: dict, messages: list[dict],
                 session_id=session_id,
                 on_success=_on_success_tracked,
             ),
-            timeout=300.0,  # 5-minute timeout per container run
+            timeout=config.CONTAINER_TIMEOUT,  # use central config value
         )
         # run_container_agent returns {"status": "error", ...} when no output markers found
         if not _run_succeeded and isinstance(result, dict) and result.get("status") == "error":
@@ -250,8 +281,8 @@ async def _process_group_messages(group: dict, messages: list[dict],
                 _group_fail_timestamps[jid] = time.time()
     except asyncio.TimeoutError:
         log.error(
-            "Container run timed out after 300s for group %s — message NOT dropped, "
-            "will be retried on next poll cycle", jid
+            "Container run timed out after %ds for group %s — message NOT dropped, "
+            "will be retried on next poll cycle", int(config.CONTAINER_TIMEOUT), jid
         )
         async with _group_fail_lock:
             _group_fail_counts[jid] = _group_fail_counts.get(jid, 0) + 1
@@ -465,6 +496,7 @@ async def main() -> None:
         global _running
         log.info(f"Received {sig}, shutting down...")
         _running = False
+        _group_queue.shutdown_sync()  # signal: no new tasks accepted
         if _stop_event is not None:
             _stop_event.set()  # Wake up all waiting coroutines immediately
 
@@ -487,6 +519,8 @@ async def main() -> None:
             _orphan_cleanup_loop(_stop_event),
         )
     finally:
+        # 等待所有進行中的 container 完成（最多 30 秒），避免截斷回覆或損毀 IPC 狀態
+        await _group_queue.wait_for_active(timeout=30.0)
         # 確保所有頻道在離開時都乾淨地斷線
         for channel in _loaded_channels:
             try:

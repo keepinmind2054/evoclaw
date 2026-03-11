@@ -313,6 +313,16 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
                 f"⚠️ 檔案無法傳送：找不到 {fname}\n路徑：{host_path}"
             ))
 
+    else:
+        # Unknown IPC message type — log a warning instead of silently ignoring.
+        # This aids debugging when a stale container image sends an unrecognised type.
+        log.warning(
+            "Unknown IPC message type %r from group %s — payload keys: %s",
+            msg_type,
+            group_folder,
+            list(payload.keys()),
+        )
+
 async def _run_dev_task(payload: dict, group_jid: str, route_fn) -> None:
     """
     在背景執行 DevEngine 7 階段開發流程。
@@ -387,9 +397,8 @@ async def _run_apply_skill(
             group = next((g for g in groups if g["folder"] == group_folder), None)
             jid = group["jid"] if group else ""
 
-            # skills_engine.apply_skill 是同步函式，用 executor 避免阻塞 event loop
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, apply_skill, skill_path)
+            # skills_engine.apply_skill 是同步函式，用 to_thread 避免阻塞 event loop
+            result = await asyncio.to_thread(apply_skill, skill_path)
 
             if result.success:
                 msg = f"✅ Skill applied: {result.skill} v{result.version}"
@@ -433,8 +442,7 @@ async def _run_uninstall_skill(
             group = next((g for g in groups if g["folder"] == group_folder), None)
             jid = group["jid"] if group else ""
 
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, uninstall_skill, skill_name)
+            result = await asyncio.to_thread(uninstall_skill, skill_name)
 
             if result.success:
                 msg = f"✅ Skill uninstalled: {result.skill}"
@@ -469,8 +477,7 @@ async def _run_list_skills(
     """
     try:
         get_applied_skills = _get_skills_engine().get_applied_skills
-        loop = asyncio.get_event_loop()
-        skills = await loop.run_in_executor(None, get_applied_skills)
+        skills = await asyncio.to_thread(get_applied_skills)
 
         skills_list = [
             {"name": s.name, "version": s.version, "applied_at": s.applied_at}
@@ -568,7 +575,7 @@ def _resolve_container_path(container_path: str, group_folder: str) -> str | Non
     Uses pathlib.Path throughout for correct Windows backslash handling.
     """
     if not group_folder:
-        logger.warning("_resolve_container_path: empty group_folder for path %r", container_path)
+        log.warning("_resolve_container_path: empty group_folder for path %r", container_path)
         return None
 
     import pathlib

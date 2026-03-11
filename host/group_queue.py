@@ -314,7 +314,39 @@ class GroupQueue:
                     name=f"group-msg-{next_jid}",
                 )
 
+    def shutdown_sync(self) -> None:
+        """Signal shutdown from a synchronous context (e.g. signal handler).
+        No new tasks will be accepted after this call.
+        """
+        self._shutting_down = True
+        log.info(f"GroupQueue: shutdown signalled (active containers: {self._active_count})")
+
     async def shutdown(self) -> None:
         """Signal shutdown — no new tasks will be started."""
         self._shutting_down = True
         log.info(f"GroupQueue shutting down (active containers: {self._active_count})")
+
+    async def wait_for_active(self, timeout: float = 30.0) -> None:
+        """Wait until all in-flight containers finish, or until timeout expires.
+
+        Should be called after shutdown() during graceful shutdown to avoid
+        aborting containers mid-response and leaving cursor/IPC state inconsistent.
+        """
+        if self._active_count == 0:
+            return
+        log.info(
+            "Waiting up to %.0fs for %d active container(s) to finish...",
+            timeout,
+            self._active_count,
+        )
+        deadline = asyncio.get_event_loop().time() + timeout
+        while self._active_count > 0:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                log.warning(
+                    "Graceful shutdown timeout: %d container(s) still active",
+                    self._active_count,
+                )
+                break
+            await asyncio.sleep(min(0.5, remaining))
+        log.info("GroupQueue: all containers finished (or timeout reached)")

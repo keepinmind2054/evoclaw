@@ -279,6 +279,7 @@ async def run_container_agent(
         "evolutionHints": evolution_hints,  # 演化引擎動態注入的行為指引
         "conversationHistory": conversation_history if conversation_history is not None else conv_history,  # 最近的對話歷史，提供記憶能力
         "scheduledTasks": scheduled_tasks,  # 此群組的排程任務清單，讓 agent 可以列出和取消
+        "runId": run_id,  # 關聯 ID：供 container 在 stderr 中記錄，與 host 日誌對齊
     }
     input_json = json.dumps(input_data, ensure_ascii=True)
     # 記錄 container 啟動時間，用於計算回應時間（適應度追蹤）
@@ -315,7 +316,7 @@ async def run_container_agent(
         config.CONTAINER_IMAGE,
     ]
 
-    log.info(f"Starting container {container_name} for group {folder}")
+    log.info(f"Starting container {container_name} for group {folder} (run_id={run_id})")
 
     input_bytes = input_json.encode("utf-8")
 
