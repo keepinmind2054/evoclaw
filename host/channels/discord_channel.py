@@ -1,5 +1,6 @@
 """Discord channel implementation using discord.py"""
 import asyncio
+import concurrent.futures
 import logging
 import threading
 from typing import Callable, Optional
@@ -150,8 +151,22 @@ class DiscordChannel:
         if self._loop is None or self._loop.is_closed():
             raise RuntimeError("Discord event loop not running")
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        # Await the concurrent.futures.Future from the main event loop
-        return await asyncio.get_event_loop().run_in_executor(None, future.result, 30)
+
+        # Await the concurrent.futures.Future from the main event loop.
+        # Fixes #87: future.result(30) was not catching TimeoutError, which propagated
+        # uncaught and crashed the send_message() coroutine.
+        def _get_result():
+            try:
+                result = future.result(30)
+                return result
+            except concurrent.futures.TimeoutError:
+                log.warning("Discord loop call timed out after 30s")
+                return None
+            except Exception as exc:
+                log.error("Discord loop call failed: %s", exc)
+                return None
+
+        return await asyncio.get_event_loop().run_in_executor(None, _get_result)
 
     async def send_message(self, jid: str, text: str) -> None:
         if not self.is_connected():

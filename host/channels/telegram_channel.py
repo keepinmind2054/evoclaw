@@ -1,5 +1,6 @@
 """Telegram channel implementation using python-telegram-bot"""
 import logging
+import os
 from typing import Callable, Awaitable, Optional
 from telegram import Update, Bot
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
@@ -16,8 +17,18 @@ class TelegramChannel:
         self._on_chat_metadata = on_chat_metadata
         self._registered_groups = registered_groups
         self._app: Optional[Application] = None
-        token = read_env_file(["TELEGRAM_BOT_TOKEN"]).get("TELEGRAM_BOT_TOKEN", "")
+        env = read_env_file(["TELEGRAM_BOT_TOKEN"])
+        token = env.get("TELEGRAM_BOT_TOKEN", "")
         self._token = token
+
+        # Fixes #91: make upload timeout configurable via env var (default 300s).
+        # The previous hardcoded 120s is insufficient for files near the 45 MB limit
+        # on slow networks.
+        timeout_str = env.get("TELEGRAM_UPLOAD_TIMEOUT") or os.environ.get("TELEGRAM_UPLOAD_TIMEOUT") or "300"
+        try:
+            self._upload_timeout = int(timeout_str)
+        except (ValueError, TypeError):
+            self._upload_timeout = 300
 
     def _jid(self, chat_id: int) -> str:
         return f"tg:{chat_id}"
@@ -160,11 +171,11 @@ class TelegramChannel:
                         filename=p.name,
                         caption=caption or p.name,
                     ),
-                    timeout=120,
+                    timeout=self._upload_timeout,
                 )
             log.info("send_file: sent %s (%d bytes) to %s", p.name, p.stat().st_size, jid)
         except asyncio.TimeoutError:
-            log.error("send_file: upload of %s timed out after 120s", p.name)
+            log.error("send_file: upload of %s timed out after %ds", p.name, self._upload_timeout)
             try:
                 await self.send_message(jid, f"[File upload timed out: {p.name}]")
             except Exception:

@@ -105,6 +105,11 @@ def check_message(content: str, sender_jid: str) -> tuple[bool, Optional[str]]:
     若資料庫操作失敗，靜默回傳安全（True），
     避免 DB 故障導致整個系統無法回應訊息。
     """
+    # Fixes #93: empty sender_jid bypassed all rate-limit checks silently.
+    if not sender_jid:
+        log.debug("immune.check_message: empty sender_jid — skipping check")
+        return (False, "empty_sender")
+
     try:
         # ── 1. 檢查發送者是否已被封鎖 ────────────────────────────────────────
         from host import db

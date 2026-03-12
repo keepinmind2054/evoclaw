@@ -5,6 +5,21 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.23] - 2026-03-12
+
+### Fixed
+- **#86** `router.py`: Added user notification (⚠️ 回應傳送失敗) when all message chunks fail to deliver after retries
+- **#87** `discord_channel.py`: Wrapped `future.result(30)` in try/except to catch `concurrent.futures.TimeoutError` — prevents crash on slow Discord API responses
+- **#88** `whatsapp_channel.py`: `_last_wamid` changed from plain dict to `OrderedDict` with LRU eviction capped at 10,000 entries — prevents unbounded memory growth on high-volume deployments
+- **#89** `fitness.py`: Fixed `speed_score` formula — sub-target response times now correctly score 1.0 (was erroneously returning values > 1.0)
+- **#90** `webportal.py`: Sessions lock released before `db.store_message()` call — prevents potential deadlock under concurrent session and message-store operations
+- **#91** `telegram_channel.py`: Upload timeout now configurable via `TELEGRAM_UPLOAD_TIMEOUT` env var (default: 300s, was hardcoded 120s)
+- **#92** `dev_engine.py`: Path traversal guard improvements
+- **#93** `immune.py`: Guard against empty `sender_jid` in `check_message()` — prevents potential crash or incorrect threat attribution on malformed messages
+
+### Chore
+- Version bump 1.10.22 → 1.10.23
+
 ## [1.10.22] - 2026-03-12
 
 ### Fixed
@@ -350,6 +365,7 @@ register_dynamic_tool(
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 1.10.23 | 2026-03-12 | Router fail notification (#86), Discord timeout guard (#87), WhatsApp LRU wamid dict (#88), fitness score fix (#89), webportal deadlock fix (#90), Telegram upload timeout env var (#91), path traversal guard (#92), immune empty JID guard (#93) |
 | 1.10.22 | 2026-03-12 | WhatsApp send_typing wamid fix, send_file deleteAfterSend, multi-key rotation (#6), close #5 |
 | 1.10.1 | 2026-03-11 | Fixed Telegram binary file sending bug |
 | 1.10.0 | 2026-03-10 | Full evolution engine, DevEngine, Health Monitor |

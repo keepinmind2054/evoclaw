@@ -152,7 +152,40 @@ After release, verify:
 
 ---
 
-**Last Updated:** 2026-03-12 (v1.10.22)
+**Last Updated:** 2026-03-12 (v1.10.23)
+
+---
+
+## v1.10.23 Release Notes
+
+### Router Failure Notification, Discord Timeout Guard, WhatsApp Memory Cap, Fitness Score Fix, and More
+
+**Problems Fixed**:
+
+1. *No user feedback when all message chunks fail to deliver* (#86): `router.py` now sends a ⚠️ 回應傳送失敗 notification to the user when every chunk of a multi-part outbound message fails after all retries. Previously the failure was silent from the user's perspective.
+
+2. *Discord channel crashes on slow API responses* (#87): `discord_channel.py` wrapped `future.result(30)` in a try/except block to catch `concurrent.futures.TimeoutError`. Previously a slow or stalled Discord API call would raise an unhandled exception and crash the channel handler.
+
+3. *`_last_wamid` dict grows without bound in WhatsApp channel* (#88): `whatsapp_channel.py` replaced the plain `dict` used for `_last_wamid` with a `collections.OrderedDict` capped at 10,000 entries with LRU eviction. On high-volume deployments receiving thousands of distinct JIDs, the previous dict accumulated entries indefinitely.
+
+4. *`speed_score` incorrectly exceeds 1.0 for fast responses* (#89): `fitness.py` fixed the `speed_score` formula so that response times shorter than the target threshold correctly return 1.0. The previous formula produced values greater than 1.0 for sub-target times, inflating fitness scores for fast groups.
+
+5. *Potential deadlock in WebPortal `store_message` call* (#90): `webportal.py` now releases the sessions lock before calling `db.store_message()`. Previously the lock was held across the DB write, creating a potential deadlock if the DB layer attempted to acquire any lock that interacted with the session lock.
+
+6. *Telegram upload timeout hardcoded at 120s* (#91): `telegram_channel.py` now reads upload timeout from the `TELEGRAM_UPLOAD_TIMEOUT` environment variable (default: 300s). The previous hardcoded 120s was too short for large file uploads on slow connections.
+
+7. *Path traversal guard improvements in DevEngine* (#92): `dev_engine.py` received additional path traversal guard improvements to more robustly reject crafted paths that attempt to escape the intended workspace directory.
+
+8. *Empty `sender_jid` causes incorrect behaviour in immune check* (#93): `immune.py` `check_message()` now guards against empty or None `sender_jid` values. Previously a message with a missing sender JID could trigger incorrect threat attribution or an unhandled exception.
+
+**Upgrade**:
+
+No `docker build` needed — all changes are in the host process. Restart EvoClaw to apply.
+
+```bash
+git pull
+python run.py start
+```
 
 ---
 
