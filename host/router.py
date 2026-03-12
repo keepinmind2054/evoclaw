@@ -116,10 +116,48 @@ async def route_outbound(jid: str, text: str) -> None:
             break
 
 
+_MAX_FILE_BYTES = 45 * 1024 * 1024  # 45 MB — safely under Telegram's 50 MB bot limit
+
+
 async def route_file(jid: str, file_path: str, caption: str = "") -> None:
-    """Route a file to the appropriate channel for delivery."""
+    """Route a file to the appropriate channel for delivery.
+
+    Pre-flight checks performed before handing off to the channel:
+    - File must exist on disk.
+    - File must be under _MAX_FILE_BYTES (45 MB).  Files that exceed the limit
+      trigger a plain-text notification to the user instead of a broken upload.
+    """
+    import pathlib as _pl
+
     ch = find_channel(jid)
     if ch is None:
         log.warning("route_file: no channel for jid=%s", jid)
         return
+
+    p = _pl.Path(file_path)
+    if not p.exists():
+        log.warning("route_file: file not found: %s", file_path)
+        try:
+            await ch.send_message(jid, f"[File not found: {p.name}]")
+        except Exception:
+            pass
+        return
+
+    file_size = p.stat().st_size
+    if file_size > _MAX_FILE_BYTES:
+        size_mb = file_size / (1024 * 1024)
+        log.warning(
+            "route_file: file %s is %.1f MB, exceeds %.0f MB limit — sending text notice",
+            p.name, size_mb, _MAX_FILE_BYTES / (1024 * 1024),
+        )
+        try:
+            await ch.send_message(
+                jid,
+                f"[File '{p.name}' ({size_mb:.1f} MB) exceeds the {_MAX_FILE_BYTES // (1024*1024)} MB "
+                f"upload limit and could not be sent. Please reduce the file size.]",
+            )
+        except Exception:
+            pass
+        return
+
     await ch.send_file(jid, file_path, caption)

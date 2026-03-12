@@ -152,7 +152,44 @@ After release, verify:
 
 ---
 
-**Last Updated:** 2026-03-12 (v1.10.14)
+**Last Updated:** 2026-03-12 (v1.10.15)
+
+---
+
+## v1.10.15 Release Notes
+
+### research-ppt Skill: Self-Healing Architecture + Telegram File Sending Fixes
+
+**Added**:
+
+1. *research-ppt skill* (Issue #39): New installable skill providing a `research_ppt` container tool for generating PowerPoint presentations. Key design principles:
+   - Version-pins `python-pptx==1.0.2` — prevents dependency drift on ephemeral Docker containers where each run starts fresh
+   - Self-healing installer: retries `pip install` up to 2 times on transient PyPI network failures before giving up
+   - Graceful degradation: if PPTX generation fails for any reason (missing package, font error, API change), automatically writes a plain-text `.txt` report instead of crashing
+   - Font safety: tries a chain of preferred fonts (including CJK fonts like Microsoft YaHei, Noto Sans CJK) and falls back to Arial silently — no hard crash on minimal Docker images without Chinese font packages
+   - Hot-deployed via `container_tools:` in the skill manifest — no image rebuild required
+
+**Fixed**:
+
+2. *`route_file()` no file size guard* (Issue #40): `router.route_file()` now performs two pre-flight checks before passing to the channel:
+   - File existence: if the file does not exist on disk, sends a plain-text notification and returns
+   - File size: files over 45 MB (safely under Telegram's 50 MB bot limit) trigger a plain-text notification instead of a failed upload attempt
+
+3. *`TelegramChannel.send_file()` memory spike* (Issue #40): The previous implementation called `f.read()` to load the entire file into memory before sending. Replaced with a streaming approach — the open file object `fh` is passed directly to `send_document`, so python-telegram-bot streams the upload without buffering the full binary content in the host process.
+
+4. *`TelegramChannel.send_file()` no upload timeout* (Issue #40): The `send_document` call now runs inside `asyncio.wait_for(..., timeout=120)`. A slow or stalled network can no longer hold a GroupQueue slot indefinitely.
+
+5. *Debug log side-effect removed*: The previous `send_file` implementation wrote every upload attempt to `/workspace/group/debug_send.log`. This file accumulated indefinitely and was not gated on any debug flag. The entire debug-logging block has been removed.
+
+**Upgrade**:
+
+No `docker build` needed for the router and Telegram channel fixes — all changes are in the host process. To enable the `research-ppt` skill, install it via the skills engine:
+
+```bash
+git pull
+python -m skills_engine apply skills/research-ppt
+python run.py start
+```
 
 ---
 

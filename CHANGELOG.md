@@ -5,6 +5,23 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.15] - 2026-03-12
+
+### Added
+- New `research-ppt` skill: generates PowerPoint presentations with self-healing dependency management (Issue #39)
+  - `research_ppt_tool.py` container tool registered at runtime via `register_dynamic_tool()`
+  - Version-pins `python-pptx==1.0.2` to prevent dependency drift on ephemeral Docker containers
+  - Self-healing installer retries up to 2 times on transient PyPI network failures
+  - Graceful degradation: produces a plain-text `.txt` report when PPTX generation fails for any reason
+  - Font-safe: skips unavailable CJK/Chinese fonts with a fallback chain instead of crashing
+  - Skill manifest `skills/research-ppt/manifest.yaml` includes `container_tools:` entry so the tool is hot-deployed to `data/dynamic_tools/` without rebuilding the container image
+
+### Fixed
+- `route_file()` in `router.py` now validates file existence and enforces a 45 MB size guard before attempting upload; oversized files trigger a plain-text notification to the user instead of a silent broken upload (Issue #40)
+- `TelegramChannel.send_file()` now streams the file via an open file object instead of loading the entire binary content into memory with `f.read()`, preventing large memory spikes for multi-megabyte files (Issue #40)
+- `TelegramChannel.send_file()` wrapped in `asyncio.wait_for(..., timeout=120)` so a slow network cannot stall the GroupQueue slot indefinitely (Issue #40)
+- Removed debug log file (`debug_send.log`) side-effect from `TelegramChannel.send_file()` that was writing to `/workspace/group/debug_send.log` on every file send
+
 ## [1.10.14] - 2026-03-12
 
 ### Fixed

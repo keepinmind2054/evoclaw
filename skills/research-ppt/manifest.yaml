@@ -1,0 +1,14 @@
+skill: research-ppt
+version: "1.0.0"
+description: "Research and generate PowerPoint presentations with self-healing dependency management and graceful plain-text fallback"
+author: "KeithKeepGoing/evoclaw"
+core_version: "1.0.0"
+depends: []
+conflicts: []
+adds:
+  - docs/skills/research-ppt/SKILL.md
+modifies: []
+file_ops: []
+container_tools:
+  - dynamic_tools/research_ppt_tool.py
+test: null

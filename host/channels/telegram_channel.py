@@ -104,69 +104,55 @@ class TelegramChannel:
         await self._app.bot.send_message(chat_id=chat_id, text=text)
 
     async def send_file(self, jid: str, file_path: str, caption: str = "") -> None:
-        """Send a document/file to a Telegram chat."""
+        """Send a document/file to a Telegram chat.
+
+        Improvements over the previous implementation:
+        - Streams the file via an open file object instead of loading the entire
+          content into memory with f.read() — avoids large memory spikes for
+          multi-megabyte files.
+        - Wraps the upload in asyncio.wait_for() with a 120-second timeout so a
+          slow connection cannot stall the GroupQueue slot indefinitely.
+        - Notifies the user on failure rather than silently swallowing the error.
+        """
+        import asyncio
         import pathlib
-        import traceback
-
-        # --- DEBUG LOG START ---
-        debug_log_path = "/workspace/group/debug_send.log"
-        def write_debug(msg):
-            try:
-                with open(debug_log_path, "a", encoding="utf-8") as f:
-                    f.write(f"[DEBUG] {msg}\n")
-            except Exception as e:
-                pass
-        # --- DEBUG LOG END ---
-
-        write_debug(f"=== START send_file ===")
-        write_debug(f"Target JID: {jid}, File: {file_path}")
 
         if not self._app:
-            write_debug("ERROR: self._app is None")
             return
 
         p = pathlib.Path(file_path)
         if not p.exists():
-            write_debug(f"ERROR: File not found: {p}")
-            await self.send_message(jid, f"⚠️ File not found: {p.name}")
+            log.warning("send_file: file not found: %s", file_path)
+            await self.send_message(jid, f"[File not found: {p.name}]")
             return
 
         chat_id = int(jid.replace("tg:", ""))
-        write_debug(f"Chat ID: {chat_id}, File Size: {p.stat().st_size} bytes")
 
         try:
-            write_debug("Attempting to read file in binary mode...")
-            # CRITICAL FIX: Read file as binary to avoid encoding issues (e.g., cp950 errors)
-            with open(p, "rb") as f:
-                file_data = f.read()
-            
-            write_debug(f"File read successful. Data length: {len(file_data)}")
-            write_debug(f"Calling send_document API...")
-
-            # Send the file data directly
-            await self._app.bot.send_document(
-                chat_id=chat_id,
-                document=file_data,
-                filename=p.name,
-                caption=caption or f"📎 {p.name}",
-            )
-
-            write_debug("API call successful!")
-            log.info(f"Successfully sent file {p.name} to {jid}")
-
-        except Exception as exc:
-            error_trace = traceback.format_exc()
-            write_debug(f"ERROR Exception: {exc}")
-            write_debug(f"Traceback: {error_trace}")
-            log.error(f"Failed to send file {p.name} to {jid}: {exc}", exc_info=True)
-
-            # Fallback: notify user
+            # Stream the file — do NOT read() the whole thing into memory.
+            with open(p, "rb") as fh:
+                await asyncio.wait_for(
+                    self._app.bot.send_document(
+                        chat_id=chat_id,
+                        document=fh,
+                        filename=p.name,
+                        caption=caption or p.name,
+                    ),
+                    timeout=120,
+                )
+            log.info("send_file: sent %s (%d bytes) to %s", p.name, p.stat().st_size, jid)
+        except asyncio.TimeoutError:
+            log.error("send_file: upload of %s timed out after 120s", p.name)
             try:
-                await self.send_message(jid, f"⚠️ Failed to send file '{p.name}': {exc}")
-            except Exception as msg_exc:
-                log.error(f"Also failed to send error message: {msg_exc}")
-        finally:
-            write_debug("=== END send_file ===\n")
+                await self.send_message(jid, f"[File upload timed out: {p.name}]")
+            except Exception:
+                pass
+        except Exception as exc:
+            log.error("send_file: failed to send %s to %s: %s", p.name, jid, exc, exc_info=True)
+            try:
+                await self.send_message(jid, f"[Failed to send file '{p.name}': {exc}]")
+            except Exception:
+                pass
 
     async def send_typing(self, jid: str) -> None:
         if not self._app:
