@@ -183,6 +183,24 @@ python run.py start
 
 ---
 
+## v1.10.26 Release Notes
+
+### Memory Safety, Reliability, and Shutdown Fixes (Issues #118–#122)
+
+**Problems Fixed**:
+
+1. *Rate-limit deque unbounded memory growth* (#118): `_group_msg_timestamps` used plain `deque()` per group JID. A group sending messages within the rolling window never triggered timestamp eviction, allowing the deque to grow indefinitely. Over days of high-traffic operation this caused memory bloat and O(n) deque operations. Fixed by initialising with `maxlen=RATE_LIMIT_MAX_MSGS*2`.
+
+2. *Subagent result files accumulate indefinitely on disk* (#119): IPC result files in `data/ipc/*/results/` were never cleaned up when a container crashed before writing results, or when a parent agent was cancelled before reading. On busy deployments this could fill the disk over time. Fixed by adding `_cleanup_stale_results()` — a background sweep that removes files older than 1 hour, run every 120 IPC poll cycles.
+
+3. *Immune system blocks all messages on transient DB lock* (#120): `check_message()` returned `(False, "immune_check_error")` for all DB exceptions including brief locks during `prune_old_logs`. This caused a complete group message blackout during any SQLite busy period. Fixed by distinguishing transient `database is locked` errors (fail-open) from permanent I/O errors (fail-secure).
+
+4. *Graceful shutdown hangs for up to POLL_INTERVAL seconds* (#121): `asyncio.gather()` waited for all tasks to complete naturally. Tasks sleeping in `asyncio.sleep()` between poll cycles did not exit until their sleep expired. Fixed by explicitly cancelling all pending asyncio tasks before disconnecting channels, enabling immediate shutdown on SIGTERM.
+
+5. *Invalid cron expression leaves task with `next_run=NULL` silently* (#122): When `compute_next_run()` returned `None`, the task was updated with `next_run=NULL` but `status=active`. It became invisible to scheduler polls (never fires) but remained in the DB forever with no indication of failure. Fixed by marking the task `status=paused` with an explanatory `last_result` message.
+
+---
+
 ## v1.10.25 Release Notes
 
 ### Concurrency, Security, and Reliability Fixes (Issues #105–#110)

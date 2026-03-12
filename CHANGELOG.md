@@ -8,11 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.10.26] - 2026-03-12
 
 ### Fixed
-- **#112** `evolution/daemon.py`: `_sync_prune_logs()` called via `asyncio.to_thread()` now wrapped in `asyncio.wait_for(..., timeout=300.0)`; a `TimeoutError` logs a warning and skips the pruning cycle instead of hanging the evolution daemon indefinitely
-- **#113** `ipc_watcher.py`: `_sanitize_error_for_notification()` improved to replace absolute paths with `<path>` using two regex patterns (Windows drive-letter paths and Unix absolute paths with 3+ char components); length cap raised from 120 to 500 characters with ellipsis suffix
-- **#114** `ipc_watcher.py`: subagent result truncation in `_run_subagent()` changed from character-index slicing (`result_text[:N]`) to byte-aware truncation (`_encoded[:N].decode("utf-8", errors="ignore")`), ensuring multi-byte UTF-8 characters are not split at a byte boundary
-- **#115** `task_scheduler.py`: when `get_group_fn(jid)` returns `None` in `run_task()`, instead of marking the task as `status="error"` (permanent disable), a 1-hour backoff is applied via `db.update_task(task_id, next_run=backoff_next)` so orphaned tasks retry after a cooldown rather than being silently killed
-- **#116** `main.py`: group fail counter no longer resets to 0 when cooldown expires; instead decays by 2 (`max(0, count - 2)`) so groups with repeated failures accumulate longer cooldowns; cooldown expiry now logged at INFO with jid and remaining count
+- **#118** `main.py`: `_is_rate_limited()` — initialise per-group deque with `maxlen=RATE_LIMIT_MAX_MSGS*2`; without a cap the deque grew unbounded for groups that consistently send within the rolling window, causing memory bloat and O(n) deque operations after days of operation
+- **#119** `ipc_watcher.py`: added `_cleanup_stale_results()` background sweep — removes subagent result files in `data/ipc/*/results/` that are older than 1 hour; runs every 120 IPC poll cycles to prevent disk fill when containers crash before writing or parent agents are cancelled before reading
+- **#120** `evolution/immune.py`: `check_message()` now distinguishes transient DB locks (`sqlite3.OperationalError: database is locked`) from permanent errors — transient locks fail-open (allow message) to prevent a brief prune_old_logs lock from blacking out all group messages; permanent/IO errors still fail-secure
+- **#121** `main.py`: graceful shutdown now explicitly cancels all pending asyncio tasks before disconnecting channels — tasks sleeping in `asyncio.sleep()` (message loop POLL_INTERVAL, evolution loop) now exit immediately on SIGTERM instead of blocking shutdown for up to POLL_INTERVAL seconds
+- **#122** `task_scheduler.py`: when `compute_next_run()` returns `None` (invalid schedule expression), task is now marked `status=paused` with an explanatory `last_result` message instead of being left with `next_run=NULL`/`status=active`, invisible to scheduler polls but never cleaned up
 
 ### Chore
 - Version bump 1.10.25 → 1.10.26

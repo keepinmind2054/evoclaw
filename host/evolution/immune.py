@@ -17,6 +17,7 @@ EvoClaw 的免疫系統類比：
 import hashlib
 import logging
 import re
+import sqlite3
 from typing import Optional
 
 log = logging.getLogger(__name__)
@@ -139,8 +140,19 @@ def check_message(content: str, sender_jid: str) -> tuple[bool, Optional[str]]:
             return (False, "spam")
 
         return (True, None)
+    except sqlite3.OperationalError as exc:
+        # Fix #120: distinguish transient DB lock from permanent errors.
+        # A brief DB lock (e.g. prune_old_logs running) should NOT blackout all group messages —
+        # that violates availability for all users in the group.
+        # Only permanent / unrecoverable errors (corrupted DB, I/O failure) should fail-secure.
+        exc_str = str(exc).lower()
+        if "database is locked" in exc_str or "busy" in exc_str:
+            log.warning("immune check_message: transient DB lock — allowing message: %s", exc)
+            return (True, None)
+        log.error("immune check_message permanent DB error: %s", exc)
+        return (False, "immune_check_error")
     except Exception as exc:
-        # Fix #108: fail-secure — deny on DB error rather than fail-open (allowing through).
+        # Fix #108: fail-secure — deny on unexpected DB error rather than fail-open.
         # A DB outage must not silently bypass the immune check and let unvetted messages through.
         log.error("immune check_message DB error: %s", exc)
         return (False, "immune_check_error")

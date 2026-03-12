@@ -103,9 +103,24 @@ async def run_task(task: dict, get_group_fn: Callable, run_agent_fn: Callable) -
         # not immediately on every scheduler poll.
         next_run_ts = compute_next_run(task["schedule_type"], task["schedule_value"], start)
     finally:
-        # Always advance next_run so the task is never stuck at a past timestamp
-        # even if an unexpected exception escapes both the try and except blocks.
-        db.update_task(task_id, next_run=next_run_ts)
+        # Fix #122: if next_run_ts is None (invalid schedule expression), mark the task
+        # as "paused" so it doesn't linger silently with next_run=NULL.  Users can
+        # repair the schedule expression and manually resume the task.
+        if next_run_ts is None and task.get("schedule_type") != "once":
+            log.error(
+                "Task %s has invalid %s schedule %r — marking as paused",
+                task_id, task.get("schedule_type"), task.get("schedule_value"),
+            )
+            db.update_task(
+                task_id,
+                status="paused",
+                next_run=None,
+                last_result="Invalid schedule expression — task paused. Repair the schedule to resume.",
+            )
+        else:
+            # Always advance next_run so the task is never stuck at a past timestamp
+            # even if an unexpected exception escapes both the try and except blocks.
+            db.update_task(task_id, next_run=next_run_ts)
 
 async def start_scheduler_loop(
     get_group_fn: Callable,

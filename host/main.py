@@ -100,7 +100,11 @@ def _is_rate_limited(jid: str) -> bool:
       RATE_LIMIT_WINDOW_SECS  (default 60)
     """
     now = time.time()
-    q = _group_msg_timestamps.setdefault(jid, deque())
+    # Fix #118: cap deque at RATE_LIMIT_MAX_MSGS * 2 entries to prevent unbounded growth.
+    # Without maxlen, a group sending messages within the window never triggers eviction,
+    # causing the deque to grow indefinitely over hours/days of operation.
+    max_msgs = config.RATE_LIMIT_MAX_MSGS
+    q = _group_msg_timestamps.setdefault(jid, deque(maxlen=max_msgs * 2))
     window = float(config.RATE_LIMIT_WINDOW_SECS)
     # Evict timestamps outside the rolling window
     while q and now - q[0] > window:
@@ -635,6 +639,14 @@ async def main() -> None:
             _orphan_cleanup_loop(_stop_event),
         )
     finally:
+        # Fix #121: explicitly cancel all still-running asyncio tasks so loops sleeping in
+        # asyncio.sleep() (e.g. POLL_INTERVAL) exit immediately rather than blocking shutdown.
+        pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
         # 等待所有進行中的 container 完成（最多 30 秒），避免截斷回覆或損毀 IPC 狀態
         await _group_queue.wait_for_active(timeout=30.0)
         # 確保所有頻道在離開時都乾淨地斷線

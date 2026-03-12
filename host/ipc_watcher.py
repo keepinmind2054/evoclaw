@@ -770,6 +770,33 @@ def _compute_next_run(schedule_type: str, schedule_value: str) -> int | None:
             return None
     return None
 
+_RESULT_MAX_AGE_SECS = 3600  # 1 hour — stale result files older than this are removed
+_result_cleanup_cycle = 0
+_RESULT_CLEANUP_EVERY = 120  # run cleanup every ~120 IPC poll cycles (~60s at default 0.5s interval)
+
+
+async def _cleanup_stale_results() -> None:
+    """Fix #119: Remove subagent result files older than _RESULT_MAX_AGE_SECS.
+
+    Result files in data/ipc/*/results/ accumulate when a container crashes before writing
+    or when a parent agent is cancelled before reading. Without cleanup they fill the disk.
+    """
+    cutoff = time.time() - _RESULT_MAX_AGE_SECS
+    removed = 0
+    try:
+        for result_file in config.DATA_DIR.glob("ipc/*/results/*.json"):
+            try:
+                if result_file.stat().st_mtime < cutoff:
+                    result_file.unlink(missing_ok=True)
+                    removed += 1
+            except Exception:
+                pass
+        if removed:
+            log.info("IPC result cleanup: removed %d stale result file(s)", removed)
+    except Exception as exc:
+        log.warning("IPC result cleanup error: %s", exc)
+
+
 async def start_ipc_watcher(get_groups_fn: Callable, route_fn: Callable, stop_event: asyncio.Event) -> None:
     """
     IPC 監控主迴圈：每隔 IPC_POLL_INTERVAL 秒掃描所有群組的 IPC 目錄。
@@ -777,6 +804,7 @@ async def start_ipc_watcher(get_groups_fn: Callable, route_fn: Callable, stop_ev
     之所以用輪詢（polling）而非 inotify/watchdog 等檔案系統事件，
     是為了保持跨平台相容性，並簡化 container volume mount 的互動邏輯。
     """
+    global _result_cleanup_cycle
     log.info("IPC watcher started")
     while True:
         try:
@@ -785,6 +813,12 @@ async def start_ipc_watcher(get_groups_fn: Callable, route_fn: Callable, stop_ev
                 await process_ipc_dir(group["folder"], bool(group.get("is_main")), route_fn)
         except Exception as e:
             log.error(f"IPC watcher error: {e}")
+
+        # Periodically purge stale subagent result files (Fix #119)
+        _result_cleanup_cycle += 1
+        if _result_cleanup_cycle % _RESULT_CLEANUP_EVERY == 0:
+            await _cleanup_stale_results()
+
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=config.IPC_POLL_INTERVAL)
             break  # stop_event was set, exit loop
