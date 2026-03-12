@@ -90,8 +90,13 @@ async def run_task(task: dict, get_group_fn: Callable, run_agent_fn: Callable) -
                        next_run=compute_next_run(task["schedule_type"], task["schedule_value"], start))
     except Exception as e:
         log.error(f"Task {task_id} failed: {e}")
-        # 失敗時仍記錄 log，但 next_run 不更新（保持原值，讓任務下次仍能執行）
+        # 失敗時記錄 log 並推進 next_run，防止任務因 next_run 未更新而在每次
+        # scheduler 輪詢時立即重試，形成緊密的無限重試迴圈（Issue #54）。
         db.log_task_run(task_id, start, 0, "error", None, str(e))
+        # Compute a backoff next_run so the task retries after a normal cycle,
+        # not immediately on every scheduler poll.
+        backoff_next = compute_next_run(task["schedule_type"], task["schedule_value"], start)
+        db.update_task(task_id, next_run=backoff_next)
 
 async def start_scheduler_loop(
     get_group_fn: Callable,
@@ -114,9 +119,15 @@ async def start_scheduler_loop(
             due = db.get_due_tasks(now_ms)
             for task in due:
                 if group_queue is not None:
-                    # Enqueue through GroupQueue for per-group serialization
+                    # Enqueue through GroupQueue for per-group serialization.
+                    # Use chat_jid as the queue key — this is the canonical group
+                    # identifier used by enqueue_message_check() so tasks and
+                    # message processing share the same serialization slot (Issue #48).
                     jid = task.get("chat_jid", "")
                     task_id = task["id"]
+                    if not jid:
+                        log.warning("Task %s has empty chat_jid — skipping enqueue", task_id)
+                        continue
                     group_queue.enqueue_task(
                         jid,
                         task_id,

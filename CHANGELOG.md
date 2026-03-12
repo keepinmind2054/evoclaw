@@ -5,6 +5,17 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.17] - 2026-03-12
+
+### Fixed
+- **Per-JID message cursors** (`host/main.py`): replaced single global `_last_timestamp` with a per-JID cursor dict (`_per_jid_cursors`). A successful container run for group A can no longer push the shared timestamp past group B's pending messages, preventing silent message loss in multi-group deployments (Issue #52)
+- **DB thread-safety** (`host/db.py`): `get_new_messages()` and `get_conversation_history()` now hold `_db_lock` for the duration of the query, consistent with all other DB read functions. Eliminates potential SQLITE_LOCKED errors and stale reads when dashboard/webportal/evolution daemon threads run concurrently (Issue #53)
+- **Task scheduler tight-retry loop** (`host/task_scheduler.py`): `run_task()` exception handler now calls `db.update_task()` to advance `next_run` after a failure, preventing the same task from re-firing on every scheduler poll cycle when an exception occurs before the normal update path (Issue #54)
+- **Empty env temp file race** (`host/container_runner.py`): `_get_empty_env_file()` now uses a `threading.Lock` with double-checked locking to prevent two concurrent callers from each creating a separate temp file during the first call, leaving one file orphaned (Issue #55)
+- **SSE log stream graceful shutdown** (`host/dashboard.py`): `_handle_sse_logs()` now checks a module-level `_dashboard_stopping` threading.Event instead of looping forever, exiting promptly when the host receives SIGTERM/SIGINT rather than waiting for the client to disconnect (Issue #56)
+- **Subagent result file size cap** (`host/ipc_watcher.py`): `_run_subagent()` now truncates result text to 1 MB before writing to the IPC results directory, preventing a runaway subagent from filling the host disk through unbounded result file writes (Issue #57)
+- **Scheduler empty chat_jid guard** (`host/task_scheduler.py`): `start_scheduler_loop()` now skips tasks with an empty `chat_jid` with a warning instead of enqueuing them with an empty key, which could corrupt the GroupQueue per-group serialization map (Issue #48)
+
 ## [1.10.16] - 2026-03-12
 
 ### Security

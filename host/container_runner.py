@@ -51,23 +51,33 @@ _DOCKER_CIRCUIT_THRESHOLD = 3  # open circuit after this many consecutive failur
 
 # ── Portable empty file for .env shadow mount ──────────────────────────────────
 _EMPTY_ENV_FILE: str | None = None
+_EMPTY_ENV_FILE_LOCK = _threading.Lock()  # guard lazy-init (Issue #55)
 
 
 def _get_empty_env_file() -> str | None:
     """Get path to an empty file for shadowing .env in containers.
-    Returns None if temp file creation fails (e.g., on some Windows Docker configs)."""
+
+    Returns None if temp file creation fails (e.g., on some Windows Docker configs).
+    A threading.Lock prevents two concurrent callers from each creating a separate
+    temp file during the first call, which would leave one orphaned (Issue #55).
+    """
     global _EMPTY_ENV_FILE
+    # Fast path: already initialised (no lock needed — str assignment is atomic on CPython)
     if _EMPTY_ENV_FILE is not None:
         return _EMPTY_ENV_FILE
-    try:
-        fd, path = tempfile.mkstemp(prefix="evoclaw_empty_env_", suffix=".env")
-        os.close(fd)
-        atexit.register(lambda p=path: os.unlink(p) if os.path.exists(p) else None)
-        _EMPTY_ENV_FILE = path
-        return path
-    except Exception as exc:
-        log.warning("Cannot create shadow .env temp file: %s", exc)
-        return None
+    with _EMPTY_ENV_FILE_LOCK:
+        # Double-checked locking: re-check inside the lock
+        if _EMPTY_ENV_FILE is not None:
+            return _EMPTY_ENV_FILE
+        try:
+            fd, path = tempfile.mkstemp(prefix="evoclaw_empty_env_", suffix=".env")
+            os.close(fd)
+            atexit.register(lambda p=path: os.unlink(p) if os.path.exists(p) else None)
+            _EMPTY_ENV_FILE = path
+            return path
+        except Exception as exc:
+            log.warning("Cannot create shadow .env temp file: %s", exc)
+            return None
 
 
 def _record_docker_success() -> None:

@@ -22,6 +22,11 @@ from pathlib import Path
 
 from . import config
 
+# Module-level shutdown flag set by start_dashboard() when stop_event is provided.
+# Checked by the SSE log stream loop so it exits promptly on graceful shutdown
+# instead of running until the client disconnects (Issue #56).
+_dashboard_stopping = threading.Event()
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SPA Shell HTML
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1581,7 +1586,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(404); self.end_headers()
 
     def _handle_sse_logs(self, level: str = "ALL"):
-        """Server-Sent Events endpoint for real-time log streaming."""
+        """Server-Sent Events endpoint for real-time log streaming.
+
+        Exits promptly when _dashboard_stopping is set (graceful shutdown),
+        instead of waiting for the client to disconnect (Issue #56).
+        """
         from . import log_buffer
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -1591,7 +1600,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
         last_idx = 0
         try:
-            while True:
+            while not _dashboard_stopping.is_set():
                 entries = log_buffer.get_logs(since_idx=last_idx, level=level, limit=50)
                 for entry in entries:
                     data = json.dumps(entry, default=str)
@@ -1599,7 +1608,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     last_idx = entry["idx"]
                 if entries:
                     self.wfile.flush()
-                time.sleep(0.5)
+                # Use threading.Event.wait() so we can wake up on shutdown signal
+                _dashboard_stopping.wait(timeout=0.5)
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass  # client disconnected
 
@@ -1623,7 +1633,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def start_dashboard(stop_event=None):
-    """Start the dashboard in a daemon background thread."""
+    """Start the dashboard in a daemon background thread.
+
+    If stop_event (asyncio.Event) is provided, a watcher thread sets
+    _dashboard_stopping when the event fires so the SSE log stream loop
+    exits promptly on graceful shutdown (Issue #56).
+    """
     import logging as _logging
     _log = _logging.getLogger(__name__)
     if not config.DASHBOARD_PASSWORD:
@@ -1642,4 +1657,33 @@ def start_dashboard(stop_event=None):
 
     t = threading.Thread(target=_run, name="evoclaw-dashboard", daemon=True)
     t.start()
+
+    if stop_event is not None:
+        # Watch the asyncio stop_event from a background thread and propagate
+        # the signal to _dashboard_stopping so SSE streams exit cleanly.
+        import asyncio as _asyncio
+
+        def _watch_stop():
+            loop = None
+            try:
+                loop = stop_event._loop  # type: ignore[attr-defined]
+            except AttributeError:
+                pass
+            if loop is None:
+                # Fallback: poll at coarse granularity
+                while not _dashboard_stopping.is_set():
+                    time.sleep(1)
+                return
+            # Block until stop_event is set in the asyncio loop
+            future = _asyncio.run_coroutine_threadsafe(stop_event.wait(), loop)
+            try:
+                future.result()  # blocks until stop_event.set() is called
+            except Exception:
+                pass
+            _dashboard_stopping.set()
+            server.shutdown()
+
+        watcher = threading.Thread(target=_watch_stop, name="evoclaw-dashboard-stop-watcher", daemon=True)
+        watcher.start()
+
     return t

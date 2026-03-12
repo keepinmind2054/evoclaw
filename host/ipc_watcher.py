@@ -537,6 +537,9 @@ def _find_parent_container(group_folder: str) -> str | None:
     return None
 
 
+_SUBAGENT_RESULT_MAX_BYTES = 1 * 1024 * 1024  # 1 MB cap on subagent result files (Issue #57)
+
+
 async def _run_subagent(
     request_id: str, prompt: str, context_mode: str, group_folder: str,
     parent_container: str | None = None,
@@ -545,6 +548,9 @@ async def _run_subagent(
     在獨立 Docker container 中執行子 agent，並將結果寫入 results 目錄。
     父 agent 透過輪詢此目錄來取得子 agent 的輸出。
     parent_container 用於 dashboard 顯示親子關係。
+
+    Result text is capped at _SUBAGENT_RESULT_MAX_BYTES to prevent a runaway
+    subagent from filling the host disk via the IPC results directory (Issue #57).
     """
     from .container_runner import run_container_agent
     result_dir = config.DATA_DIR / "ipc" / group_folder / "results"
@@ -564,6 +570,13 @@ async def _run_subagent(
                 parent_container=parent_container,
             )
             result_text = result.get("result") or result.get("error") or "(no output)"
+        # Enforce size cap before writing to disk (Issue #57)
+        if len(result_text.encode("utf-8", errors="replace")) > _SUBAGENT_RESULT_MAX_BYTES:
+            log.warning(
+                "Subagent %s result truncated: %d bytes > %d byte cap",
+                request_id, len(result_text), _SUBAGENT_RESULT_MAX_BYTES,
+            )
+            result_text = result_text[:_SUBAGENT_RESULT_MAX_BYTES] + "\n...[truncated]"
         output_file.write_text(
             json.dumps({"requestId": request_id, "output": result_text}),
             encoding="utf-8"
