@@ -65,9 +65,12 @@ log = logging.getLogger("evoclaw")
 # 目前已登記的群組清單，每個 dict 包含 jid、folder、is_main 等欄位
 _registered_groups: list[dict] = []
 
-# 訊息時間戳記游標：只處理比這個值更新的訊息，避免重複處理
-# 這個值會持久化到 SQLite，重啟後可從上次中斷的地方繼續
-_last_timestamp: int = 0
+# 訊息時間戳記游標：每個 JID 獨立記錄，只處理比此值更新的訊息。
+# 使用 per-JID 游標而非全域游標，防止群組 A 的成功執行推進游標
+# 超過群組 B 尚未處理的訊息時間戳記，導致群組 B 的訊息被靜默丟棄。
+# 舊版單一全域游標 lastTimestamp 仍用作啟動時的初始值（向後相容）。
+_last_timestamp: int = 0           # global fallback / legacy cursor (read-only after init)
+_per_jid_cursors: dict[str, int] = {}  # per-JID cursors (authoritative)
 
 # 全域開關：設為 False 時，所有背景 loop 都會停止
 _running = True
@@ -134,12 +137,26 @@ def _is_duplicate_message(jid: str, sender: str, content: str) -> bool:
 
 
 def _load_state() -> None:
-    """從 SQLite 的 router_state 表讀取上次儲存的時間戳記游標，
-    確保重啟後不會重複處理舊訊息。"""
-    global _last_timestamp
+    """從 SQLite 的 router_state 表讀取上次儲存的游標狀態。
+
+    Per-JID cursors (cursorJID:<jid>) take precedence over the legacy global
+    lastTimestamp.  On first run after upgrade, all JIDs inherit the global
+    value so no messages are reprocessed.
+    """
+    global _last_timestamp, _per_jid_cursors
     val = db.get_state("lastTimestamp")
     if val:
         _last_timestamp = int(val)
+    # Load per-JID cursors persisted by previous runs
+    groups = db.get_all_registered_groups()
+    for g in groups:
+        jid = g["jid"]
+        cursor_val = db.get_state(f"cursorJID:{jid}")
+        if cursor_val:
+            _per_jid_cursors[jid] = int(cursor_val)
+        else:
+            # First run for this JID: inherit global cursor so we don't replay history
+            _per_jid_cursors[jid] = _last_timestamp
 
 def _cleanup_orphan_tasks() -> None:
     """啟動時清理孤兒任務：
@@ -362,12 +379,16 @@ async def _message_loop() -> None:
     主要輪詢迴圈：每隔 POLL_INTERVAL 秒從 SQLite 撈取新訊息，
     並交給 GroupQueue 排程執行。
 
-    游標（_last_timestamp）的推進採用「先執行、後確認」策略：
+    游標（per-JID cursor）的推進採用「先執行、後確認」策略：
     訊息批次先交給 container 處理，只有在 on_success callback 被呼叫時
     才更新游標。這樣即使 container 意外終止，下次重啟仍能重新處理
     同一批訊息，不會漏掉任何對話。
+
+    Per-JID cursors (Issue #52): each group advances its own cursor
+    independently, so a successful run for group A can never push the
+    shared timestamp past group B's pending messages.
     """
-    global _last_timestamp, _registered_groups
+    global _registered_groups, _per_jid_cursors
     log.info("Message loop started")
     while _running:
         try:
@@ -378,28 +399,22 @@ async def _message_loop() -> None:
                 try:
                     refresh_flag.unlink(missing_ok=True)
                     _registered_groups = db.get_all_registered_groups()
+                    # Initialise cursors for any newly added groups
+                    for g in _registered_groups:
+                        if g["jid"] not in _per_jid_cursors:
+                            _per_jid_cursors[g["jid"]] = _last_timestamp
                     log.info(f"Groups reloaded: {len(_registered_groups)} group(s)")
                 except Exception as e:
                     log.error(f"Failed to reload groups: {e}")
 
-            jids = [g["jid"] for g in _registered_groups]
-            if jids:
-                # Check if any new messages exist (single source of truth for cursor
-                # is in _process_messages_for_jid — no duplicate computation here)
-                messages = db.get_new_messages(jids, _last_timestamp)
-                if messages:
-                    # Collect unique JIDs that have new messages, then trigger
-                    # GroupQueue for each. Cursor advancement is handled exclusively
-                    # in _process_messages_for_jid via the on_success callback.
-                    active_jids: set[str] = set()
-                    for m in messages:
-                        if "chat_jid" in m:
-                            active_jids.add(m["chat_jid"])
-                    for jid in active_jids:
-                        group = _get_group_by_jid(jid)
-                        if group:
-                            # GroupQueue ensures only one container runs per group
-                            _group_queue.enqueue_message_check(jid)
+            for group in _registered_groups:
+                jid = group["jid"]
+                cursor = _per_jid_cursors.get(jid, _last_timestamp)
+                # Per-JID query: only check this group's own cursor
+                msgs = db.get_new_messages([jid], cursor)
+                if msgs:
+                    # GroupQueue ensures only one container runs per group
+                    _group_queue.enqueue_message_check(jid)
         except Exception as e:
             log.error(f"Message loop error: {e}")
         try:
@@ -505,19 +520,26 @@ async def main() -> None:
         """
         GroupQueue 的 callback：當輪到某個群組執行時被呼叫。
         從 DB 取得該群組的待處理訊息，執行 container，
-        成功後推進游標。回傳 True 代表成功（GroupQueue 會重置 retry 計數）。
+        成功後推進此群組的 per-JID 游標（Issue #52）。
+        回傳 True 代表成功（GroupQueue 會重置 retry 計數）。
         """
         group = _get_group_by_jid(jid)
         if not group:
             return True
-        msgs = db.get_new_messages([jid], _last_timestamp)
+        cursor = _per_jid_cursors.get(jid, _last_timestamp)
+        msgs = db.get_new_messages([jid], cursor)
         if not msgs:
             return True
         ts = max(m["timestamp"] for m in msgs)
-        async def advance(ts=ts):
+        async def advance(ts=ts, jid=jid):
+            # Advance only this group's cursor — does not affect other groups
+            _per_jid_cursors[jid] = max(_per_jid_cursors.get(jid, 0), ts)
+            db.set_state(f"cursorJID:{jid}", str(_per_jid_cursors[jid]))
+            # Also keep legacy global cursor up-to-date for rollback/debug use
             global _last_timestamp
-            _last_timestamp = max(_last_timestamp, ts)
-            db.set_state("lastTimestamp", str(_last_timestamp))
+            if ts > _last_timestamp:
+                _last_timestamp = ts
+                db.set_state("lastTimestamp", str(_last_timestamp))
         await _process_group_messages(group, msgs, on_success=advance)
         return True
 

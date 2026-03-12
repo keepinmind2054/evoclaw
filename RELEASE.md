@@ -152,7 +152,38 @@ After release, verify:
 
 ---
 
-**Last Updated:** 2026-03-12 (v1.10.16)
+**Last Updated:** 2026-03-12 (v1.10.17)
+
+---
+
+## v1.10.17 Release Notes
+
+### Sixth Round PUA-Spirit Exhaustive Analysis Fixes
+
+**Problems Fixed**:
+
+1. *Global timestamp cursor causes silent message loss across groups* (Issue #52): `_last_timestamp` was a single global cursor shared across all registered groups. When group A's messages were successfully processed, the cursor advanced to cover their timestamps. If group B had messages at the same or earlier timestamp range, they would be skipped on the next poll because the global cursor had moved past them. Fixed by introducing `_per_jid_cursors: dict[str, int]` — each group maintains its own cursor and advances it independently. The legacy `lastTimestamp` key in `router_state` is preserved for backward compatibility and read-only reference; per-JID cursors are persisted as `cursorJID:<jid>` keys.
+
+2. *`get_new_messages` and `get_conversation_history` missing `_db_lock`* (Issue #53): These two read functions were the only DB accessors not holding `_db_lock`. Dashboard, webportal, and evolution daemon threads can run concurrently with the asyncio event loop. Without the lock, concurrent access to the shared SQLite connection could cause `SQLITE_LOCKED` or stale reads. Both functions now acquire `_db_lock` for the full query, consistent with all other DB functions.
+
+3. *Task scheduler tight-retry loop on exception* (Issue #54): When `run_task()` raised an exception before reaching the normal `db.update_task()` call (which advances `next_run`), `next_run` remained at its original value in the past. On the next scheduler poll (60 seconds later), the same task appeared due again and was immediately re-enqueued, creating a continuous tight retry loop. The `except` block now calls `db.update_task(task_id, next_run=backoff_next)` with a computed backoff `next_run`, ensuring the task only retries at its normal schedule interval.
+
+4. *`_get_empty_env_file()` race condition on first call* (Issue #55): The function used a global `_EMPTY_ENV_FILE` with a simple `if not None` check and no lock. Two concurrent callers (from different container launches at startup) could both find `_EMPTY_ENV_FILE is None`, each call `tempfile.mkstemp()`, and only one path would be stored — leaving the other temp file orphaned until process exit. Fixed with `_EMPTY_ENV_FILE_LOCK = threading.Lock()` and double-checked locking inside the critical section.
+
+5. *SSE log stream does not exit on graceful shutdown* (Issue #56): `_handle_sse_logs()` ran `while True` with `time.sleep(0.5)`, only exiting when the HTTP client disconnected. When the host received SIGTERM/SIGINT, active SSE connections kept the dashboard thread pool threads alive indefinitely. Added `_dashboard_stopping = threading.Event()` set by `start_dashboard()` when `stop_event` fires (via a background watcher thread). The SSE loop now checks `_dashboard_stopping.is_set()` on each iteration and uses `_dashboard_stopping.wait(timeout=0.5)` instead of `time.sleep(0.5)`.
+
+6. *Subagent result file has no size cap* (Issue #57): `_run_subagent()` wrote the full container agent output (up to 2 MB after the container_runner cap) into a JSON result file with no additional limit. The results directory is never automatically pruned, so many large result files could accumulate and fill the host disk. Result text is now truncated to 1 MB (`_SUBAGENT_RESULT_MAX_BYTES`) with a warning log before writing.
+
+7. *Scheduler skips tasks with empty `chat_jid`* (Issue #48 partial): `start_scheduler_loop()` now checks that `chat_jid` is non-empty before calling `group_queue.enqueue_task()`. Previously, an empty JID would be used as the GroupQueue key, inserting a `""` entry into the `_groups` dict and corrupting the per-group serialization map. Tasks with empty `chat_jid` are now skipped with a warning log entry.
+
+**Upgrade**:
+
+No `docker build` needed — all changes are in the host process. Restart EvoClaw to apply.
+
+```bash
+git pull
+python run.py start
+```
 
 ---
 

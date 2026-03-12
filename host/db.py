@@ -255,33 +255,39 @@ def get_new_messages(jids: list[str], last_timestamp: int) -> list[dict]:
     - 過濾 is_from_me=0 和 is_bot_message=0，只處理用戶發送的真實訊息
 
     使用 IN (?) 而非逐一查詢，減少資料庫 round-trip 次數。
+    _db_lock ensures thread-safety when called concurrently from the message
+    loop and background threads (dashboard, webportal, evolution daemon).
     """
     if not jids:
         return []
-    db = get_db()
-    placeholders = ",".join("?" * len(jids))
-    rows = db.execute(f"""
-        SELECT * FROM messages
-        WHERE chat_jid IN ({placeholders}) AND timestamp > ? AND is_from_me = 0 AND is_bot_message = 0
-        ORDER BY timestamp ASC
-    """, (*jids, last_timestamp)).fetchall()
-    return [dict(r) for r in rows]
+    with _db_lock:
+        db = get_db()
+        placeholders = ",".join("?" * len(jids))
+        rows = db.execute(f"""
+            SELECT * FROM messages
+            WHERE chat_jid IN ({placeholders}) AND timestamp > ? AND is_from_me = 0 AND is_bot_message = 0
+            ORDER BY timestamp ASC
+        """, (*jids, last_timestamp)).fetchall()
+        return [dict(r) for r in rows]
 
 
 def get_conversation_history(jid: str, limit: int = 20) -> list[dict]:
     """
     取得指定群組最近 N 條訊息（含用戶和 bot 的回覆），作為對話歷史上下文。
     讓 agent 在每次啟動時都能看到先前的對話脈絡，實現多輪記憶。
+    _db_lock ensures thread-safety when called concurrently from the message
+    loop and background threads (dashboard, webportal, evolution daemon).
     """
-    db = get_db()
-    rows = db.execute("""
-        SELECT chat_jid, sender, sender_name, content, timestamp, is_bot_message
-        FROM messages
-        WHERE chat_jid = ?
-        ORDER BY timestamp DESC
-        LIMIT ?
-    """, (jid, limit)).fetchall()
-    return [dict(r) for r in reversed(rows)]
+    with _db_lock:
+        db = get_db()
+        rows = db.execute("""
+            SELECT chat_jid, sender, sender_name, content, timestamp, is_bot_message
+            FROM messages
+            WHERE chat_jid = ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """, (jid, limit)).fetchall()
+        return [dict(r) for r in reversed(rows)]
 
 def get_messages_since(chat_jid: str, timestamp: int, limit: int = 50) -> list[dict]:
     """取得某個聊天室從指定時間點起的訊息（含所有類型），用於提供對話歷史給 agent。"""
