@@ -221,7 +221,7 @@ class _WebPortalHandler(http.server.BaseHTTPRequestHandler):
             # Track reply association; evict stale entries to avoid unbounded growth
             with _sessions_lock:
                 _cleanup_pending_replies()
-            _pending_replies[msg_id] = session_id
+                _pending_replies[msg_id] = session_id
             self._send_json({"ok": True, "msg_id": msg_id})
         except ValueError:
             pass  # _read_body already sent 413

@@ -484,8 +484,10 @@ def _write_one_file(
     """Write a single file, enforcing that it stays within base directory."""
     try:
         target = (base / rel_path).resolve()
-        if not str(target).startswith(str(base)):
-            errors.append(f"BLOCKED path traversal: {rel_path}")
+        try:
+            target.relative_to(base)
+        except ValueError:
+            errors.append(f"BLOCKED path traversal: {rel_path!r}")
             return
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
