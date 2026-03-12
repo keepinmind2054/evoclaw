@@ -5,6 +5,19 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.22] - 2026-03-12
+
+### Fixed
+- **#66** WhatsApp `send_typing` now sends read receipt with correct `wamid` (per-message WhatsApp ID) instead of `chat_id`; skips gracefully when no prior message received
+- **#68** `send_file` IPC handler supports `deleteAfterSend` flag; `research-ppt` skill instructs agent to clean up temp `.pptx`/`.txt` files post-delivery
+- **#5** Formally closed: per-JID timestamp cursors (implemented in v1.10.17) fully resolve group-isolation violation
+
+### Added
+- **#6** Multi-key rotation for all LLM providers: `GOOGLE_API_KEY`, `CLAUDE_API_KEY`, `OPENAI_API_KEY`, `NIM_API_KEY` accept comma-separated values; container agent auto-rotates to next key on 429/quota error with `🔑 KEY ROTATE` log
+
+### Chore
+- Version bump 1.10.19 → 1.10.22
+
 ## [1.10.21] - 2026-03-12
 
 ### Added
@@ -337,6 +350,7 @@ register_dynamic_tool(
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 1.10.22 | 2026-03-12 | WhatsApp send_typing wamid fix, send_file deleteAfterSend, multi-key rotation (#6), close #5 |
 | 1.10.1 | 2026-03-11 | Fixed Telegram binary file sending bug |
 | 1.10.0 | 2026-03-10 | Full evolution engine, DevEngine, Health Monitor |
 | 1.9.0 | 2026-02-15 | Enhanced immune system, adaptive evolution |

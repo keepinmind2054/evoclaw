@@ -19,6 +19,7 @@ import html.parser
 import traceback
 import datetime as _dt
 import uuid
+import threading
 from pathlib import Path
 
 import logging as _logging
@@ -74,16 +75,51 @@ def _log(tag: str, msg: str = "") -> None:
     print(f"[{ts}] {tag} {msg}", file=sys.stderr, flush=True)
 
 
-def _llm_call_with_retry(fn, max_attempts: int = 3, base_delay: float = 1.0):
+class _KeyPool:
+    """Round-robin key rotation pool with per-key failure tracking."""
+
+    def __init__(self, keys_csv: str):
+        self._keys = [k.strip() for k in (keys_csv or "").split(",") if k.strip()]
+        self._idx = 0
+        self._lock = threading.Lock()
+
+    def __bool__(self):
+        return bool(self._keys)
+
+    def current(self) -> str:
+        if not self._keys:
+            return ""
+        with self._lock:
+            return self._keys[self._idx % len(self._keys)]
+
+    def rotate(self) -> str:
+        """Advance to the next key and return it."""
+        if not self._keys:
+            return ""
+        with self._lock:
+            self._idx = (self._idx + 1) % len(self._keys)
+            return self._keys[self._idx]
+
+    def __len__(self):
+        return len(self._keys)
+
+
+def _llm_call_with_retry(fn, max_attempts: int = 3, base_delay: float = 1.0, pool: "_KeyPool | None" = None, apply_key_fn=None):
     """Call an LLM API function with exponential backoff retry on transient errors.
 
     Retries on HTTP 429 (rate limit), 500, 502, 503, 529 (server errors).
     Permanent errors (400 bad request, 401 unauthorized) are not retried.
 
+    When a pool and apply_key_fn are provided, rotates to the next key in the
+    pool on 429/ResourceExhausted errors before retrying.
+
     Args:
         fn: Zero-argument callable that performs the LLM API call.
         max_attempts: Maximum number of total attempts (default 3).
         base_delay: Initial delay in seconds; doubles on each retry.
+        pool: Optional _KeyPool for automatic key rotation on rate limit errors.
+        apply_key_fn: Optional callable(key: str) -> None that updates the
+            active API key when a rotation occurs (e.g. re-initialise the client).
 
     Returns:
         The API response from fn().
@@ -92,6 +128,7 @@ def _llm_call_with_retry(fn, max_attempts: int = 3, base_delay: float = 1.0):
         The last exception if all attempts are exhausted.
     """
     _RETRYABLE_STATUS = {429, 500, 502, 503, 529}
+    _RATE_LIMIT_KW = ("rate limit", "resource exhausted", "too many requests", "quota")
     last_exc = None
     for attempt in range(max_attempts):
         try:
@@ -100,14 +137,20 @@ def _llm_call_with_retry(fn, max_attempts: int = 3, base_delay: float = 1.0):
             last_exc = exc
             exc_str = str(exc)
             # Determine if this is a retryable error by inspecting the exception text
-            is_retryable = any(str(code) in exc_str for code in _RETRYABLE_STATUS)
-            is_retryable = is_retryable or any(
+            is_rate_limit = any(str(code) in exc_str for code in {429}) or any(
+                kw in exc_str.lower() for kw in _RATE_LIMIT_KW
+            )
+            is_retryable = is_rate_limit or any(str(code) in exc_str for code in _RETRYABLE_STATUS) or any(
                 kw in exc_str.lower()
-                for kw in ("rate limit", "overloaded", "resource exhausted", "too many requests",
-                           "service unavailable", "bad gateway", "timeout")
+                for kw in ("overloaded", "service unavailable", "bad gateway", "timeout")
             )
             if not is_retryable or attempt == max_attempts - 1:
                 raise
+            # On rate-limit errors, rotate to the next API key before sleeping
+            if is_rate_limit and pool and apply_key_fn and len(pool) > 1:
+                new_key = pool.rotate()
+                apply_key_fn(new_key)
+                _log("🔑 KEY ROTATE", f"switched to key index {pool._idx} (pool size={len(pool)})")
             delay = base_delay * (2 ** attempt)
             _log("⚠️ LLM retry", f"attempt={attempt + 1}/{max_attempts} delay={delay:.1f}s err={exc_str[:80]}")
             time.sleep(delay)
@@ -811,10 +854,12 @@ CLAUDE_TOOL_DECLARATIONS = [
 ]
 
 
-def run_agent_claude(client, model: str, system_instruction: str, user_message: str, chat_jid: str, conversation_history: list = None) -> str:
+def run_agent_claude(client_holder, model: str, system_instruction: str, user_message: str, chat_jid: str, conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None) -> str:
     """
     Anthropic Claude agentic loop.
+    client_holder: a one-element list [client] so key rotation can swap the client mid-loop.
     conversation_history: 最近的對話記錄，以原生 multi-turn 格式注入。
+    pool/apply_key_fn: optional key pool for automatic rotation on rate-limit errors.
     """
     messages = []
     # 注入對話歷史（原生 multi-turn 格式）
@@ -831,13 +876,13 @@ def run_agent_claude(client, model: str, system_instruction: str, user_message: 
     for n in range(MAX_ITER):
         _log("🧠 LLM →", f"turn={n} provider=claude")
         _claude_msgs = messages  # capture current snapshot for lambda
-        response = _llm_call_with_retry(lambda: client.messages.create(
+        response = _llm_call_with_retry(lambda: client_holder[0].messages.create(
             model=model,
             max_tokens=4096,
             system=system_instruction,
             tools=CLAUDE_TOOL_DECLARATIONS,
             messages=_claude_msgs,
-        ))
+        ), pool=pool, apply_key_fn=apply_key_fn)
         _log("🧠 LLM ←", f"stop={response.stop_reason}")
 
         # Add assistant response to history
@@ -931,11 +976,13 @@ def _execute_tool_inner(name: str, args: dict, chat_jid: str) -> str:
 
 # ── Agentic loop ──────────────────────────────────────────────────────────────
 
-def run_agent_openai(client, system_instruction: str, user_message: str, chat_jid: str, model: str, conversation_history: list = None) -> str:
+def run_agent_openai(client_holder, system_instruction: str, user_message: str, chat_jid: str, model: str, conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None) -> str:
     """
     OpenAI-compatible agentic loop (NVIDIA NIM / OpenAI / Groq / etc.)
     Works the same as run_agent but uses OpenAI chat completions API.
+    client_holder: a one-element list [client] so key rotation can swap the client mid-loop.
     conversation_history: 原生 multi-turn 格式的對話歷史。
+    pool/apply_key_fn: optional key pool for automatic rotation on rate-limit errors.
     """
     import json as _json
     history = [{"role": "system", "content": system_instruction}]
@@ -953,14 +1000,14 @@ def run_agent_openai(client, system_instruction: str, user_message: str, chat_ji
     for n in range(MAX_ITER):
         _log("🧠 LLM →", f"turn={n} provider=openai-compat")
         _oai_history = history  # capture current snapshot for lambda
-        response = _llm_call_with_retry(lambda: client.chat.completions.create(
+        response = _llm_call_with_retry(lambda: client_holder[0].chat.completions.create(
             model=model,
             messages=_oai_history,
             tools=OPENAI_TOOL_DECLARATIONS,
             tool_choice="auto",
             temperature=0.7,
             max_tokens=4096,
-        ))
+        ), pool=pool, apply_key_fn=apply_key_fn)
         msg = response.choices[0].message
         stop_reason = response.choices[0].finish_reason
         _log("🧠 LLM ←", f"stop={stop_reason}")
@@ -995,7 +1042,7 @@ def run_agent_openai(client, system_instruction: str, user_message: str, chat_ji
 
 
 
-def run_agent(client: genai.Client, system_instruction: str, user_message: str, chat_jid: str, assistant_name: str = "Eve", conversation_history: list = None) -> str:
+def run_agent(client_holder, system_instruction: str, user_message: str, chat_jid: str, assistant_name: str = "Eve", conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None) -> str:
     """
     Gemini function-calling 代理迴圈（agentic loop）。
 
@@ -1038,7 +1085,7 @@ def run_agent(client: genai.Client, system_instruction: str, user_message: str, 
     for n in range(MAX_ITER):
         _log("🧠 LLM →", f"turn={n} provider=gemini")
         _gemini_model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
-        response = _llm_call_with_retry(lambda: client.models.generate_content(
+        response = _llm_call_with_retry(lambda: client_holder[0].models.generate_content(
             model=_gemini_model,
             contents=history,
             config=types.GenerateContentConfig(
@@ -1046,7 +1093,7 @@ def run_agent(client: genai.Client, system_instruction: str, user_message: str, 
                 tools=[types.Tool(function_declarations=TOOL_DECLARATIONS)],
                 temperature=0.7,  # 適中的隨機性，讓回覆自然但不失準確
             ),
-        ))
+        ), pool=pool, apply_key_fn=apply_key_fn)
 
         candidate = response.candidates[0] if response.candidates else None
         stop_reason = str(candidate.finish_reason) if candidate else "none"
@@ -1160,11 +1207,17 @@ def main():
     _load_dynamic_tools()
 
     # ── Backend selection: NIM / OpenAI-compatible takes priority ────────────────
-    nim_api_key = os.environ.get("NIM_API_KEY", "")
-    openai_api_key = os.environ.get("OPENAI_API_KEY", "")
-    google_api_key = os.environ.get("GOOGLE_API_KEY", "")
+    # Build key pools from potentially comma-separated values to support rotation
+    nim_pool = _KeyPool(os.environ.get("NIM_API_KEY", ""))
+    openai_pool = _KeyPool(os.environ.get("OPENAI_API_KEY", ""))
+    google_pool = _KeyPool(os.environ.get("GOOGLE_API_KEY", ""))
+    claude_pool = _KeyPool(os.environ.get("CLAUDE_API_KEY", ""))
 
-    claude_api_key = os.environ.get("CLAUDE_API_KEY", "")
+    nim_api_key = nim_pool.current()
+    openai_api_key = openai_pool.current()
+    google_api_key = google_pool.current()
+    claude_api_key = claude_pool.current()
+
     claude_model = os.environ.get("CLAUDE_MODEL", "claude-3-5-haiku-latest")
     use_openai_compat = bool(nim_api_key or openai_api_key)
     use_claude = bool(claude_api_key and not use_openai_compat)
@@ -1188,11 +1241,33 @@ def main():
         return
 
     if use_openai_compat:
+        _active_pool = nim_pool if nim_api_key else openai_pool
         _api_key = nim_api_key or openai_api_key
         _base_url = os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1") if nim_api_key else os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-        openai_client = OpenAIClient(base_url=_base_url, api_key=_api_key)
+        # Use a holder list so the lambda in run_agent_openai always dereferences
+        # the latest client after a key rotation swap.
+        _openai_client_holder: list = [OpenAIClient(base_url=_base_url, api_key=_api_key)]
+
+        def _apply_openai_key(new_key: str) -> None:
+            """Swap the OpenAI-compat client to use the rotated key."""
+            _openai_client_holder[0] = OpenAIClient(base_url=_base_url, api_key=new_key)
     elif not use_claude:
-        client = genai.Client(api_key=google_api_key)
+        # Use a holder list so the lambda in run_agent always dereferences
+        # the latest Gemini client after a key rotation swap.
+        _gemini_client_holder: list = [genai.Client(api_key=google_api_key)]
+
+        def _apply_google_key(new_key: str) -> None:
+            """Swap the Gemini client to use the rotated key."""
+            _gemini_client_holder[0] = genai.Client(api_key=new_key)
+
+    if use_claude:
+        # Track the active Claude client for key rotation
+        _claude_client_holder: list = [anthropic.Anthropic(api_key=claude_api_key)]
+
+        def _apply_claude_key(new_key: str) -> None:
+            _claude_client_holder[0] = anthropic.Anthropic(api_key=new_key)
+
+    _log("🔑 KEY POOL", f"google={len(google_pool)} claude={len(claude_pool)} openai={len(openai_pool)} nim={len(nim_pool)}")
 
     # 建立系統提示詞：基本角色設定 + 環境資訊 + 群組自訂指令（CLAUDE.md）
     lines = [
@@ -1247,15 +1322,14 @@ def main():
         if use_openai_compat:
             _model = os.environ.get("NIM_MODEL") or os.environ.get("OPENAI_MODEL") or os.environ.get("GEMINI_MODEL") or "meta/llama-3.3-70b-instruct"
             _log("🤖 MODEL", f"openai-compat/{_model}")
-            result = run_agent_openai(openai_client, system_instruction, prompt, chat_jid, _model, conversation_history)
+            result = run_agent_openai(_openai_client_holder, system_instruction, prompt, chat_jid, _model, conversation_history, pool=_active_pool, apply_key_fn=_apply_openai_key)
         elif use_claude:
             _log("🤖 MODEL", f"claude/{claude_model}")
-            claude_client = anthropic.Anthropic(api_key=claude_api_key)
-            result = run_agent_claude(claude_client, claude_model, system_instruction, prompt, chat_jid, conversation_history)
+            result = run_agent_claude(_claude_client_holder, claude_model, system_instruction, prompt, chat_jid, conversation_history, pool=claude_pool, apply_key_fn=_apply_claude_key)
         else:
             _gemini_model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
             _log("🤖 MODEL", f"gemini/{_gemini_model}")
-            result = run_agent(client, system_instruction, prompt, chat_jid, assistant_name, conversation_history)
+            result = run_agent(_gemini_client_holder, system_instruction, prompt, chat_jid, assistant_name, conversation_history, pool=google_pool, apply_key_fn=_apply_google_key)
         # 若 agent 已透過 mcp__evoclaw__send_message 工具主動發送訊息，
         # 則清空 result 欄位，避免 host 的 container_runner 再次發送（雙重訊息 + 超長訊息 bug）
         # 若 agent 沒有呼叫工具（純文字回覆），則由 host 負責發送 result

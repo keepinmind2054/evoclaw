@@ -23,6 +23,7 @@ class WhatsAppChannel:
         self._on_chat_metadata = on_chat_metadata
         self._registered_groups = registered_groups
         self._connected = False
+        self._last_wamid: dict[str, str] = {}  # jid → most recent received wamid
         self._runner: Optional[web.AppRunner] = None
         self._session: Optional[aiohttp.ClientSession] = None
 
@@ -124,6 +125,9 @@ class WhatsAppChannel:
                         sender_name = profile.get("name", "")
 
                     jid = self._jid(phone_number_id, chat_id)
+                    wamid = msg.get("id", "")
+                    if wamid:
+                        self._last_wamid[jid] = wamid
 
                     groups = {g["jid"]: g for g in self._registered_groups}
                     group = groups.get(jid)
@@ -198,19 +202,22 @@ class WhatsAppChannel:
             log.error("WhatsApp send_message exception: %s", exc)
 
     async def send_typing(self, jid: str) -> None:
-        """Send a read receipt, which is the closest equivalent to a typing indicator in WhatsApp Cloud API."""
+        """Send a read receipt using the most recently received message's wamid."""
         if not self._session:
+            return
+        wamid = self._last_wamid.get(jid, "")
+        if not wamid:
+            # Cannot send read receipt without a valid wamid — skip silently.
             return
         parts = jid.split(":")
         if len(parts) < 3:
             return
         phone_number_id = parts[1]
-        chat_id = parts[2]
         url = f"https://graph.facebook.com/v19.0/{phone_number_id}/messages"
         payload = {
             "messaging_product": "whatsapp",
             "status": "read",
-            "message_id": chat_id,
+            "message_id": wamid,
         }
         try:
             async with self._session.post(url, json=payload) as resp:

@@ -152,7 +152,34 @@ After release, verify:
 
 ---
 
-**Last Updated:** 2026-03-12 (v1.10.21)
+**Last Updated:** 2026-03-12 (v1.10.22)
+
+---
+
+## v1.10.22 Release Notes
+
+### WhatsApp Fix, send_file Cleanup Flag, and Multi-Key LLM Rotation
+
+**Problems Fixed / Capabilities Added**:
+
+1. *WhatsApp `send_typing` used wrong message ID* (#66): `send_typing` was passing `chat_id` as the `wamid` parameter in the read-receipt payload. WhatsApp Cloud API requires a per-message `wamid` (e.g. `wamid.xxx...`). Added `_last_wamid: dict[str, str]` to store the latest received message ID per JID; `send_typing` now reads from this dict and skips gracefully when no prior message has been received for that JID.
+
+2. *Temp files left on disk after `send_file`* (#68): The `send_file` IPC handler had no mechanism to clean up temporary files after delivery. Added `deleteAfterSend: true` flag to the IPC payload — when set, the host deletes the file after successful channel delivery. The `research-ppt` skill system prompt updated to instruct the agent to include this flag when sending `.pptx` / `.txt` output files.
+
+3. *Single LLM key causes 429 failures under load* (#6): All four LLM provider key variables (`GOOGLE_API_KEY`, `CLAUDE_API_KEY`, `OPENAI_API_KEY`, `NIM_API_KEY`) now accept comma-separated key lists (e.g. `GOOGLE_API_KEY=key1,key2,key3`). The container agent round-robins to the next key on 429 or quota-exceeded errors and logs `🔑 KEY ROTATE` so operators can observe rotation in the dashboard log stream.
+
+4. *Per-JID timestamp cursors formally closed* (#5): Issue #5 (group-isolation violation via shared timestamp cursor) was resolved in v1.10.17 with the introduction of `_per_jid_cursors`. This release formally closes the issue with no additional code changes.
+
+**Upgrade**:
+
+No `docker build` needed for the WhatsApp and `send_file` fixes — all changes are in the host process. The multi-key rotation change is in `container/agent-runner/agent.py` and requires a container rebuild.
+
+```bash
+git pull
+docker build -t evoclaw-agent:1.10.22 container/
+docker tag evoclaw-agent:1.10.22 evoclaw-agent:latest
+python run.py start
+```
 
 ---
 

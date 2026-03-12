@@ -325,7 +325,7 @@ def research_ppt(
                 "slides": len(slides_data),
                 "message": (
                     f"Successfully created {len(slides_data)}-slide PPTX at {final_path}. "
-                    "Use send_file to deliver it to the user."
+                    "Use send_file to deliver it to the user. Set deleteAfterSend=true to clean up the temp file after delivery."
                 ),
             }
         except Exception as pptx_exc:  # noqa: BLE001
@@ -343,7 +343,7 @@ def research_ppt(
         "message": (
             f"Fell back to plain-text format ({reason}). "
             f"Created {len(slides_data)}-slide text report at {txt_path}. "
-            "Use send_file to deliver it to the user."
+            "Use send_file to deliver it to the user. Set deleteAfterSend=true to clean up the temp file after delivery."
         ),
     }
 

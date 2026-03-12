@@ -34,7 +34,7 @@ def _warn_if_latest_image() -> None:
         log.warning(
             "CONTAINER_IMAGE is using an unpinned tag (%r). "
             "A 'docker pull' or rebuild can silently change agent behavior. "
-            "Consider pinning to a specific version tag, e.g. evoclaw-agent:1.10.12",
+            "Consider pinning to a specific version tag, e.g. evoclaw-agent:1.10.22",
             img,
         )
 

@@ -339,7 +339,19 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
 
         if host_path and os.path.exists(host_path):
             log.info("send_file IPC: file exists, routing to channel")
-            _asyncio.ensure_future(route_file(_sf_jid, host_path, caption))
+            delete_after = payload.get("deleteAfterSend", False)
+
+            async def _send_and_cleanup():
+                await route_file(_sf_jid, host_path, caption)
+                if delete_after:
+                    try:
+                        os.unlink(host_path)
+                        log.info("send_file IPC: deleted temp file after send: %r", host_path)
+                    except OSError as e:
+                        log.warning("send_file IPC: failed to delete temp file %r: %s", host_path, e)
+
+            t = _asyncio.ensure_future(_send_and_cleanup())
+            t.add_done_callback(_ipc_task_done_callback)
         else:
             log.warning("send_file IPC: file NOT found at host_path=%r (container: %r)",
                         host_path, container_path)
