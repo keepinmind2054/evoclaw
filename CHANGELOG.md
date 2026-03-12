@@ -5,6 +5,23 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] — 2026-03-12
+
+### Added
+- Three-tier memory system inspired by OpenClaw/MemSearch architecture
+  - Hot Memory: per-group MEMORY.md (8KB), loaded every container invocation
+  - Warm Memory: daily log auto-appended after each conversation, 3h micro sync
+  - Cold Memory: SQLite FTS5 hybrid search (keyword + recency scoring)
+  - Weekly Compound: prune >30-day logs, distill patterns to hot memory
+- Container receives hot memory in system context (`[MEMORY]...[/MEMORY]`)
+- Container can update hot memory via `memory_patch` in response JSON
+- IPC command `memory_search` for in-conversation cold memory queries
+- New DB tables: `group_hot_memory`, `group_warm_logs`, `group_warm_logs_fts`, `group_cold_memory`, `group_cold_memory_fts`, `group_memory_sync`
+- New module: `host/memory/` with `hot.py`, `warm.py`, `search.py`, `compound.py`
+
+### Chore
+- Version bump 1.10.28 → 1.11.0
+
 ## [1.10.28] - 2026-03-12
 
 ### Fixed

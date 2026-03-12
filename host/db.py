@@ -225,6 +225,60 @@ CREATE TABLE IF NOT EXISTS dev_events (
 );
 CREATE INDEX IF NOT EXISTS idx_dev_jid ON dev_events(jid);
 CREATE INDEX IF NOT EXISTS idx_dev_stage ON dev_events(stage);
+
+-- ── 三層記憶系統資料表 ──────────────────────────────────────────────────────
+
+-- Hot memory: per-group persistent core memory (8KB limit)
+CREATE TABLE IF NOT EXISTS group_hot_memory (
+    jid TEXT PRIMARY KEY,
+    content TEXT NOT NULL DEFAULT '',
+    updated_at REAL NOT NULL DEFAULT 0
+);
+
+-- Warm memory: daily log entries
+CREATE TABLE IF NOT EXISTS group_warm_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    jid TEXT NOT NULL,
+    log_date TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_warm_logs_jid_date ON group_warm_logs(jid, log_date);
+
+-- Warm memory FTS5 for hybrid search
+CREATE VIRTUAL TABLE IF NOT EXISTS group_warm_logs_fts USING fts5(
+    jid UNINDEXED,
+    log_date,
+    content,
+    content='group_warm_logs',
+    content_rowid='id'
+);
+
+-- Cold memory: longer-form archives
+CREATE TABLE IF NOT EXISTS group_cold_memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    jid TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL,
+    tags TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS group_cold_memory_fts USING fts5(
+    jid UNINDEXED,
+    title,
+    content,
+    tags,
+    content='group_cold_memory',
+    content_rowid='id'
+);
+
+-- Memory sync tracking
+CREATE TABLE IF NOT EXISTS group_memory_sync (
+    jid TEXT PRIMARY KEY,
+    last_micro_sync REAL NOT NULL DEFAULT 0,
+    last_daily_wrapup REAL NOT NULL DEFAULT 0,
+    last_weekly_compound REAL NOT NULL DEFAULT 0
+);
     """)
     db.commit()
 
@@ -821,6 +875,124 @@ def get_dev_events(jid: str = None, limit: int = 100, stage: str = None) -> list
             f"SELECT * FROM dev_events {where} ORDER BY timestamp DESC LIMIT ?", params
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+# ── Hot Memory ──────────────────────────────────────────────────────────────
+
+def get_hot_memory(jid: str) -> str:
+    with _db_lock:
+        db = get_db()
+        row = db.execute(
+            "SELECT content FROM group_hot_memory WHERE jid = ?", (jid,)
+        ).fetchone()
+    return row[0] if row else ""
+
+
+def set_hot_memory(jid: str, content: str) -> None:
+    import time as _time
+    with _db_lock:
+        db = get_db()
+        db.execute(
+            """INSERT INTO group_hot_memory(jid, content, updated_at)
+               VALUES(?, ?, ?)
+               ON CONFLICT(jid) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at""",
+            (jid, content, _time.time()),
+        )
+        db.commit()
+
+
+# ── Warm Memory ─────────────────────────────────────────────────────────────
+
+def append_warm_log(jid: str, log_date: str, content: str) -> None:
+    import time as _time
+    with _db_lock:
+        db = get_db()
+        db.execute(
+            "INSERT INTO group_warm_logs(jid, log_date, content, created_at) VALUES(?, ?, ?, ?)",
+            (jid, log_date, content, _time.time()),
+        )
+        # Keep FTS in sync
+        db.execute("INSERT INTO group_warm_logs_fts(rowid, jid, log_date, content) VALUES(last_insert_rowid(), ?, ?, ?)",
+                    (jid, log_date, content))
+        db.commit()
+
+
+def get_warm_logs_recent(jid: str, days: int = 1) -> list[dict]:
+    import time as _time
+    cutoff = _time.time() - days * 86400
+    with _db_lock:
+        db = get_db()
+        rows = db.execute(
+            "SELECT id, log_date, content, created_at FROM group_warm_logs WHERE jid=? AND created_at>=? ORDER BY created_at DESC",
+            (jid, cutoff),
+        ).fetchall()
+    return [{"id": r[0], "log_date": r[1], "content": r[2], "created_at": r[3]} for r in rows]
+
+
+def delete_warm_logs_before(jid: str, cutoff_ts: float) -> int:
+    with _db_lock:
+        db = get_db()
+        cur = db.execute(
+            "DELETE FROM group_warm_logs WHERE jid=? AND created_at<?", (jid, cutoff_ts)
+        )
+        db.commit()
+        return cur.rowcount
+
+
+def memory_fts_search(jid: str, query: str, limit: int = 10) -> list[dict]:
+    """Hybrid search across warm and cold memory using FTS5."""
+    results = []
+    with _db_lock:
+        db = get_db()
+        # Warm memory FTS search
+        try:
+            rows = db.execute(
+                """SELECT w.id, w.log_date, w.content, w.created_at,
+                          bm25(group_warm_logs_fts) as fts_score
+                   FROM group_warm_logs_fts f
+                   JOIN group_warm_logs w ON w.id = f.rowid
+                   WHERE f.jid=? AND group_warm_logs_fts MATCH ?
+                   ORDER BY fts_score
+                   LIMIT ?""",
+                (jid, query, limit),
+            ).fetchall()
+            for r in rows:
+                results.append({
+                    "source": "warm",
+                    "date": r[1],
+                    "content": r[2][:500],
+                    "created_at": r[3],
+                    "fts_score": abs(r[4]) if r[4] else 0.0,
+                })
+        except Exception:
+            pass
+    return results
+
+
+def record_micro_sync(jid: str) -> None:
+    import time as _time
+    with _db_lock:
+        db = get_db()
+        db.execute(
+            """INSERT INTO group_memory_sync(jid, last_micro_sync)
+               VALUES(?, ?)
+               ON CONFLICT(jid) DO UPDATE SET last_micro_sync=excluded.last_micro_sync""",
+            (jid, _time.time()),
+        )
+        db.commit()
+
+
+def record_weekly_compound(jid: str) -> None:
+    import time as _time
+    with _db_lock:
+        db = get_db()
+        db.execute(
+            """INSERT INTO group_memory_sync(jid, last_weekly_compound)
+               VALUES(?, ?)
+               ON CONFLICT(jid) DO UPDATE SET last_weekly_compound=excluded.last_weekly_compound""",
+            (jid, _time.time()),
+        )
+        db.commit()
 
 
 # ── Maintenance ────────────────────────────────────────────────────────────────

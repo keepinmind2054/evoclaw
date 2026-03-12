@@ -18,6 +18,7 @@ import threading as _threading
 from . import config, db
 from .env import read_env_file
 from .evolution import record_run, get_adaptive_hints, get_genome_style_hints
+from .memory import get_hot_memory, update_hot_memory
 
 # ── Secret redaction for container stderr logs (Fix #110) ─────────────────────
 # Applied to every stderr line before logging to prevent API keys and credentials
@@ -316,6 +317,10 @@ async def run_container_agent(
     # 取得此群組的排程任務清單，傳給 container 讓 agent 可以列出和取消任務
     scheduled_tasks = db.get_all_tasks(group_folder=folder)
 
+    # ── 三層記憶系統：注入熱記憶 ────────────────────────────────────────────
+    # 取得此群組的熱記憶（per-group MEMORY.md，8KB 上限），注入到 container 的系統上下文
+    hot_memory = get_hot_memory(jid)
+
     input_data = {
         "prompt": prompt,
         "sessionId": session_id,
@@ -329,6 +334,7 @@ async def run_container_agent(
         "conversationHistory": conversation_history if conversation_history is not None else conv_history,  # 最近的對話歷史，提供記憶能力
         "scheduledTasks": scheduled_tasks,  # 此群組的排程任務清單，讓 agent 可以列出和取消
         "runId": run_id,  # 關聯 ID：供 container 在 stderr 中記錄，與 host 日誌對齊
+        "hotMemory": hot_memory,  # 三層記憶：熱記憶（8KB MEMORY.md，每次對話自動注入）
     }
     input_json = json.dumps(input_data, ensure_ascii=True)
     # 記錄 container 啟動時間，用於計算回應時間（適應度追蹤）
@@ -495,6 +501,15 @@ async def run_container_agent(
         result_text = result.get("result")
         if on_output and result_text:
             await on_output(result_text)
+
+        # 三層記憶系統：container 可透過 memory_patch 欄位更新熱記憶
+        # agent 在回覆中附上新的記憶內容，host 自動寫入熱記憶供下次對話使用
+        if isinstance(result, dict) and result.get("memory_patch"):
+            try:
+                update_hot_memory(jid, result["memory_patch"])
+                log.debug("hot_memory: updated via memory_patch for jid=%s", jid)
+            except Exception as _mem_exc:
+                log.warning("hot_memory: failed to apply memory_patch for jid=%s: %s", jid, _mem_exc)
 
         # 更新 session ID：agent 執行後可能建立新的 session，存入 DB 供下次使用
         if result.get("newSessionId"):

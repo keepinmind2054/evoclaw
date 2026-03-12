@@ -152,7 +152,37 @@ After release, verify:
 
 ---
 
-**Last Updated:** 2026-03-12 (v1.10.28)
+**Last Updated:** 2026-03-12 (v1.11.0)
+
+---
+
+## v1.11.0 Release Notes
+
+### OpenClaw Three-Tier Memory System
+
+**New Features**:
+
+1. *Hot Memory (per-group MEMORY.md, 8KB)*: Each group now has a persistent hot memory store (`group_hot_memory` table). Hot memory is injected into every container invocation via the `hotMemory` field in `input_data`. The container agent can update hot memory by returning a `memory_patch` key in the response JSON.
+
+2. *Warm Memory (daily logs + Micro Sync)*: After every successful conversation, a compact log entry (timestamp + user preview + assistant preview) is appended to `group_warm_logs`. Every 3 hours (tracked in the evolution daemon loop), `run_micro_sync()` scans recent logs and adds a sync note to hot memory. Logs older than 30 days are pruned by `prune_old_warm_logs()`.
+
+3. *Cold Memory (SQLite FTS5 hybrid search)*: Two FTS5 virtual tables (`group_warm_logs_fts`, `group_cold_memory_fts`) enable full-text keyword search across memory stores. The `memory_search()` function combines BM25 FTS rank with a recency decay score (1.0 − age_days/30) weighted 70/30 for hybrid retrieval.
+
+4. *Weekly Compound*: Every 7 days (tracked in the evolution daemon loop), `run_weekly_compound()` prunes warm logs older than 30 days and adds a compound note to hot memory, preventing unbounded growth.
+
+5. *IPC `memory_search` command*: Containers can query historical memory via IPC by writing a `{"type": "memory_search", "query": "...", "requestId": "..."}` file. Results are written to the `results/` directory for the container to poll.
+
+**Files Changed**:
+- `host/memory/__init__.py` — new module
+- `host/memory/hot.py` — hot memory management
+- `host/memory/warm.py` — warm memory + micro sync
+- `host/memory/search.py` — FTS5 hybrid search
+- `host/memory/compound.py` — weekly compound
+- `host/db.py` — new tables + helper functions
+- `host/container_runner.py` — hot memory injection + memory_patch handling
+- `host/main.py` — warm log append on each conversation
+- `host/ipc_watcher.py` — memory_search IPC handler
+- `host/evolution/daemon.py` — periodic micro sync + weekly compound
 
 ---
 

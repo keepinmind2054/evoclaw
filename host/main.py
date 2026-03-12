@@ -30,6 +30,7 @@ from .task_scheduler import start_scheduler_loop
 from .router import register_channel, route_outbound, format_messages, find_channel
 from .evolution import check_message as immune_check, evolution_loop
 from .health_monitor import health_monitor_loop
+from .memory import append_warm_log
 
 def _configure_logging() -> None:
     """Configure logging format based on LOG_FORMAT env var.
@@ -313,6 +314,9 @@ async def _process_group_messages(group: dict, messages: list[dict],
 
     log.info(f"Processing {len(messages)} message(s) for {folder}")
 
+    # Capture prompt text for warm memory logging (join all new message contents)
+    _user_prompt_text = " ".join(m.get("content", "") for m in messages if m.get("content", "").strip())
+
     async def on_output(text: str):
         # 將 container 的回覆透過 router 發送回對應的聊天室
         await route_outbound(jid, text)
@@ -335,6 +339,11 @@ async def _process_group_messages(group: dict, messages: list[dict],
                 is_from_me=True,
                 is_bot_message=True,
             )
+        except Exception:
+            pass
+        # 三層記憶系統：暖記憶 — 每次對話後自動追加摘要到今日日誌
+        try:
+            append_warm_log(jid, _user_prompt_text, text)
         except Exception:
             pass
 

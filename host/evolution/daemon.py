@@ -20,6 +20,7 @@ EvoClaw 的演化 daemon 模擬這個過程：
 
 import asyncio
 import logging
+import time
 from typing import Optional
 
 log = logging.getLogger(__name__)
@@ -34,6 +35,15 @@ MIN_SAMPLES = 3
 
 # 計算適應度時的回顧時間視窗（天）
 FITNESS_WINDOW_DAYS = 7
+
+# 三層記憶系統：Micro Sync 間隔（3 小時）
+_MICRO_SYNC_INTERVAL_SECS = 3 * 3600
+# 三層記憶系統：Weekly Compound 間隔（7 天）
+_WEEKLY_COMPOUND_INTERVAL_SECS = 7 * 86400
+
+# 上次執行時間追蹤
+_last_micro_sync: float = 0.0
+_last_weekly_compound: float = 0.0
 
 
 async def evolution_loop(stop_event: asyncio.Event) -> None:
@@ -78,6 +88,24 @@ async def evolution_loop(stop_event: asyncio.Event) -> None:
             log.warning("evolution: prune_logs timed out after 300s — skipping this cycle")
         except Exception as e:
             log.warning("Periodic log pruning failed (non-fatal): %s", e)
+
+        # 三層記憶系統：定期執行 Micro Sync（每 3 小時）
+        global _last_micro_sync, _last_weekly_compound
+        now = time.time()
+        if now - _last_micro_sync >= _MICRO_SYNC_INTERVAL_SECS:
+            try:
+                await _run_memory_micro_sync()
+                _last_micro_sync = now
+            except Exception as e:
+                log.warning("Memory micro_sync failed (non-fatal): %s", e)
+
+        # 三層記憶系統：定期執行 Weekly Compound（每 7 天）
+        if now - _last_weekly_compound >= _WEEKLY_COMPOUND_INTERVAL_SECS:
+            try:
+                await _run_memory_weekly_compound()
+                _last_weekly_compound = now
+            except Exception as e:
+                log.warning("Memory weekly_compound failed (non-fatal): %s", e)
 
 
 async def _run_cycle() -> None:
@@ -190,3 +218,39 @@ def _sync_evolve() -> None:
         )
     except Exception:
         pass
+
+
+async def _run_memory_micro_sync() -> None:
+    """
+    三層記憶系統：對所有已登記群組執行 Micro Sync（每 3 小時）。
+    掃描近期暖記憶日誌，提取關鍵決策並更新熱記憶。
+    """
+    from host import db as _db
+    from host.memory.warm import run_micro_sync
+    try:
+        groups = _db.get_all_registered_groups()
+        for group in groups:
+            jid = group.get("jid", "")
+            if jid:
+                await run_micro_sync(jid)
+        log.info("memory: micro_sync completed for %d group(s)", len(groups))
+    except Exception as exc:
+        log.warning("memory: micro_sync cycle failed: %s", exc)
+
+
+async def _run_memory_weekly_compound() -> None:
+    """
+    三層記憶系統：對所有已登記群組執行 Weekly Compound（每 7 天）。
+    剪除 30 天以上的低價值暖記憶，並蒸餾 pattern 至熱記憶。
+    """
+    from host import db as _db
+    from host.memory.compound import run_weekly_compound
+    try:
+        groups = _db.get_all_registered_groups()
+        for group in groups:
+            jid = group.get("jid", "")
+            if jid:
+                await run_weekly_compound(jid)
+        log.info("memory: weekly_compound completed for %d group(s)", len(groups))
+    except Exception as exc:
+        log.warning("memory: weekly_compound cycle failed: %s", exc)

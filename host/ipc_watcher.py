@@ -362,6 +362,18 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
                 f"⚠️ 檔案無法傳送：找不到 {fname}\n路徑：{host_path}"
             ))
 
+    elif msg_type == "memory_search":
+        # 三層記憶系統：冷/暖記憶混合搜尋 — container 可透過 IPC 查詢歷史記憶
+        # 結果寫入 results 目錄，container 透過輪詢讀取
+        request_id = payload.get("requestId", "")
+        query = payload.get("query", "")
+        _sf_groups = db.get_all_registered_groups()
+        _sf_match = next((g for g in _sf_groups if g.get("folder") == group_folder), None)
+        _ms_jid = _sf_match["jid"] if _sf_match else ""
+        if query and _ms_jid:
+            t = _asyncio.ensure_future(_run_memory_search(query, request_id, _ms_jid, group_folder))
+            t.add_done_callback(_ipc_task_done_callback)
+
     else:
         # Unknown IPC message type — log a warning instead of silently ignoring.
         # This aids debugging when a stale container image sends an unrecognised type.
@@ -567,6 +579,34 @@ async def _run_list_skills(
             )
     except Exception as e:
         log.error(f"list_skills IPC error: {e}")
+
+
+async def _run_memory_search(
+    query: str, request_id: str, jid: str, group_folder: str,
+) -> None:
+    """
+    執行三層記憶混合搜尋（FTS5 關鍵字 + 時效性評分）。
+    結果寫入 results 目錄供 container 輪詢讀取。
+    """
+    try:
+        from .memory.search import memory_search
+        results = memory_search(jid, query)
+        output = json.dumps(results, ensure_ascii=False, indent=2)
+
+        if request_id:
+            result_dir = config.DATA_DIR / "ipc" / group_folder / "results"
+            result_dir.mkdir(parents=True, exist_ok=True)
+            (result_dir / f"{request_id}.json").write_text(
+                json.dumps({
+                    "requestId": request_id,
+                    "output": output,
+                    "results": results,
+                }),
+                encoding="utf-8",
+            )
+        log.info("memory_search IPC: query=%r found %d results for jid=%s", query, len(results), jid)
+    except Exception as e:
+        log.error("memory_search IPC error: %s", e)
 
 
 def _find_parent_container(group_folder: str) -> str | None:
