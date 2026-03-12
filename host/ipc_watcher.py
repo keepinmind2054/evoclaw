@@ -40,6 +40,21 @@ _dev_task_active: set[str] = set()
 _dev_task_lock = asyncio.Lock()
 
 
+def _ipc_task_done_callback(task: asyncio.Task) -> None:
+    """Log any unhandled exception from a fire-and-forget IPC asyncio Task (Issue #73).
+
+    ensure_future() / create_task() calls in _handle_ipc() are fire-and-forget.
+    Without a done-callback, exceptions raised outside the inner try/except blocks
+    (e.g. CancelledError during shutdown, or an unexpected RuntimeError) are
+    silently swallowed by the event loop.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.error("Unhandled exception in IPC task %s: %s", task.get_name(), exc, exc_info=exc)
+
+
 def _sanitize_error_for_notification(error: str) -> str:
     """Strip filesystem paths and sensitive details from error strings before
     sending them to user-facing chat.  Only the exception type and a short
@@ -249,7 +264,8 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
         skill_path = payload.get("skill_path", "")
         request_id = payload.get("requestId", "")
         if skill_path:
-            _asyncio.ensure_future(_run_apply_skill(skill_path, request_id, group_folder, route_fn))
+            t = _asyncio.ensure_future(_run_apply_skill(skill_path, request_id, group_folder, route_fn))
+            t.add_done_callback(_ipc_task_done_callback)
 
     elif msg_type == "uninstall_skill":
         # 移除 Skill Plugin：只有主群組的 container 才能呼叫
@@ -258,13 +274,15 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
         skill_name = payload.get("skill_name", "")
         request_id = payload.get("requestId", "")
         if skill_name:
-            _asyncio.ensure_future(_run_uninstall_skill(skill_name, request_id, group_folder, route_fn))
+            t = _asyncio.ensure_future(_run_uninstall_skill(skill_name, request_id, group_folder, route_fn))
+            t.add_done_callback(_ipc_task_done_callback)
 
     elif msg_type == "list_skills":
         # 列出已安裝的 Skills：任何群組都可以查詢（唯讀操作）
         # 結果寫入 results 目錄（供 container 輪詢讀取），同時如有 requestId 也可 route 回訊息
         request_id = payload.get("requestId", "")
-        _asyncio.ensure_future(_run_list_skills(request_id, group_folder, route_fn))
+        t = _asyncio.ensure_future(_run_list_skills(request_id, group_folder, route_fn))
+        t.add_done_callback(_ipc_task_done_callback)
 
     elif msg_type == "spawn_agent":
         # 執行子 agent 並將結果寫回 results 目錄
@@ -274,7 +292,8 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
         if request_id and prompt:
             # 找出目前正在執行此群組的父 container（用於 dashboard 親子關係顯示）
             parent_name = _find_parent_container(group_folder)
-            _asyncio.ensure_future(_run_subagent(request_id, prompt, context_mode, group_folder, parent_name))
+            t = _asyncio.ensure_future(_run_subagent(request_id, prompt, context_mode, group_folder, parent_name))
+            t.add_done_callback(_ipc_task_done_callback)
 
     elif msg_type == "dev_task":
         # 觸發 DevEngine 7 階段開發流程
@@ -293,11 +312,12 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
                     "will attempt lookup by folder in _run_dev_task", group_folder
                 )
                 _dev_group_jid = group_folder  # pass folder as fallback, handled in _run_dev_task
-            _asyncio.ensure_future(_run_dev_task(
+            t = _asyncio.ensure_future(_run_dev_task(
                 {"prompt": dev_prompt, "mode": mode, "session_id": session_id},
                 _dev_group_jid,
                 route_fn,
             ))
+            t.add_done_callback(_ipc_task_done_callback)
 
     elif msg_type == "send_file":
         container_path = payload.get("filePath", "")

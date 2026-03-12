@@ -5,6 +5,16 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.19] - 2026-03-12
+
+### Fixed
+- **Gmail body size unbounded** (`host/channels/gmail_channel.py`): `_extract_body()` now truncates decoded email bodies at 32 KB with a clear `[... email truncated at 32 KB ...]` suffix. Large emails (newsletters, quoted thread chains) could previously saturate the agent LLM context window and bloat the messages table (Issue #69)
+- **Telegram non-text messages silently dropped** (`host/channels/telegram_channel.py`): added a handler for photos, voice messages, video, audio, documents, stickers, location, and contact message types that sends a short informational reply: `I can only process text messages at the moment.` Previously, all non-text Telegram messages were silently ignored with zero user feedback (Issue #70)
+- **GroupQueue `create_task()` swallows exceptions silently** (`host/group_queue.py`): all `asyncio.create_task()` calls now attach a `_task_done_callback` that logs unhandled exceptions at ERROR level. Without this, exceptions outside the inner try/except (e.g. CancelledError during shutdown, RuntimeError from the event loop) were silently discarded by the Python event loop (Issue #71)
+- **`.env.example` missing security-critical and operational vars** (`.env.example`): added `WHATSAPP_APP_SECRET` (with a prominent security warning), `LOG_FORMAT`, `RATE_LIMIT_MAX_MSGS`, `RATE_LIMIT_WINDOW_SECS`, `DASHBOARD_USER`, `DASHBOARD_PASSWORD`, `WEBPORTAL_ENABLED`, `WEBPORTAL_HOST`, `WEBPORTAL_PORT`, and `HEALTH_PORT`. The omission of `WHATSAPP_APP_SECRET` was especially critical — operators without this var run with no HMAC signature verification, accepting webhook payloads from any caller (Issue #72)
+- **IPC `ensure_future()` fire-and-forget swallows exceptions** (`host/ipc_watcher.py`): all `asyncio.ensure_future()` calls for `_run_apply_skill`, `_run_uninstall_skill`, `_run_list_skills`, `_run_subagent`, and `_run_dev_task` now attach `_ipc_task_done_callback` that logs unhandled exceptions at ERROR level (Issue #73)
+- **Discord `disconnect()` deadlocks — `close()` called on wrong event loop** (`host/channels/discord_channel.py`): `disconnect()` now schedules `client.close()` via `asyncio.run_coroutine_threadsafe()` on the Discord background loop instead of awaiting it from the main asyncio loop. Also adds `thread.join(timeout=5)` to ensure the background thread drains cleanly before process exit (Issue #67)
+
 ## [1.10.18] - 2026-03-12
 
 ### Fixed

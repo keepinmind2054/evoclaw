@@ -152,7 +152,36 @@ After release, verify:
 
 ---
 
-**Last Updated:** 2026-03-12 (v1.10.18)
+**Last Updated:** 2026-03-12 (v1.10.19)
+
+---
+
+## v1.10.19 Release Notes
+
+### Eighth Round PUA Analysis — Channel Safety, Task Observability, and Config Completeness
+
+**Problems Fixed**:
+
+1. *Gmail body size unbounded — LLM context window exhaustion* (Issue #69): `_extract_body()` in `host/channels/gmail_channel.py` returned the full decoded email text with no size limit. A large email (newsletter, quoted thread, 500 KB plain text) was stored verbatim in the messages table and injected into the agent prompt, potentially saturating the context window. Added a 32 KB cap with a `[... email truncated at 32 KB ...]` suffix so the agent knows content is partial.
+
+2. *Telegram non-text messages silently dropped with no user feedback* (Issue #70): The `MessageHandler` in `host/channels/telegram_channel.py` filtered on `filters.TEXT` only. Photos, voice messages, videos, documents, stickers, location, and contact messages produced zero bot response. Users had no indication their message was received but unsupported. Added a separate handler for all non-text types that sends a short informational reply.
+
+3. *GroupQueue `asyncio.create_task()` calls have no done-callback* (Issue #71): All six `create_task()` sites in `host/group_queue.py` (`enqueue_message_check`, `enqueue_task`, `_drain_group` x2, `_drain_waiting` x2, and `_schedule_retry`) are now wired to `_task_done_callback`. This logs unhandled exceptions at ERROR level instead of silently discarding them per Python asyncio semantics.
+
+4. *`.env.example` missing security-critical and operational variables* (Issue #72): Added `WHATSAPP_APP_SECRET` with a prominent security warning (operators without this key accept spoofed webhook payloads from any caller), `LOG_FORMAT`, `RATE_LIMIT_MAX_MSGS`, `RATE_LIMIT_WINDOW_SECS`, `DASHBOARD_USER`, `DASHBOARD_PASSWORD`, `WEBPORTAL_ENABLED`, `WEBPORTAL_HOST`, `WEBPORTAL_PORT`, and `HEALTH_PORT`.
+
+5. *IPC `ensure_future()` fire-and-forget swallows exceptions silently* (Issue #73): All five `ensure_future()` dispatch sites in `host/ipc_watcher._handle_ipc()` (apply_skill, uninstall_skill, list_skills, spawn_agent, dev_task) now attach `_ipc_task_done_callback` to log unhandled exceptions at ERROR level.
+
+6. *Discord `disconnect()` deadlocks when `client.close()` awaited on wrong event loop* (Issue #67): The Discord client runs in a background `threading.Thread` with its own event loop. Calling `await self._client.close()` from the main asyncio event loop in `disconnect()` deadlocks. Fixed by scheduling `close()` via `asyncio.run_coroutine_threadsafe()` on the Discord event loop, then joining the thread with a 5-second timeout.
+
+**Upgrade**:
+
+No `docker build` needed — all changes are in the host process. Restart EvoClaw to apply.
+
+```bash
+git pull
+python run.py start
+```
 
 ---
 

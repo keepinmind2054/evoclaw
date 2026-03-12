@@ -180,15 +180,38 @@ class DiscordChannel:
             log.debug("Discord send_typing exception: %s", exc)
 
     async def disconnect(self) -> None:
+        """Disconnect the Discord client cleanly (Issue #67).
+
+        discord.py's client.close() must be awaited on the Discord event loop
+        (self._loop), not on the main asyncio event loop.  Awaiting it from the
+        wrong loop causes a deadlock.  We schedule it via run_coroutine_threadsafe()
+        and then join the background thread with a timeout to ensure the Discord
+        loop drains before the process exits.
+        """
         self._connected = False
-        if self._client:
+        if self._client and self._loop and not self._loop.is_closed():
+            try:
+                future = asyncio.run_coroutine_threadsafe(self._client.close(), self._loop)
+                # Wait up to 10 s for clean close; ignore timeout — we are shutting down anyway
+                try:
+                    future.result(timeout=10)
+                except Exception as exc:
+                    log.debug("Discord client.close() error: %s", exc)
+            except Exception as exc:
+                log.debug("Discord disconnect scheduling error: %s", exc)
+        elif self._client:
+            # Loop already gone — best effort
             try:
                 await self._client.close()
             except Exception as exc:
                 log.debug("Discord disconnect error: %s", exc)
-            self._client = None
+        self._client = None
         if self._loop and not self._loop.is_closed():
             self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=5)
+            if self._thread.is_alive():
+                log.warning("Discord background thread did not exit within 5s")
         log.info("Discord channel disconnected")
 
 

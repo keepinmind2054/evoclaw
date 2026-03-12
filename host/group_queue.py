@@ -15,6 +15,21 @@ from . import config
 
 log = logging.getLogger(__name__)
 
+
+def _task_done_callback(task: asyncio.Task) -> None:
+    """Log any unhandled exception from a fire-and-forget asyncio Task (Issue #71).
+
+    Without this callback, exceptions raised inside create_task() coroutines
+    are silently discarded by the event loop and only surface as a vague
+    'Task exception was never retrieved' message at DEBUG level.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.error("Unhandled exception in task %s: %s", task.get_name(), exc, exc_info=exc)
+
+
 # 失敗後最多重試幾次（超過後放棄，等下一則新訊息觸發）
 MAX_RETRIES = 5
 # 第一次重試的等待秒數，之後每次倍增（指數退避 exponential backoff）
@@ -129,10 +144,11 @@ class GroupQueue:
         # 條件都滿足，同步更新狀態後建立 asyncio task（避免 race：多個 task 排入前計數來不及更新）
         state.active = True
         self._active_count += 1
-        asyncio.create_task(
+        t = asyncio.create_task(
             self._run_for_group(group_jid, reason="messages"),
             name=f"group-msg-{group_jid}",
         )
+        t.add_done_callback(_task_done_callback)
 
     def enqueue_task(self, group_jid: str, task_id: str, fn: Callable[[], Awaitable[None]]) -> None:
         """
@@ -194,10 +210,11 @@ class GroupQueue:
         state.is_task_container = True
         state.running_task_id = task.id
         self._active_count += 1
-        asyncio.create_task(
+        t = asyncio.create_task(
             self._run_task(group_jid, task),
             name=f"group-task-{group_jid}-{task_id}",
         )
+        t.add_done_callback(_task_done_callback)
 
     # ── Internal runners ──────────────────────────────────────────────────────
 
@@ -273,7 +290,8 @@ class GroupQueue:
             if not self._shutting_down:
                 self.enqueue_message_check(group_jid)
 
-        asyncio.create_task(_retry(), name=f"retry-{group_jid}")
+        t = asyncio.create_task(_retry(), name=f"retry-{group_jid}")
+        t.add_done_callback(_task_done_callback)
 
     def _drain_group(self, group_jid: str) -> None:
         """
@@ -296,20 +314,22 @@ class GroupQueue:
             state.is_task_container = True
             state.running_task_id = task.id
             self._active_count += 1
-            asyncio.create_task(
+            t = asyncio.create_task(
                 self._run_task(group_jid, task),
                 name=f"group-task-{group_jid}-{task.id}",
             )
+            t.add_done_callback(_task_done_callback)
             return
 
         # 再處理待辦訊息
         if state.pending_messages:
             state.active = True
             self._active_count += 1
-            asyncio.create_task(
+            t = asyncio.create_task(
                 self._run_for_group(group_jid, reason="drain"),
                 name=f"group-msg-{group_jid}",
             )
+            t.add_done_callback(_task_done_callback)
             return
 
         # 本群組沒有待辦工作，嘗試把空出的 concurrency 槽位給等待中的群組
@@ -332,17 +352,19 @@ class GroupQueue:
                 state.is_task_container = True
                 state.running_task_id = task.id
                 self._active_count += 1
-                asyncio.create_task(
+                t = asyncio.create_task(
                     self._run_task(next_jid, task),
                     name=f"group-task-{next_jid}-{task.id}",
                 )
+                t.add_done_callback(_task_done_callback)
             elif state.pending_messages:
                 state.active = True
                 self._active_count += 1
-                asyncio.create_task(
+                t = asyncio.create_task(
                     self._run_for_group(next_jid, reason="waiting"),
                     name=f"group-msg-{next_jid}",
                 )
+                t.add_done_callback(_task_done_callback)
 
     def shutdown_sync(self) -> None:
         """Signal shutdown from a synchronous context (e.g. signal handler).

@@ -63,6 +63,28 @@ class TelegramChannel:
                     )
 
                 self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
+
+                async def handle_non_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+                    """Notify users who send non-text messages (Issue #70)."""
+                    if not update.effective_chat:
+                        return
+                    chat_id = update.effective_chat.id
+                    try:
+                        await self._app.bot.send_message(
+                            chat_id=chat_id,
+                            text="I can only process text messages at the moment. Please send your request as text.",
+                        )
+                    except Exception:
+                        pass
+
+                self._app.add_handler(
+                    MessageHandler(
+                        (filters.PHOTO | filters.VOICE | filters.VIDEO | filters.AUDIO |
+                         filters.Document.ALL | filters.Sticker.ALL | filters.LOCATION |
+                         filters.CONTACT) & ~filters.COMMAND,
+                        handle_non_text,
+                    )
+                )
                 await self._app.initialize()
                 await self._app.start()
                 await self._app.updater.start_polling()

@@ -208,8 +208,18 @@ class GmailChannel:
             return match.group(1).strip()
         return raw.strip()
 
+    # Maximum plain-text body size to pass to the agent (Issue #69).
+    # Large emails (newsletters, quoted threads) can saturate the LLM context
+    # window and bloat the messages table.  Truncate with a clear suffix so the
+    # agent knows the content is partial.
+    _MAX_BODY_BYTES = 32 * 1024  # 32 KB
+
     def _extract_body(self, payload: dict) -> str:
-        """Recursively extract plain text body from a Gmail message payload."""
+        """Recursively extract plain text body from a Gmail message payload.
+
+        Truncates the result at _MAX_BODY_BYTES to prevent large emails from
+        exhausting the agent context window (Issue #69).
+        """
         mime_type = payload.get("mimeType", "")
         if mime_type == "text/plain":
             data = payload.get("body", {}).get("data", "")
@@ -218,7 +228,12 @@ class GmailChannel:
                     padding = 4 - len(data) % 4
                     if padding != 4:
                         data += "=" * padding
-                    return base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+                    decoded = base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+                    if len(decoded.encode("utf-8", errors="replace")) > self._MAX_BODY_BYTES:
+                        # Truncate at character boundary close to the byte limit
+                        truncated = decoded.encode("utf-8", errors="replace")[:self._MAX_BODY_BYTES].decode("utf-8", errors="replace")
+                        return truncated + "\n[... email truncated at 32 KB ...]"
+                    return decoded
                 return ""
             except Exception as e:
                 log.warning("Base64 decode error: %s", type(e).__name__)
