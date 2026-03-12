@@ -57,6 +57,11 @@ def init_database(db_path: Path) -> None:
     _db.execute("PRAGMA journal_mode=WAL")
     _db.execute("PRAGMA synchronous=NORMAL")
     _db.execute("PRAGMA busy_timeout=5000")  # 5s retry on SQLITE_BUSY
+    # Enable foreign key enforcement (Issue #64).
+    # SQLite disables FK constraints by default; without this pragma, any schema
+    # additions using ON DELETE CASCADE / ON DELETE RESTRICT are silently ignored,
+    # producing orphaned rows that skew metrics and fill the database.
+    _db.execute("PRAGMA foreign_keys = ON")
     _create_tables(_db)
     log.info(f"Database initialized: {db_path}")
 
@@ -290,13 +295,16 @@ def get_conversation_history(jid: str, limit: int = 20) -> list[dict]:
         return [dict(r) for r in reversed(rows)]
 
 def get_messages_since(chat_jid: str, timestamp: int, limit: int = 50) -> list[dict]:
-    """取得某個聊天室從指定時間點起的訊息（含所有類型），用於提供對話歷史給 agent。"""
-    db = get_db()
-    rows = db.execute("""
-        SELECT * FROM messages WHERE chat_jid = ? AND timestamp >= ?
-        ORDER BY timestamp ASC LIMIT ?
-    """, (chat_jid, timestamp, limit)).fetchall()
-    return [dict(r) for r in rows]
+    """取得某個聊天室從指定時間點起的訊息（含所有類型），用於提供對話歷史給 agent。
+    _db_lock ensures thread-safety when called from container_runner (asyncio loop)
+    while dashboard/webportal/evolution daemon threads may hold the lock (Issue #60)."""
+    with _db_lock:
+        db = get_db()
+        rows = db.execute("""
+            SELECT * FROM messages WHERE chat_jid = ? AND timestamp >= ?
+            ORDER BY timestamp ASC LIMIT ?
+        """, (chat_jid, timestamp, limit)).fetchall()
+        return [dict(r) for r in rows]
 
 def store_chat_metadata(jid: str, name: str, timestamp: int, channel: str, is_group: bool) -> None:
     """
@@ -321,10 +329,12 @@ def store_chat_metadata(jid: str, name: str, timestamp: int, channel: str, is_gr
 # ── Router state ──────────────────────────────────────────────────────────────
 
 def get_state(key: str) -> Optional[str]:
-    """從 router_state 表讀取通用 key-value 狀態（目前主要用於 lastTimestamp）。"""
-    db = get_db()
-    row = db.execute("SELECT value FROM router_state WHERE key=?", (key,)).fetchone()
-    return row["value"] if row else None
+    """從 router_state 表讀取通用 key-value 狀態（目前主要用於 lastTimestamp）。
+    _db_lock ensures thread-safety when called concurrently from background threads (Issue #60)."""
+    with _db_lock:
+        db = get_db()
+        row = db.execute("SELECT value FROM router_state WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else None
 
 def set_state(key: str, value: str) -> None:
     """寫入或更新 router_state 表中的 key-value 狀態。"""
@@ -336,10 +346,13 @@ def set_state(key: str, value: str) -> None:
 # ── Sessions ──────────────────────────────────────────────────────────────────
 
 def get_session(group_folder: str) -> Optional[str]:
-    """取得某群組的 Claude session ID，讓 agent 延續上次的對話記憶。"""
-    db = get_db()
-    row = db.execute("SELECT session_id FROM sessions WHERE group_folder=?", (group_folder,)).fetchone()
-    return row["session_id"] if row else None
+    """取得某群組的 Claude session ID，讓 agent 延續上次的對話記憶。
+    _db_lock ensures thread-safety when called from task_scheduler/container_runner
+    while dashboard/webportal threads may hold the lock (Issue #60)."""
+    with _db_lock:
+        db = get_db()
+        row = db.execute("SELECT session_id FROM sessions WHERE group_folder=?", (group_folder,)).fetchone()
+        return row["session_id"] if row else None
 
 def set_session(group_folder: str, session_id: str) -> None:
     """儲存或更新某群組的 Claude session ID（container 每次執行後可能產生新 session）。"""
@@ -360,10 +373,12 @@ def get_all_registered_groups() -> list[dict]:
         return [dict(r) for r in rows]
 
 def get_registered_group(jid: str) -> Optional[dict]:
-    """根據 JID 查找單一群組設定，找不到時回傳 None。"""
-    db = get_db()
-    row = db.execute("SELECT * FROM registered_groups WHERE jid=?", (jid,)).fetchone()
-    return dict(row) if row else None
+    """根據 JID 查找單一群組設定，找不到時回傳 None。
+    _db_lock ensures thread-safety when called from background threads (Issue #60)."""
+    with _db_lock:
+        db = get_db()
+        row = db.execute("SELECT * FROM registered_groups WHERE jid=?", (jid,)).fetchone()
+        return dict(row) if row else None
 
 def _validate_folder(folder: str) -> str:
     """Validate folder name to prevent path traversal attacks."""
@@ -772,22 +787,24 @@ def get_dev_events(jid: str = None, limit: int = 100, stage: str = None) -> list
     jid — 指定開發者/群組（None = 所有）
     limit — 最多回傳幾筆（預設 100）
     stage — 過濾特定階段（None = 全部）
+    _db_lock ensures thread-safety when called from dashboard/webportal threads (Issue #60).
     """
-    db = get_db()
-    clauses = []
-    params = []
-    if jid:
-        clauses.append("jid = ?")
-        params.append(jid)
-    if stage:
-        clauses.append("stage = ?")
-        params.append(stage)
-    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    params.append(limit)
-    rows = db.execute(
-        f"SELECT * FROM dev_events {where} ORDER BY timestamp DESC LIMIT ?", params
-    ).fetchall()
-    return [dict(r) for r in rows]
+    with _db_lock:
+        db = get_db()
+        clauses = []
+        params = []
+        if jid:
+            clauses.append("jid = ?")
+            params.append(jid)
+        if stage:
+            clauses.append("stage = ?")
+            params.append(stage)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        rows = db.execute(
+            f"SELECT * FROM dev_events {where} ORDER BY timestamp DESC LIMIT ?", params
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 # ── Maintenance ────────────────────────────────────────────────────────────────
@@ -867,8 +884,11 @@ def prune_old_logs(days: int = 30) -> None:
         # messages: timestamp is ms epoch integer (same cutoff as task_run_logs)
         db.execute("DELETE FROM messages WHERE timestamp < ?", (cutoff_ms,))
         # immune_threats: keep blocked senders and recurring threats indefinitely;
-        # prune one-shot noise entries (count=1) older than 90 days
-        immune_cutoff_ms = int((time.time() - 90 * 86400) * 1000)
+        # prune one-shot noise entries (count=1) older than 90 days.
+        # immune_threats.last_seen is stored as TEXT datetime, so use SQLite datetime()
+        # for the comparison.  The 90-day retention is intentionally longer than the
+        # configurable `days` parameter to preserve threat history for audit purposes.
+        # (Issue #63: removed unused integer immune_cutoff_ms variable)
         db.execute(
             "DELETE FROM immune_threats WHERE count = 1 AND blocked = 0 "
             "AND last_seen < datetime('now', '-90 days')",

@@ -86,10 +86,23 @@ async def _run_cycle() -> None:
 
 
 def _sync_prune_logs() -> None:
-    """Run DB log pruning synchronously (called via asyncio.to_thread from evolution_loop)."""
+    """Run DB log pruning and WAL checkpoint synchronously (called via asyncio.to_thread).
+
+    After pruning old rows the WAL file may still be large because SQLite only
+    reclaims WAL pages at checkpoint time.  Running PRAGMA wal_checkpoint(TRUNCATE)
+    here ensures the WAL is truncated every 24h, preventing unbounded WAL growth
+    on high-traffic deployments (Issue #62).
+    """
     from host import db
     db.prune_old_logs(days=30)
     log.info("Periodic log pruning completed")
+    try:
+        with db._db_lock:
+            conn = db.get_db()
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        log.info("WAL checkpoint (TRUNCATE) completed")
+    except Exception as exc:
+        log.warning("WAL checkpoint failed (non-fatal): %s", exc)
 
 
 def _sync_evolve() -> None:

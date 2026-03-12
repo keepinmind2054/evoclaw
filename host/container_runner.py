@@ -258,7 +258,9 @@ async def run_container_agent(
     jid = group["jid"]
     # 用時間戳記讓 container 名稱唯一，方便 debug 與孤兒清理
     run_id = str(uuid.uuid4())
-    container_name = f"evoclaw-{_safe_name(folder)}-{int(time.time())}"
+    # Use the first 8 hex chars of run_id (not timestamp) so concurrent containers
+    # for the same group within the same second get unique names (Issue #59).
+    container_name = f"evoclaw-{_safe_name(folder)}-{run_id[:8]}"
 
     mounts = _build_volume_mounts(group)
     mount_args = []
@@ -335,6 +337,13 @@ async def run_container_agent(
         "-e", f"TZ={config.TIMEZONE}",  # 時區設定，確保 agent 顯示正確時間
         "-e", "PYTHONUNBUFFERED=1",  # 強制 Python stdout 立即 flush，讓 Docker Desktop 日誌即時顯示
     ]
+    # ── Per-container resource limits (Issue #61) ──────────────────────────────
+    # Prevent a runaway agent from OOM-killing the host process.
+    # Both limits are opt-out: set CONTAINER_MEMORY="" or CONTAINER_CPUS="" to disable.
+    if config.CONTAINER_MEMORY:
+        cmd += ["--memory", config.CONTAINER_MEMORY, "--memory-swap", config.CONTAINER_MEMORY]
+    if config.CONTAINER_CPUS:
+        cmd += ["--cpus", config.CONTAINER_CPUS]
     if uid is not None and gid is not None:
         cmd += ["--user", f"{uid}:{gid}"]
     cmd += [

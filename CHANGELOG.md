@@ -5,6 +5,16 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.18] - 2026-03-12
+
+### Fixed
+- **Container name collision** (`host/container_runner.py`): `container_name` now uses the first 8 hex characters of `run_id` (UUID4) instead of `int(time.time())`. Two concurrent containers for the same group starting within the same wall-clock second previously caused Docker to reject the second `run` with a name-conflict error, triggering the circuit breaker (Issue #59)
+- **Five DB read functions missing `_db_lock`** (`host/db.py`): `get_messages_since`, `get_state`, `get_session`, `get_registered_group`, and `get_dev_events` now hold `_db_lock` for the duration of their queries, consistent with all other DB read/write functions. Eliminates potential `SQLITE_LOCKED` errors and stale reads when dashboard/webportal/evolution daemon threads access the shared connection concurrently (Issue #60)
+- **No memory/CPU limits on `docker run`** (`host/container_runner.py`, `host/config.py`): added `--memory` and `--cpus` flags to the container command, configured via `CONTAINER_MEMORY` (default `512m`) and `CONTAINER_CPUS` (default `1.0`) env vars. Prevents a runaway agent from exhausting host memory and triggering the kernel OOM-killer (Issue #61)
+- **WAL file grows unbounded** (`host/evolution/daemon.py`): `_sync_prune_logs()` now runs `PRAGMA wal_checkpoint(TRUNCATE)` after log pruning so the WAL file is reclaimed every 24 hours, preventing unbounded WAL growth on high-traffic deployments (Issue #62)
+- **Unused `immune_cutoff_ms` variable** (`host/db.py`): removed the dead `immune_cutoff_ms = int(...)` assignment in `prune_old_logs()` that was computed but never used; added an explanatory comment for the hardcoded 90-day immune-threat retention policy (Issue #63)
+- **`PRAGMA foreign_keys = ON` never set** (`host/db.py`): `init_database()` now enables SQLite foreign key enforcement immediately after setting WAL mode. Without this pragma, any future schema additions using `ON DELETE CASCADE`/`ON DELETE RESTRICT` are silently ignored, causing orphaned rows and skewed metrics (Issue #64)
+
 ## [1.10.17] - 2026-03-12
 
 ### Fixed

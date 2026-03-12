@@ -152,7 +152,7 @@ After release, verify:
 
 ---
 
-**Last Updated:** 2026-03-12 (v1.10.17)
+**Last Updated:** 2026-03-12 (v1.10.18)
 
 ---
 

@@ -46,6 +46,10 @@ CONTAINER_IMAGE = os.environ.get("CONTAINER_IMAGE", "evoclaw-agent:latest")
 CONTAINER_TIMEOUT = _env_int("CONTAINER_TIMEOUT", 30 * 60 * 1000) / 1000
 IDLE_TIMEOUT = _env_int("IDLE_TIMEOUT", 30 * 60 * 1000) / 1000
 MAX_CONCURRENT_CONTAINERS = _env_int("MAX_CONCURRENT_CONTAINERS", 5)
+# Per-container resource limits (Issue #61): prevent runaway agents from OOM-killing the host.
+# Set to empty string "" to disable the limit (e.g. CONTAINER_MEMORY="" CONTAINER_CPUS="").
+CONTAINER_MEMORY = os.environ.get("CONTAINER_MEMORY", "512m")
+CONTAINER_CPUS = os.environ.get("CONTAINER_CPUS", "1.0")
 
 # Timezone
 TIMEZONE = os.environ.get("TZ", os.environ.get("TIMEZONE", "UTC"))
