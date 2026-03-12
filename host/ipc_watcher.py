@@ -40,8 +40,21 @@ _dev_task_active: set[str] = set()
 _dev_task_lock = asyncio.Lock()
 
 
+def _sanitize_error_for_notification(error: str) -> str:
+    """Strip filesystem paths and sensitive details from error strings before
+    sending them to user-facing chat.  Only the exception type and a short
+    summary are kept to avoid leaking internal directory layout."""
+    import re
+    # Remove absolute paths (Unix and Windows style)
+    sanitized = re.sub(r"[/\\][^\s'\",:;()[\]{}]+", "<path>", error)
+    # Collapse whitespace and truncate
+    sanitized = " ".join(sanitized.split())
+    return sanitized[:120]
+
+
 def _notify_main_group_error(filename: str, error: str) -> None:
-    """Send IPC error notification to main group by writing a new IPC message file."""
+    """Send IPC error notification to main group by writing a new IPC message file.
+    The error text is sanitized to remove internal filesystem paths before delivery."""
     try:
         groups = db.get_all_registered_groups()
         main = next((g for g in groups if g.get("is_main")), None)
@@ -50,10 +63,13 @@ def _notify_main_group_error(filename: str, error: str) -> None:
         ipc_dir = config.DATA_DIR / "ipc" / main["folder"] / "messages"
         if not ipc_dir.exists():
             return
+        safe_error = _sanitize_error_for_notification(error)
+        # Use only the base filename (no directory) to avoid leaking host paths
+        safe_filename = _pathlib.Path(filename).name
         payload = {
             "type": "message",
             "chatJid": main["jid"],
-            "text": f"IPC Error: failed to process `{filename}`\n```\n{error[:300]}\n```",
+            "text": f"IPC Error: failed to process `{safe_filename}`\n```\n{safe_error}\n```",
         }
         out = ipc_dir / f"ipc_error_alert_{int(time.time() * 1000)}.json"
         out.write_text(json.dumps(payload), encoding="utf-8")

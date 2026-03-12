@@ -152,7 +152,33 @@ After release, verify:
 
 ---
 
-**Last Updated:** 2026-03-12 (v1.10.15)
+**Last Updated:** 2026-03-12 (v1.10.16)
+
+---
+
+## v1.10.16 Release Notes
+
+### Security Hardening + Thread-Safety + Channel Fixes
+
+**Security**:
+
+1. *WhatsApp HMAC-SHA256 webhook validation* (Issue #42): The WhatsApp webhook handler now reads the raw request body before parsing JSON, computes `HMAC-SHA256(WHATSAPP_APP_SECRET, body)`, and compares with the `X-Hub-Signature-256` header using `hmac.compare_digest`. Requests without a valid signature are rejected with HTTP 403. `WHATSAPP_APP_SECRET` is read from `.env` via `read_env_file`. When the secret is not configured the check is skipped for backward compatibility.
+
+2. *WebPortal CSRF token* (Issue #45): `/api/session` now returns a `csrf_token` UUID alongside the `session_id`. All POST requests to `/api/send` must include this token as the `X-CSRF-Token` header. The embedded JavaScript in the portal SPA automatically stores and sends the token. Since custom headers require a CORS preflight (which this server never approves), cross-origin forged requests are blocked.
+
+3. *immune.py MD5 -> SHA-256* (Issue #47): `_hash()` now uses `hashlib.sha256` instead of `hashlib.md5`. SHA-256 is collision-resistant, preventing adversaries from crafting two messages with the same hash to bypass spam counters or poison the threat database.
+
+**Fixed**:
+
+4. *DB read functions missing _db_lock* (Issue #43): 12 read-only DB functions called from background threads (dashboard, webportal, evolution daemon via `asyncio.to_thread`) now hold `_db_lock` for the full query: `get_all_registered_groups`, `get_all_tasks`, `get_evolution_runs`, `get_active_evolution_jids`, `get_recent_run_stats`, `get_group_genome`, `is_sender_blocked`, `get_recent_threat_count`, `get_immune_stats`, `get_evolution_log`, `get_due_tasks`, `get_pending_task_count`, `get_error_stats`.
+
+5. *Discord cross-event-loop calls* (Issue #44): `DiscordChannel.send_message()` and `send_typing()` now use `asyncio.run_coroutine_threadsafe()` to schedule discord.py coroutines onto the Discord client's background event loop, then await via `run_in_executor`. This fixes silent failures / `RuntimeError: no running event loop` when dispatching messages from the main asyncio event loop into the Discord client's separate loop.
+
+6. *Gmail _seen_message_ids unbounded* (Issue #46): Replaced `set[str]` with a `collections.OrderedDict` capped at 10,000 entries. When the cap is reached the oldest (least-recently-seen) entry is evicted. This prevents indefinite memory growth on long-running deployments with high Gmail volume.
+
+7. *Slack auth_test() per-message API call* (Issue #49): `auth_test()` is now called once during `connect()` and the resolved `team_id` is stored as `self._workspace_id`. The `handle_message` event handler reads the cached value instead of firing an API call on every message.
+
+8. *IPC error notification leaks internal paths* (Issue #50): `_notify_main_group_error()` now passes the error string through `_sanitize_error_for_notification()` which replaces absolute filesystem paths with `<path>` and truncates to 120 characters, preventing the internal directory layout from being exposed to chat group members.
 
 ---
 

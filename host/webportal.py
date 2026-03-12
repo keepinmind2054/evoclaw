@@ -135,14 +135,26 @@ class _WebPortalHandler(http.server.BaseHTTPRequestHandler):
         except Exception:
             jid = ""
         session_id = str(uuid.uuid4())
+        # Generate a per-session CSRF token. The client must echo this token as
+        # the X-CSRF-Token header on all subsequent POST requests. Because custom
+        # headers cannot be sent cross-origin without a CORS preflight (which this
+        # server never approves), this blocks cross-site request forgery attacks
+        # even when the browser re-sends Basic Auth credentials automatically.
+        csrf_token = str(uuid.uuid4())
         with _sessions_lock:
             # Evict stale sessions before checking the cap
             _expire_sessions()
             if len(_sessions) >= _MAX_SESSIONS:
                 self._send_json({"error": "Too many active sessions. Try again later."}, 503)
                 return
-            _sessions[session_id] = {"jid": jid, "messages": [], "created": time.time(), "last_seen": time.time()}
-        self._send_json({"session_id": session_id})
+            _sessions[session_id] = {
+                "jid": jid,
+                "messages": [],
+                "created": time.time(),
+                "last_seen": time.time(),
+                "csrf_token": csrf_token,
+            }
+        self._send_json({"session_id": session_id, "csrf_token": csrf_token})
 
     def _api_groups(self):
         groups = _get_registered_groups()
@@ -183,6 +195,14 @@ class _WebPortalHandler(http.server.BaseHTTPRequestHandler):
                 session = _sessions.get(session_id)
             if not session:
                 self._send_json({"error": "invalid session"}, 400)
+                return
+            # CSRF validation: require the per-session token as a custom header.
+            # Custom headers cannot be sent cross-origin without a CORS preflight,
+            # so this blocks CSRF attacks even when Basic Auth is cached by the browser.
+            expected_csrf = session.get("csrf_token", "")
+            provided_csrf = self.headers.get("X-CSRF-Token", "")
+            if expected_csrf and provided_csrf != expected_csrf:
+                self._send_json({"error": "CSRF token mismatch"}, 403)
                 return
             jid = session.get("jid", "")
             if not jid:
@@ -279,7 +299,7 @@ header h1 { font-size: 18px; color: #a78bfa; }
   <button id="send-btn" disabled>送出</button>
 </div>
 <script>
-let sessionId = null, lastTs = 0, pollTimer = null;
+let sessionId = null, csrfToken = null, lastTs = 0, pollTimer = null;
 
 async function init() {
   const res = await fetch('/api/groups');
@@ -296,8 +316,9 @@ async function init() {
 async function startSession(jid) {
   if (pollTimer) clearInterval(pollTimer);
   const res = await fetch('/api/session', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({jid}) });
-  const { session_id } = await res.json();
-  sessionId = session_id;
+  const data = await res.json();
+  sessionId = data.session_id;
+  csrfToken = data.csrf_token || null;
   lastTs = 0;
   document.getElementById('chat').innerHTML = '';
   document.getElementById('send-btn').disabled = false;
@@ -331,7 +352,9 @@ async function sendMessage() {
   input.style.height = '44px';
   const btn = document.getElementById('send-btn');
   btn.disabled = true;
-  await fetch('/api/send', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({session_id: sessionId, text}) });
+  const sendHeaders = {'Content-Type':'application/json'};
+  if (csrfToken) sendHeaders['X-CSRF-Token'] = csrfToken;
+  await fetch('/api/send', { method: 'POST', headers: sendHeaders, body: JSON.stringify({session_id: sessionId, text}) });
   const thinking = document.createElement('div');
   thinking.className = 'msg assistant thinking';
   thinking.id = 'thinking';

@@ -22,6 +22,9 @@ class SlackChannel:
         self._connected = False
         self._app: Optional[AsyncApp] = None
         self._handler: Optional[AsyncSocketModeHandler] = None
+        # Cached workspace ID resolved once at connect() — avoids an auth_test()
+        # API round-trip on every single incoming message.
+        self._workspace_id: str = "unknown"
 
         env = read_env_file(["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"])
         self._bot_token = env.get("SLACK_BOT_TOKEN", "")
@@ -46,6 +49,15 @@ class SlackChannel:
 
         self._app = AsyncApp(token=self._bot_token)
 
+        # Resolve and cache workspace_id once at startup — avoids an auth_test()
+        # API call on every incoming message which would hit Slack rate limits.
+        try:
+            auth_info = await self._app.client.auth_test()
+            self._workspace_id = auth_info.get("team_id", "unknown")
+            log.info("Slack workspace ID resolved: %s", self._workspace_id)
+        except Exception as exc:
+            log.warning("Slack auth_test() failed at connect: %s — using 'unknown'", exc)
+
         @self._app.event("message")
         async def handle_message(event, client, say):
             subtype = event.get("subtype")
@@ -59,12 +71,8 @@ class SlackChannel:
             channel_id = event.get("channel", "")
             user_id = event.get("user", "")
 
-            # Resolve workspace ID from auth
-            try:
-                auth_info = await client.auth_test()
-                workspace_id = auth_info.get("team_id", "unknown")
-            except Exception:
-                workspace_id = "unknown"
+            # Use cached workspace_id resolved once at connect()
+            workspace_id = self._workspace_id
 
             jid = self._jid(workspace_id, channel_id)
 

@@ -158,8 +158,10 @@ def get_immune_status() -> dict:
 
 
 def _hash(content: str) -> str:
-    """計算訊息內容的 MD5 hash，用於快速比對重複訊息（不需儲存原文）。"""
-    return hashlib.md5(content.encode("utf-8", errors="replace")).hexdigest()
+    """計算訊息內容的 SHA-256 hash，用於快速比對重複訊息（不需儲存原文）。
+    SHA-256 is used instead of MD5 to prevent hash-collision attacks that could
+    allow adversaries to bypass the spam counter or poison the threat database."""
+    return hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()
 
 
 def _track_message(sender_jid: str, content_hash: str) -> None:

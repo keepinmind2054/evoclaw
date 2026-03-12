@@ -345,10 +345,13 @@ def set_session(group_folder: str, session_id: str) -> None:
 # ── Registered groups ─────────────────────────────────────────────────────────
 
 def get_all_registered_groups() -> list[dict]:
-    """取得所有已登記群組的完整設定清單，啟動時載入到記憶體中。"""
-    db = get_db()
-    rows = db.execute("SELECT * FROM registered_groups").fetchall()
-    return [dict(r) for r in rows]
+    """取得所有已登記群組的完整設定清單，啟動時載入到記憶體中。
+    _db_lock is held to ensure thread-safety when called from background threads
+    (dashboard, webportal, evolution daemon via asyncio.to_thread)."""
+    with _db_lock:
+        db = get_db()
+        rows = db.execute("SELECT * FROM registered_groups").fetchall()
+        return [dict(r) for r in rows]
 
 def get_registered_group(jid: str) -> Optional[dict]:
     """根據 JID 查找單一群組設定，找不到時回傳 None。"""
@@ -415,25 +418,29 @@ def create_task(task_id: str, group_folder: str, chat_jid: str, prompt: str,
         db.commit()
 
 def get_all_tasks(group_folder: Optional[str] = None) -> list[dict]:
-    """取得所有排程任務（可選擇性地過濾特定群組）。"""
-    db = get_db()
-    if group_folder:
-        rows = db.execute("SELECT * FROM scheduled_tasks WHERE group_folder=?", (group_folder,)).fetchall()
-    else:
-        rows = db.execute("SELECT * FROM scheduled_tasks").fetchall()
-    return [dict(r) for r in rows]
+    """取得所有排程任務（可選擇性地過濾特定群組）。
+    _db_lock ensures thread-safety when called from dashboard/webportal threads."""
+    with _db_lock:
+        db = get_db()
+        if group_folder:
+            rows = db.execute("SELECT * FROM scheduled_tasks WHERE group_folder=?", (group_folder,)).fetchall()
+        else:
+            rows = db.execute("SELECT * FROM scheduled_tasks").fetchall()
+        return [dict(r) for r in rows]
 
 def get_due_tasks(now_ms: int) -> list[dict]:
     """
     查詢所有「已到期」的排程任務：狀態為 active 且 next_run <= 當前時間。
     scheduler loop 每次輪詢時呼叫此函式取得待執行的任務清單。
+    _db_lock ensures thread-safety when called from the scheduler loop.
     """
-    db = get_db()
-    rows = db.execute("""
-        SELECT * FROM scheduled_tasks
-        WHERE status='active' AND next_run IS NOT NULL AND next_run <= ?
-    """, (now_ms,)).fetchall()
-    return [dict(r) for r in rows]
+    with _db_lock:
+        db = get_db()
+        rows = db.execute("""
+            SELECT * FROM scheduled_tasks
+            WHERE status='active' AND next_run IS NOT NULL AND next_run <= ?
+        """, (now_ms,)).fetchall()
+        return [dict(r) for r in rows]
 
 def update_task(task_id: str, **kwargs) -> None:
     """
@@ -501,15 +508,17 @@ def get_evolution_runs(jid: str, days: int = 7) -> list[dict]:
     取得指定群組在過去 days 天內的所有執行記錄，用於計算適應度分數。
 
     按時間倒序排列（最新的在前），最多取 200 筆避免計算過慢。
+    _db_lock ensures thread-safety (called from evolution daemon via asyncio.to_thread).
     """
-    db = get_db()
-    rows = db.execute("""
-        SELECT success, response_ms, retry_count, timestamp
-        FROM evolution_runs
-        WHERE jid = ? AND timestamp > datetime('now', ? || ' days')
-        ORDER BY timestamp DESC LIMIT 200
-    """, (jid, f"-{days}")).fetchall()
-    return [dict(r) for r in rows]
+    with _db_lock:
+        db = get_db()
+        rows = db.execute("""
+            SELECT success, response_ms, retry_count, timestamp
+            FROM evolution_runs
+            WHERE jid = ? AND timestamp > datetime('now', ? || ' days')
+            ORDER BY timestamp DESC LIMIT 200
+        """, (jid, f"-{days}")).fetchall()
+        return [dict(r) for r in rows]
 
 
 def get_active_evolution_jids(days: int = 7) -> list[str]:
@@ -518,34 +527,40 @@ def get_active_evolution_jids(days: int = 7) -> list[str]:
 
     演化 daemon 用此函式找出需要評估的群組，
     避免對沒有活躍數據的群組做無意義的演化計算。
+    _db_lock ensures thread-safety (called from evolution daemon via asyncio.to_thread).
     """
-    db = get_db()
-    rows = db.execute("""
-        SELECT DISTINCT jid FROM evolution_runs
-        WHERE timestamp > datetime('now', ? || ' days')
-    """, (f"-{days}",)).fetchall()
-    return [r["jid"] for r in rows]
+    with _db_lock:
+        db = get_db()
+        rows = db.execute("""
+            SELECT DISTINCT jid FROM evolution_runs
+            WHERE timestamp > datetime('now', ? || ' days')
+        """, (f"-{days}",)).fetchall()
+        return [r["jid"] for r in rows]
 
 
 def get_recent_run_stats(minutes: int = 5) -> Optional[dict]:
     """
     取得近 minutes 分鐘內的執行統計（數量與平均回應時間）。
     用於 get_system_load() 估算當前系統負載。
+    _db_lock ensures thread-safety when called from dashboard/webportal threads.
     """
-    db = get_db()
-    row = db.execute("""
-        SELECT COUNT(*) as count, AVG(response_ms) as avg_ms
-        FROM evolution_runs
-        WHERE timestamp > datetime('now', ? || ' minutes')
-    """, (f"-{minutes}",)).fetchone()
-    return dict(row) if row else None
+    with _db_lock:
+        db = get_db()
+        row = db.execute("""
+            SELECT COUNT(*) as count, AVG(response_ms) as avg_ms
+            FROM evolution_runs
+            WHERE timestamp > datetime('now', ? || ' minutes')
+        """, (f"-{minutes}",)).fetchone()
+        return dict(row) if row else None
 
 
 def get_group_genome(jid: str) -> Optional[dict]:
-    """取得指定群組的行為基因組，找不到時回傳 None（表示尚未演化過）。"""
-    db = get_db()
-    row = db.execute("SELECT * FROM group_genome WHERE jid = ?", (jid,)).fetchone()
-    return dict(row) if row else None
+    """取得指定群組的行為基因組，找不到時回傳 None（表示尚未演化過）。
+    _db_lock ensures thread-safety (called from evolution daemon via asyncio.to_thread)."""
+    with _db_lock:
+        db = get_db()
+        row = db.execute("SELECT * FROM group_genome WHERE jid = ?", (jid,)).fetchone()
+        return dict(row) if row else None
 
 
 def upsert_group_genome(jid: str, **kwargs) -> None:
@@ -626,12 +641,14 @@ def is_sender_blocked(sender_jid: str) -> bool:
     """
     檢查指定發送者是否已被免疫系統封鎖。
     被封鎖的發送者的任何訊息都會被靜默丟棄。
+    _db_lock ensures thread-safety when called from immune check in async context.
     """
-    db = get_db()
-    row = db.execute("""
-        SELECT 1 FROM immune_threats WHERE sender_jid = ? AND blocked = 1 LIMIT 1
-    """, (sender_jid,)).fetchone()
-    return row is not None
+    with _db_lock:
+        db = get_db()
+        row = db.execute("""
+            SELECT 1 FROM immune_threats WHERE sender_jid = ? AND blocked = 1 LIMIT 1
+        """, (sender_jid,)).fetchone()
+        return row is not None
 
 
 def block_sender(sender_jid: str) -> None:
@@ -646,27 +663,31 @@ def get_recent_threat_count(sender_jid: str, pattern_hash: str, hours: int = 1) 
     """
     取得某個發送者在近 hours 小時內傳送特定 hash 訊息的次數。
     用於垃圾訊息偵測（同內容重複發送判定）。
+    _db_lock ensures thread-safety when called from immune check in async context.
     """
-    db = get_db()
-    row = db.execute("""
-        SELECT count FROM immune_threats
-        WHERE sender_jid = ? AND pattern_hash = ?
-        AND last_seen > datetime('now', ? || ' hours')
-    """, (sender_jid, pattern_hash, f"-{hours}")).fetchone()
-    return row["count"] if row else 0
+    with _db_lock:
+        db = get_db()
+        row = db.execute("""
+            SELECT count FROM immune_threats
+            WHERE sender_jid = ? AND pattern_hash = ?
+            AND last_seen > datetime('now', ? || ' hours')
+        """, (sender_jid, pattern_hash, f"-{hours}")).fetchone()
+        return row["count"] if row else 0
 
 
 def get_immune_stats() -> dict:
-    """取得免疫系統的摘要統計，用於監控面板或 IPC 查詢。"""
-    db = get_db()
-    row = db.execute("""
-        SELECT
-            COUNT(*) as total_threats,
-            SUM(blocked) as blocked_senders,
-            SUM(count) as total_incidents
-        FROM immune_threats
-    """).fetchone()
-    return dict(row) if row else {"total_threats": 0, "blocked_senders": 0, "total_incidents": 0}
+    """取得免疫系統的摘要統計，用於監控面板或 IPC 查詢。
+    _db_lock ensures thread-safety when called from dashboard/webportal threads."""
+    with _db_lock:
+        db = get_db()
+        row = db.execute("""
+            SELECT
+                COUNT(*) as total_threats,
+                SUM(blocked) as blocked_senders,
+                SUM(count) as total_incidents
+            FROM immune_threats
+        """).fetchone()
+        return dict(row) if row else {"total_threats": 0, "blocked_senders": 0, "total_incidents": 0}
 
 
 def log_evolution_event(jid: str, event_type: str, **kwargs) -> None:
@@ -704,22 +725,25 @@ def get_evolution_log(jid: str = None, limit: int = 100, event_type: str = None)
       jid        — 指定群組（None = 所有群組）
       limit      — 最多回傳幾筆（預設 100）
       event_type — 過濾特定事件類型（None = 全部）
+
+    _db_lock ensures thread-safety when called from dashboard/webportal threads.
     """
-    db = get_db()
-    clauses = []
-    params = []
-    if jid:
-        clauses.append("jid = ?")
-        params.append(jid)
-    if event_type:
-        clauses.append("event_type = ?")
-        params.append(event_type)
-    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    params.append(limit)
-    rows = db.execute(
-        f"SELECT * FROM evolution_log {where} ORDER BY timestamp DESC LIMIT ?", params
-    ).fetchall()
-    return [dict(r) for r in rows]
+    with _db_lock:
+        db = get_db()
+        clauses = []
+        params = []
+        if jid:
+            clauses.append("jid = ?")
+            params.append(jid)
+        if event_type:
+            clauses.append("event_type = ?")
+            params.append(event_type)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        rows = db.execute(
+            f"SELECT * FROM evolution_log {where} ORDER BY timestamp DESC LIMIT ?", params
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 # ── Dev Engine ──────────────────────────────────────────────────────────────────
 def log_dev_event(jid: str, event_type: str, stage: str, notes: str) -> None:
@@ -766,14 +790,16 @@ def get_pending_task_count() -> int:
     """Return the number of active scheduled tasks (status='active') that are overdue.
 
     Used by health_monitor to gauge scheduler backlog.
+    _db_lock ensures thread-safety when called from health_monitor loop.
     """
-    db = get_db()
-    now_ms = int(time.time() * 1000)
-    row = db.execute(
-        "SELECT COUNT(*) as cnt FROM scheduled_tasks WHERE status='active' AND next_run IS NOT NULL AND next_run <= ?",
-        (now_ms,),
-    ).fetchone()
-    return row["cnt"] if row else 0
+    with _db_lock:
+        db = get_db()
+        now_ms = int(time.time() * 1000)
+        row = db.execute(
+            "SELECT COUNT(*) as cnt FROM scheduled_tasks WHERE status='active' AND next_run IS NOT NULL AND next_run <= ?",
+            (now_ms,),
+        ).fetchone()
+        return row["cnt"] if row else 0
 
 
 def get_error_stats(minutes: int = 5) -> dict:
@@ -781,22 +807,24 @@ def get_error_stats(minutes: int = 5) -> dict:
 
     Used by health_monitor to calculate recent error rate.
     Returns dict with keys: total, errors, successes.
+    _db_lock ensures thread-safety when called from health_monitor loop.
     """
-    db = get_db()
-    row = db.execute(
-        """
-        SELECT
-            COUNT(*) as total,
-            SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as errors,
-            SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as successes
-        FROM evolution_runs
-        WHERE timestamp > datetime('now', ? || ' minutes')
-        """,
-        (f"-{minutes}",),
-    ).fetchone()
-    if row and row["total"]:
-        return {"total": row["total"], "errors": row["errors"] or 0, "successes": row["successes"] or 0}
-    return {"total": 0, "errors": 0, "successes": 0}
+    with _db_lock:
+        db = get_db()
+        row = db.execute(
+            """
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as errors,
+                SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as successes
+            FROM evolution_runs
+            WHERE timestamp > datetime('now', ? || ' minutes')
+            """,
+            (f"-{minutes}",),
+        ).fetchone()
+        if row and row["total"]:
+            return {"total": row["total"], "errors": row["errors"] or 0, "successes": row["successes"] or 0}
+        return {"total": 0, "errors": 0, "successes": 0}
 
 
 def prune_old_logs(days: int = 30) -> None:

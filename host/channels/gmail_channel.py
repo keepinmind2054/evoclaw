@@ -1,6 +1,7 @@
 """Gmail channel implementation using Gmail API via google-api-python-client"""
 import asyncio
 import base64
+import collections
 import email as email_lib
 import logging
 import os
@@ -35,7 +36,10 @@ class GmailChannel:
         self._connected = False
         self._service = None
         self._poll_task: Optional[asyncio.Task] = None
-        self._seen_message_ids: set[str] = set()
+        # Bounded LRU cache for seen message IDs — prevents unbounded memory growth
+        # on long-running deployments. Oldest entries are evicted when full.
+        self._seen_message_ids: collections.OrderedDict = collections.OrderedDict()
+        self._SEEN_IDS_MAX = 10_000
         self._email_address: Optional[str] = None
 
         env = read_env_file([
@@ -151,8 +155,12 @@ class GmailChannel:
         for msg_stub in messages:
             msg_id = msg_stub["id"]
             if msg_id in self._seen_message_ids:
+                self._seen_message_ids.move_to_end(msg_id)
                 continue
-            self._seen_message_ids.add(msg_id)
+            # Add to LRU cache; evict oldest entry if cap reached
+            self._seen_message_ids[msg_id] = True
+            if len(self._seen_message_ids) > self._SEEN_IDS_MAX:
+                self._seen_message_ids.popitem(last=False)
 
             def fetch_message(mid=msg_id):
                 return (

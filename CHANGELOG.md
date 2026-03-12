@@ -5,6 +5,20 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.16] - 2026-03-12
+
+### Security
+- WhatsApp webhook now validates the `X-Hub-Signature-256` HMAC-SHA256 header on every delivery; requests that fail verification are rejected with HTTP 403, preventing spoofed payloads from unauthenticated callers (Issue #42)
+- WebPortal session endpoint now returns a per-session CSRF token; all POST requests (`/api/send`) must echo the token as `X-CSRF-Token`, blocking cross-site request forgery attacks even when Basic Auth credentials are browser-cached (Issue #45)
+- `immune.py` content fingerprinting upgraded from MD5 to SHA-256, preventing hash-collision attacks that could allow adversaries to bypass spam counters or poison the threat database (Issue #47)
+
+### Fixed
+- DB read functions called from background threads now hold `_db_lock`: `get_all_registered_groups`, `get_all_tasks`, `get_evolution_runs`, `get_active_evolution_jids`, `get_recent_run_stats`, `get_group_genome`, `is_sender_blocked`, `get_recent_threat_count`, `get_immune_stats`, `get_evolution_log`, `get_due_tasks`, `get_pending_task_count`, `get_error_stats` — eliminates `database is locked` errors and stale reads under concurrent load from dashboard/webportal and evolution daemon (Issue #43)
+- Discord `send_message()` and `send_typing()` now use `asyncio.run_coroutine_threadsafe()` to bridge the main event loop and the Discord client's background event loop, fixing cross-loop `RuntimeError` that silently prevented Discord message delivery (Issue #44)
+- Gmail channel `_seen_message_ids` replaced with a bounded `OrderedDict` (cap 10,000 entries, LRU eviction), preventing unbounded memory growth on long-running deployments processing high volumes of email (Issue #46)
+- Slack `auth_test()` is now called once during `connect()` and the workspace ID is cached on `self._workspace_id`; previously called on every single incoming message, hitting Slack rate limits at high message rates (Issue #49)
+- `ipc_watcher._notify_main_group_error()` now sanitizes error strings before sending them to the main group chat — filesystem paths are replaced with `<path>` and output is truncated to 120 characters, preventing internal directory layout leakage to chat members (Issue #50)
+
 ## [1.10.15] - 2026-03-12
 
 ### Added

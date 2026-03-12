@@ -139,28 +139,43 @@ class DiscordChannel:
                     return None
             return channel
 
+    async def _run_in_discord_loop(self, coro):
+        """Schedule a coroutine on the Discord client's event loop and await its result.
+
+        The Discord client runs in a background thread with its own event loop
+        (self._loop).  Awaiting discord.py coroutines directly from the main
+        asyncio event loop raises RuntimeError or silently hangs.  This helper
+        bridges the two loops safely using asyncio.run_coroutine_threadsafe().
+        """
+        if self._loop is None or self._loop.is_closed():
+            raise RuntimeError("Discord event loop not running")
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        # Await the concurrent.futures.Future from the main event loop
+        return await asyncio.get_event_loop().run_in_executor(None, future.result, 30)
+
     async def send_message(self, jid: str, text: str) -> None:
         if not self.is_connected():
             log.warning("Discord send_message called but channel not connected")
             return
-        channel = await self._get_channel(jid)
-        if channel is None:
-            return
         try:
-            await channel.send(text)
+            async def _send():
+                channel = await self._get_channel(jid)
+                if channel is not None:
+                    await channel.send(text)
+            await self._run_in_discord_loop(_send())
         except Exception as exc:
             log.error("Discord send_message exception: %s", exc)
 
     async def send_typing(self, jid: str) -> None:
         if not self.is_connected():
             return
-        channel = await self._get_channel(jid)
-        if channel is None:
-            return
         try:
-            async with channel.typing():
-                # Brief pause to show the typing indicator before the message is sent
-                await asyncio.sleep(0.5)
+            async def _type():
+                channel = await self._get_channel(jid)
+                if channel is not None:
+                    async with channel.typing():
+                        await asyncio.sleep(0.5)
+            await self._run_in_discord_loop(_type())
         except Exception as exc:
             log.debug("Discord send_typing exception: %s", exc)
 

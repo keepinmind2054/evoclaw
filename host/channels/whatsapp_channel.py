@@ -1,5 +1,7 @@
 """WhatsApp channel implementation using Meta WhatsApp Cloud API (HTTP REST)"""
 import asyncio
+import hashlib
+import hmac
 import logging
 import os
 from typing import Callable, Optional
@@ -29,10 +31,14 @@ class WhatsAppChannel:
             "WHATSAPP_PHONE_NUMBER_ID",
             "WHATSAPP_VERIFY_TOKEN",
             "WHATSAPP_WEBHOOK_PORT",
+            "WHATSAPP_APP_SECRET",
         ])
         self._token = env.get("WHATSAPP_TOKEN", "")
         self._phone_number_id = env.get("WHATSAPP_PHONE_NUMBER_ID", "")
         self._verify_token = env.get("WHATSAPP_VERIFY_TOKEN", "")
+        # App Secret is used to verify the X-Hub-Signature-256 header on each
+        # webhook delivery — prevents spoofed payloads from non-Meta senders.
+        self._app_secret = env.get("WHATSAPP_APP_SECRET", "")
         port_str = env.get("WHATSAPP_WEBHOOK_PORT") or os.environ.get("WHATSAPP_WEBHOOK_PORT") or "8080"
         try:
             self._webhook_port = int(port_str)
@@ -60,10 +66,39 @@ class WhatsAppChannel:
         return web.Response(status=403, text="Forbidden")
 
     async def _handle_webhook(self, request: web.Request) -> web.Response:
-        try:
-            body = await request.json()
-        except Exception:
-            return web.Response(status=400, text="Bad Request")
+        # --- HMAC-SHA256 signature verification ---
+        # Meta includes X-Hub-Signature-256: sha256=<hex> on every legitimate delivery.
+        # If WHATSAPP_APP_SECRET is configured, reject requests that fail verification
+        # to prevent spoofed payloads from unauthenticated callers.
+        if self._app_secret:
+            raw_body = await request.read()
+            sig_header = request.headers.get("X-Hub-Signature-256", "")
+            if sig_header.startswith("sha256="):
+                expected = hmac.new(
+                    self._app_secret.encode("utf-8"),
+                    raw_body,
+                    hashlib.sha256,
+                ).hexdigest()
+                provided = sig_header[len("sha256="):]
+                if not hmac.compare_digest(expected, provided):
+                    log.warning("WhatsApp webhook signature mismatch — request rejected")
+                    return web.Response(status=403, text="Forbidden")
+            else:
+                log.warning(
+                    "WhatsApp webhook received without X-Hub-Signature-256 header "
+                    "(WHATSAPP_APP_SECRET is set). Request rejected."
+                )
+                return web.Response(status=403, text="Forbidden")
+            try:
+                import json as _json
+                body = _json.loads(raw_body)
+            except Exception:
+                return web.Response(status=400, text="Bad Request")
+        else:
+            try:
+                body = await request.json()
+            except Exception:
+                return web.Response(status=400, text="Bad Request")
 
         entries = body.get("entry", [])
         for entry in entries:
