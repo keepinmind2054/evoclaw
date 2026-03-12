@@ -528,11 +528,30 @@ async def main() -> None:
     _channel_module_map = {
         "telegram": "channels.telegram_channel",
         "whatsapp": "channels.whatsapp_channel",
+        "discord": "channels.discord_channel",
+        "slack": "channels.slack_channel",
+        "gmail": "channels.gmail_channel",
     }
     _channel_class_map = {
         "telegram": "TelegramChannel",
         "whatsapp": "WhatsAppChannel",
+        "discord": "DiscordChannel",
+        "slack": "SlackChannel",
+        "gmail": "GmailChannel",
     }
+
+    # Validate ENABLED_CHANNELS at startup: warn loudly for unrecognised names
+    # so operators catch typos immediately rather than silently running with no channels.
+    _known_channels = set(_channel_module_map.keys())
+    _invalid_channels = [c for c in config.ENABLED_CHANNELS if c and c not in _known_channels]
+    if _invalid_channels:
+        log.error(
+            "ENABLED_CHANNELS contains unrecognised channel name(s): %s — "
+            "known channels are: %s. These will be skipped. "
+            "Check your ENABLED_CHANNELS environment variable for typos.",
+            ", ".join(_invalid_channels),
+            ", ".join(sorted(_known_channels)),
+        )
 
     _loaded_channels = []
     for channel_name in config.ENABLED_CHANNELS:

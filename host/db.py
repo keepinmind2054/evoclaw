@@ -337,9 +337,10 @@ def get_session(group_folder: str) -> Optional[str]:
 
 def set_session(group_folder: str, session_id: str) -> None:
     """儲存或更新某群組的 Claude session ID（container 每次執行後可能產生新 session）。"""
-    db = get_db()
-    db.execute("INSERT OR REPLACE INTO sessions (group_folder, session_id) VALUES (?, ?)", (group_folder, session_id))
-    db.commit()
+    with _db_lock:
+        db = get_db()
+        db.execute("INSERT OR REPLACE INTO sessions (group_folder, session_id) VALUES (?, ?)", (group_folder, session_id))
+        db.commit()
 
 # ── Registered groups ─────────────────────────────────────────────────────────
 
@@ -377,18 +378,19 @@ def set_registered_group(jid: str, name: str, folder: str, trigger_pattern: Opti
     are demoted to is_main=False before inserting/updating this record.
     """
     _validate_folder(folder)
-    db = get_db()
-    if is_main:
-        # Enforce single main group invariant — demote all other groups
-        db.execute("UPDATE registered_groups SET is_main = 0 WHERE jid != ?", (jid,))
-    db.execute("""
-        INSERT OR REPLACE INTO registered_groups
-        (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (jid, name, folder, trigger_pattern, int(time.time() * 1000),
-          json.dumps(container_config) if container_config else None,
-          int(requires_trigger), int(is_main)))
-    db.commit()
+    with _db_lock:
+        db = get_db()
+        if is_main:
+            # Enforce single main group invariant — demote all other groups
+            db.execute("UPDATE registered_groups SET is_main = 0 WHERE jid != ?", (jid,))
+        db.execute("""
+            INSERT OR REPLACE INTO registered_groups
+            (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (jid, name, folder, trigger_pattern, int(time.time() * 1000),
+              json.dumps(container_config) if container_config else None,
+              int(requires_trigger), int(is_main)))
+        db.commit()
 
 # ── Scheduled tasks ───────────────────────────────────────────────────────────
 
@@ -402,14 +404,15 @@ def create_task(task_id: str, group_folder: str, chat_jid: str, prompt: str,
     由 _compute_next_run 根據 schedule_type 計算。
     context_mode 控制 container 是否帶入對話歷史（"group" = 帶入, "isolated" = 不帶入）。
     """
-    db = get_db()
-    db.execute("""
-        INSERT INTO scheduled_tasks
-        (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, next_run, created_at, context_mode)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (task_id, group_folder, chat_jid, prompt, schedule_type, schedule_value,
-          next_run, int(time.time() * 1000), context_mode))
-    db.commit()
+    with _db_lock:
+        db = get_db()
+        db.execute("""
+            INSERT INTO scheduled_tasks
+            (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, next_run, created_at, context_mode)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (task_id, group_folder, chat_jid, prompt, schedule_type, schedule_value,
+              next_run, int(time.time() * 1000), context_mode))
+        db.commit()
 
 def get_all_tasks(group_folder: Optional[str] = None) -> list[dict]:
     """取得所有排程任務（可選擇性地過濾特定群組）。"""
@@ -439,20 +442,22 @@ def update_task(task_id: str, **kwargs) -> None:
     使用白名單（allowed）過濾 kwargs，防止 SQL injection 或意外修改不該改的欄位。
     動態產生 SET 子句，只更新傳入的欄位，不影響其他欄位。
     """
-    db = get_db()
     allowed = {"prompt", "schedule_type", "schedule_value", "next_run", "last_run", "last_result", "status", "context_mode"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return
     set_clause = ", ".join(f"{k}=?" for k in fields)
-    db.execute(f"UPDATE scheduled_tasks SET {set_clause} WHERE id=?", (*fields.values(), task_id))
-    db.commit()
+    with _db_lock:
+        db = get_db()
+        db.execute(f"UPDATE scheduled_tasks SET {set_clause} WHERE id=?", (*fields.values(), task_id))
+        db.commit()
 
 def delete_task(task_id: str) -> None:
     """永久刪除排程任務（cancel 操作）。"""
-    db = get_db()
-    db.execute("DELETE FROM scheduled_tasks WHERE id=?", (task_id,))
-    db.commit()
+    with _db_lock:
+        db = get_db()
+        db.execute("DELETE FROM scheduled_tasks WHERE id=?", (task_id,))
+        db.commit()
 
 def log_task_run(task_id: str, run_at: int, duration_ms: int, status: str,
                  result: Optional[str], error: Optional[str]) -> None:
@@ -551,30 +556,28 @@ def upsert_group_genome(jid: str, **kwargs) -> None:
     若 JID 已存在則只更新傳入的欄位，不覆蓋未傳入的欄位。
     動態產生 SET 子句（白名單過濾防止注入）。
     """
-    db = get_db()
     allowed = {"response_style", "formality", "technical_depth", "generation"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
 
-    # 先確保記錄存在（INSERT OR IGNORE 建立預設值）
-    db.execute("""
-        INSERT OR IGNORE INTO group_genome (jid) VALUES (?)
-    """, (jid,))
+    with _db_lock:
+        db = get_db()
+        # 先確保記錄存在（INSERT OR IGNORE 建立預設值）
+        db.execute("""
+            INSERT OR IGNORE INTO group_genome (jid) VALUES (?)
+        """, (jid,))
 
-    if fields:
-        fields["updated_at"] = "datetime('now')"
-        # updated_at 用 SQL 函式，需特殊處理
-        set_parts = []
-        values = []
-        for k, v in fields.items():
-            if k == "updated_at":
-                set_parts.append(f"{k} = datetime('now')")
-            else:
+        if fields:
+            # updated_at 用 SQL 函式，需特殊處理
+            set_parts = []
+            values = []
+            for k, v in fields.items():
                 set_parts.append(f"{k} = ?")
                 values.append(v)
-        set_clause = ", ".join(set_parts)
-        db.execute(f"UPDATE group_genome SET {set_clause} WHERE jid = ?",
-                   (*values, jid))
-    db.commit()
+            set_parts.append("updated_at = datetime('now')")
+            set_clause = ", ".join(set_parts)
+            db.execute(f"UPDATE group_genome SET {set_clause} WHERE jid = ?",
+                       (*values, jid))
+        db.commit()
 
 
 def record_immune_threat(sender_jid: str, pattern_hash: str, threat_type: str) -> int:
@@ -628,9 +631,10 @@ def is_sender_blocked(sender_jid: str) -> bool:
 
 def block_sender(sender_jid: str) -> None:
     """將指定發送者的所有威脅記錄標記為已封鎖（blocked = 1）。"""
-    db = get_db()
-    db.execute("UPDATE immune_threats SET blocked = 1 WHERE sender_jid = ?", (sender_jid,))
-    db.commit()
+    with _db_lock:
+        db = get_db()
+        db.execute("UPDATE immune_threats SET blocked = 1 WHERE sender_jid = ?", (sender_jid,))
+        db.commit()
 
 
 def get_recent_threat_count(sender_jid: str, pattern_hash: str, hours: int = 1) -> int:
@@ -671,7 +675,6 @@ def log_evolution_event(jid: str, event_type: str, **kwargs) -> None:
       - "cycle_end"：演化週期結束（含統計）
       - "skipped_low_samples"：樣本不足，跳過演化
     """
-    db = get_db()
     allowed = {"generation_before", "generation_after", "fitness_score",
                "avg_response_ms", "genome_before", "genome_after", "notes"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
@@ -682,8 +685,10 @@ def log_evolution_event(jid: str, event_type: str, **kwargs) -> None:
     cols = ", ".join(["jid", "event_type"] + list(fields.keys()))
     placeholders = ", ".join(["?"] * (2 + len(fields)))
     values = [jid, event_type] + list(fields.values())
-    db.execute(f"INSERT INTO evolution_log ({cols}) VALUES ({placeholders})", values)
-    db.commit()
+    with _db_lock:
+        db = get_db()
+        db.execute(f"INSERT INTO evolution_log ({cols}) VALUES ({placeholders})", values)
+        db.commit()
 
 
 def get_evolution_log(jid: str = None, limit: int = 100, event_type: str = None) -> list:
@@ -717,12 +722,13 @@ def log_dev_event(jid: str, event_type: str, stage: str, notes: str) -> None:
     記錄開發事件到 dev_events 表。
     用於追蹤 7 階段開發流程的進度與結果。
     """
-    db = get_db()
-    db.execute("""
-        INSERT INTO dev_events (jid, event_type, stage, notes)
-        VALUES (?, ?, ?, ?)
-    """, (jid, event_type, stage, notes))
-    db.commit()
+    with _db_lock:
+        db = get_db()
+        db.execute("""
+            INSERT INTO dev_events (jid, event_type, stage, notes)
+            VALUES (?, ?, ?, ?)
+        """, (jid, event_type, stage, notes))
+        db.commit()
 
 def get_dev_events(jid: str = None, limit: int = 100, stage: str = None) -> list:
     """

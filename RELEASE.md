@@ -152,7 +152,49 @@ After release, verify:
 
 ---
 
-**Last Updated:** 2026-03-12 (v1.10.12)
+**Last Updated:** 2026-03-12 (v1.10.13)
+
+---
+
+## v1.10.13 Release Notes
+
+### Third Round Security and Reliability Improvements
+
+**Security Fixes**:
+
+1. *Agent file tool path sandbox* (Issue #29): `tool_read`, `tool_write`, and `tool_edit` in the container agent now validate that the resolved path is within `/workspace/` before executing. This blocks prompt-injection or jailbreak attacks that attempt to read sensitive container files like `/proc/self/environ` (which contains env vars) or `/etc/passwd`.
+
+2. *Skills `post_apply` command allowlist* (Issue #28): Skill manifest `post_apply` commands are now checked against an allowlist of safe command prefixes (`pip install`, `npm install`, `pytest`, etc.). Commands not matching the allowlist are skipped with a warning, preventing malicious skill manifests from running arbitrary host OS commands.
+
+3. *IPC path traversal prevention* (Issue #26): `_resolve_container_path()` now resolves and validates the computed host path stays within the expected root directory, blocking container-crafted paths like `/workspace/group/../../etc/passwd` from escaping the intended directory.
+
+**Reliability Fixes**:
+
+4. *WebPortal `_pending_replies` memory leak* (Issue #21): The `_pending_replies` dict was never cleaned up, accumulating entries indefinitely as sessions expired. It is now lazily evicted on every `/api/send` call by removing entries whose session no longer exists.
+
+5. *DB write functions missing `_db_lock`* (Issue #22): Nine DB write functions (`set_session`, `create_task`, `update_task`, `delete_task`, `set_registered_group`, `upsert_group_genome`, `block_sender`, `log_evolution_event`, `log_dev_event`) were called from background threads without holding `_db_lock`. All now acquire the lock, preventing potential `database is locked` errors.
+
+6. *WebPortal bypasses rate limiter* (Issue #25): The WebPortal `/api/send` endpoint wrote messages directly to the database without checking the per-group rate limiter, allowing authenticated WebPortal users to flood the GroupQueue. Rate limiting is now applied consistently.
+
+7. *Partial message delivery on chunked send* (Issue #27): `route_outbound()` silently dropped remaining chunks when one chunk failed to send. It now retries each chunk up to 2 times, and if all retries fail, notifies the user that the response was truncated.
+
+**Added**:
+
+8. *WebPortal session count cap* (Issue #23): `_sessions` is now capped at 500 concurrent sessions. New session creation triggers `_expire_sessions()` immediately. Per-session message lists are capped at 200 entries to bound per-session memory.
+
+9. *WebPortal body size limit* (Issue #24): `_read_body()` now enforces a 64 KB maximum POST body size (HTTP 413 for oversized requests). Individual message text is capped at 32 KB.
+
+10. *ENABLED_CHANNELS startup validation* (Issue #30): Unrecognised channel names in `ENABLED_CHANNELS` now trigger a clear `ERROR` log entry at startup, so operators immediately see typos rather than silently running with no active channels.
+
+**Upgrade**:
+
+Rebuild the agent container image to pick up the file tool path sandbox fix. All other changes are in the host process only.
+
+```bash
+git pull
+docker build -t evoclaw-agent:1.10.13 container/
+python run.py start
+```
 
 ---
 

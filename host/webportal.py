@@ -25,6 +25,12 @@ _sessions_lock = threading.Lock()
 _SESSION_TTL_SECONDS = 3600  # 1 hour
 _poll_count = 0  # counter for lazy expiry (expire every 60 polls)
 
+# Caps to prevent unbounded memory growth
+_MAX_SESSIONS = 500            # maximum concurrent WebPortal sessions
+_MAX_SESSION_MESSAGES = 200    # maximum messages stored per session
+_MAX_BODY_SIZE = 64 * 1024     # 64 KB — reject larger POST bodies (prevent OOM)
+_MAX_TEXT_SIZE = 32 * 1024     # 32 KB — reject individual messages larger than this
+
 
 def _expire_sessions() -> None:
     """Remove sessions that have been idle longer than _SESSION_TTL_SECONDS."""
@@ -107,6 +113,11 @@ class _WebPortalHandler(http.server.BaseHTTPRequestHandler):
 
     def _read_body(self) -> bytes:
         length = int(self.headers.get("Content-Length", 0))
+        if length > _MAX_BODY_SIZE:
+            self.send_response(413)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            raise ValueError(f"Request body too large: {length} bytes (max {_MAX_BODY_SIZE})")
         return self.rfile.read(length) if length else b""
 
     def _send_json(self, data: dict, status: int = 200):
@@ -125,6 +136,11 @@ class _WebPortalHandler(http.server.BaseHTTPRequestHandler):
             jid = ""
         session_id = str(uuid.uuid4())
         with _sessions_lock:
+            # Evict stale sessions before checking the cap
+            _expire_sessions()
+            if len(_sessions) >= _MAX_SESSIONS:
+                self._send_json({"error": "Too many active sessions. Try again later."}, 503)
+                return
             _sessions[session_id] = {"jid": jid, "messages": [], "created": time.time(), "last_seen": time.time()}
         self._send_json({"session_id": session_id})
 
@@ -159,6 +175,10 @@ class _WebPortalHandler(http.server.BaseHTTPRequestHandler):
             if not text:
                 self._send_json({"error": "empty message"}, 400)
                 return
+            # Reject excessively large messages before hitting the DB
+            if len(text) > _MAX_TEXT_SIZE:
+                self._send_json({"error": f"Message too large (max {_MAX_TEXT_SIZE} chars)"}, 413)
+                return
             with _sessions_lock:
                 session = _sessions.get(session_id)
             if not session:
@@ -168,16 +188,23 @@ class _WebPortalHandler(http.server.BaseHTTPRequestHandler):
             if not jid:
                 self._send_json({"error": "no group selected"}, 400)
                 return
-            # Store user message in session
+            # Store user message in session (cap per-session message list to prevent OOM)
             ts = time.time()
             with _sessions_lock:
-                _sessions[session_id]["messages"].append({"role": "user", "text": text, "ts": ts})
+                msgs = _sessions[session_id]["messages"]
+                if len(msgs) >= _MAX_SESSION_MESSAGES:
+                    msgs.pop(0)  # evict oldest to make room
+                msgs.append({"role": "user", "text": text, "ts": ts})
             # Write to DB so main loop processes it
             msg_id = str(uuid.uuid4())
             db.store_message(msg_id, jid, "webportal", "WebPortal", text, int(ts * 1000))
-            # Register a reply callback so we can push the response back to the session
+            # Track reply association; evict stale entries to avoid unbounded growth
+            with _sessions_lock:
+                _cleanup_pending_replies()
             _pending_replies[msg_id] = session_id
             self._send_json({"ok": True, "msg_id": msg_id})
+        except ValueError:
+            pass  # _read_body already sent 413
         except Exception as e:
             self._send_json({"error": str(e)}, 500)
 
@@ -191,7 +218,18 @@ class _WebPortalHandler(http.server.BaseHTTPRequestHandler):
 
 
 # Pending reply tracking: msg_id -> session_id
+# Cleaned up lazily on every _api_send to prevent unbounded growth.
 _pending_replies: dict[str, str] = {}
+
+
+def _cleanup_pending_replies() -> None:
+    """Evict _pending_replies entries whose session no longer exists.
+    Must be called while holding _sessions_lock."""
+    stale = [mid for mid, sid in _pending_replies.items() if sid not in _sessions]
+    for mid in stale:
+        _pending_replies.pop(mid, None)
+    if stale:
+        log.debug("WebPortal: evicted %d stale pending reply entries", len(stale))
 
 
 def deliver_reply(jid: str, text: str):
@@ -199,7 +237,10 @@ def deliver_reply(jid: str, text: str):
     with _sessions_lock:
         for session in _sessions.values():
             if session.get("jid") == jid:
-                session["messages"].append({"role": "assistant", "text": text, "ts": time.time()})
+                msgs = session["messages"]
+                if len(msgs) >= _MAX_SESSION_MESSAGES:
+                    msgs.pop(0)
+                msgs.append({"role": "assistant", "text": text, "ts": time.time()})
 
 
 _PORTAL_HTML = """<!DOCTYPE html>

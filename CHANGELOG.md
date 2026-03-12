@@ -5,6 +5,26 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.13] - 2026-03-12
+
+### Security
+- Agent tools (`tool_read`, `tool_write`, `tool_edit`) now validate that file paths resolve inside `/workspace/` before executing, blocking prompt-injection attacks that attempt to read `/proc/self/environ` or other sensitive container files (Issue #29)
+- `skills_engine/apply.py` post_apply commands now checked against an allowlist of safe prefixes (`pip install`, `npm install`, `pytest`, etc.) — unknown commands are skipped with a warning, preventing malicious skill manifests from running arbitrary host commands (Issue #28)
+- `ipc_watcher._resolve_container_path` now validates the resolved host path stays within the expected root directory, preventing path traversal via crafted container file paths (Issue #26)
+
+### Fixed
+- WebPortal `_pending_replies` dict now cleaned up lazily on each `/api/send` call (evicting entries whose sessions no longer exist), fixing an unbounded memory leak that accumulated indefinitely as sessions expired (Issue #21)
+- DB write functions `set_session`, `create_task`, `update_task`, `delete_task`, `set_registered_group`, `upsert_group_genome`, `block_sender`, `log_evolution_event`, `log_dev_event` now all hold `_db_lock` for thread safety, preventing potential `database is locked` errors from webportal/dashboard/evolution threads (Issue #22)
+- WebPortal `/api/send` now enforces per-group rate limiting (same as the Telegram/WhatsApp path) to prevent authenticated WebPortal users from bypassing the rate limiter and flooding the GroupQueue (Issue #25)
+- `router.route_outbound` now retries failed chunks (up to 2 attempts, 1s delay) and notifies the user when chunks cannot be delivered after retries, rather than silently dropping remaining chunks (Issue #27)
+
+### Added
+- WebPortal `_sessions` dict now capped at 500 concurrent sessions; `_expire_sessions` is called on every new session creation to enforce the cap (Issue #23)
+- Per-session message list capped at 200 entries to prevent unbounded per-session memory growth; `deliver_reply` also respects this cap (Issue #23)
+- WebPortal `_read_body` now enforces a 64 KB maximum POST body size, returning HTTP 413 for oversized requests to prevent memory exhaustion (Issue #24)
+- Individual message text in WebPortal `/api/send` capped at 32 KB (Issue #24)
+- `ENABLED_CHANNELS` validated at startup against the set of known channel names; unrecognised names trigger a clear `ERROR` log entry so operators immediately see typos (Issue #30)
+
 ## [1.10.12] - 2026-03-12
 
 ### Security

@@ -75,6 +75,10 @@ def _split_message(text: str, max_len: int = TELEGRAM_MAX_LEN) -> list[str]:
     return [c for c in chunks if c]
 
 
+_CHUNK_MAX_RETRIES = 2   # retry each chunk up to this many times on transient failure
+_CHUNK_RETRY_DELAY = 1.0  # seconds between chunk retries
+
+
 async def route_outbound(jid: str, text: str) -> None:
     ch = find_channel(jid)
     if not ch:
@@ -82,11 +86,33 @@ async def route_outbound(jid: str, text: str) -> None:
         return
     formatted = format_outbound(text)
     chunks = _split_message(formatted)
-    for chunk in chunks:
-        try:
-            await ch.send_message(jid, chunk)
-        except Exception as e:
-            log.error(f"Failed to send message to {jid}: {e}")
+    for i, chunk in enumerate(chunks):
+        sent = False
+        last_exc: Exception | None = None
+        for attempt in range(_CHUNK_MAX_RETRIES + 1):
+            try:
+                await ch.send_message(jid, chunk)
+                sent = True
+                break
+            except Exception as e:
+                last_exc = e
+                if attempt < _CHUNK_MAX_RETRIES:
+                    import asyncio as _asyncio
+                    await _asyncio.sleep(_CHUNK_RETRY_DELAY)
+        if not sent:
+            log.error("Failed to send chunk %d/%d to %s after %d attempts: %s",
+                      i + 1, len(chunks), jid, _CHUNK_MAX_RETRIES + 1, last_exc)
+            # Notify user that the response was truncated rather than silently dropping
+            remaining = len(chunks) - i - 1
+            if remaining > 0:
+                try:
+                    await ch.send_message(
+                        jid,
+                        f"[Message delivery error: {remaining} chunk(s) could not be sent. "
+                        f"Please try again.]"
+                    )
+                except Exception:
+                    pass
             break
 
 

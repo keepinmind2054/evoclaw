@@ -588,21 +588,41 @@ def _resolve_container_path(container_path: str, group_folder: str) -> str | Non
     data_dir = pathlib.Path(config.DATA_DIR)
 
     host: pathlib.Path | None = None
+    expected_root: pathlib.Path | None = None
+
     if p.startswith("/workspace/group/"):
         rel = p[len("/workspace/group/"):]
         host = groups_dir / group_folder / rel
+        expected_root = groups_dir / group_folder
     elif p.startswith("/workspace/project/"):
         rel = p[len("/workspace/project/"):]
         host = base_dir / rel
+        expected_root = base_dir
     elif p.startswith("/workspace/ipc/"):
         rel = p[len("/workspace/ipc/"):]
         host = data_dir / "ipc" / group_folder / rel
+        expected_root = data_dir / "ipc" / group_folder
     elif p.startswith("/workspace/global/"):
         rel = p[len("/workspace/global/"):]
         host = groups_dir / "global" / rel
+        expected_root = groups_dir / "global"
     else:
         # Unrecognized prefix — log and return None
         log.warning("_resolve_container_path: unrecognized path prefix in %r", container_path)
+        return None
+
+    # Guard against path traversal: resolved path must stay within the expected root.
+    try:
+        resolved = host.resolve()
+        if expected_root and not str(resolved).startswith(str(expected_root.resolve())):
+            log.warning(
+                "_resolve_container_path: path traversal attempt detected — "
+                "container_path=%r resolved to %r which is outside %r",
+                container_path, str(resolved), str(expected_root),
+            )
+            return None
+    except Exception as exc:
+        log.warning("_resolve_container_path: resolution error for %r: %s", container_path, exc)
         return None
 
     return str(host)

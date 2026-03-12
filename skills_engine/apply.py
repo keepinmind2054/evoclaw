@@ -250,7 +250,30 @@ def apply_skill(skill_dir: str | Path) -> ApplyResult:
                 env_path.write_text("\n".join(merged_env) + "\n", encoding="utf-8")
 
         # --- Post-apply commands ---
+        # Only commands starting with a known-safe prefix are executed automatically.
+        # This prevents a malicious or compromised skill manifest from running
+        # arbitrary host commands (e.g. curl exfiltration, rm -rf).
+        _POST_APPLY_ALLOWED_PREFIXES = (
+            "pip install",
+            "pip3 install",
+            "python -m pip install",
+            "python3 -m pip install",
+            "npm install",
+            "npm ci",
+            "yarn install",
+            "python -m pytest",
+            "python3 -m pytest",
+            "pytest",
+        )
         for cmd in manifest.post_apply:
+            cmd_lower = cmd.strip().lower()
+            if not any(cmd_lower.startswith(p) for p in _POST_APPLY_ALLOWED_PREFIXES):
+                print(
+                    f"WARNING: post_apply command {cmd!r} does not match any allowed prefix "
+                    f"and will be skipped for security reasons. "
+                    f"Allowed prefixes: {_POST_APPLY_ALLOWED_PREFIXES}"
+                )
+                continue
             try:
                 args = shlex.split(cmd, posix=(platform.system() != "Windows"))
                 subprocess.run(

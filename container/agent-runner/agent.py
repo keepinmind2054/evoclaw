@@ -58,6 +58,12 @@ IPC_RESULTS_DIR = "/workspace/ipc/results"
 # agent 的工作目錄，對應到 host 的 groups/<folder>/ 目錄
 WORKSPACE = "/workspace/group"
 
+# Allowed top-level prefixes for file-system tool operations.
+# Paths must resolve inside one of these directories to be accepted.
+_ALLOWED_PATH_PREFIXES = (
+    "/workspace/",   # covers /workspace/group, /workspace/ipc, /workspace/project, etc.
+)
+
 # Module-level chat JID — populated from input JSON so tool_send_file can auto-detect it
 _input_chat_jid: str = ""
 
@@ -66,6 +72,27 @@ def _log(tag: str, msg: str = "") -> None:
     """Structured stderr logging with millisecond timestamps."""
     ts = _dt.datetime.now().strftime("%H:%M:%S.%f")[:-3]
     print(f"[{ts}] {tag} {msg}", file=sys.stderr, flush=True)
+
+
+def _check_path_allowed(file_path: str) -> str | None:
+    """Return an error string if the resolved path is outside the allowed workspace,
+    or None if the path is acceptable.
+
+    This is a defence-in-depth measure inside the container to prevent
+    prompt-injection attacks from reading sensitive container files like
+    /proc/self/environ (which may contain env vars) or /etc/passwd.
+    """
+    try:
+        resolved = str(Path(file_path).resolve())
+    except Exception as exc:
+        return f"Error: cannot resolve path {file_path!r}: {exc}"
+    if not any(resolved.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES):
+        _log("⚠️ SECURITY", f"path sandbox violation: {file_path!r} resolved to {resolved!r}")
+        return (
+            f"Error: access denied — path {file_path!r} is outside the allowed workspace. "
+            f"Only paths within /workspace/ are permitted."
+        )
+    return None
 
 
 # ── Tool implementations ──────────────────────────────────────────────────────
@@ -97,6 +124,9 @@ def tool_bash(command: str) -> str:
 
 def tool_read(file_path: str) -> str:
     """讀取指定路徑的文字檔案內容，讓 agent 可以檢視檔案。"""
+    err = _check_path_allowed(file_path)
+    if err:
+        return err
     try:
         return Path(file_path).read_text(encoding="utf-8")
     except Exception as e:
@@ -108,6 +138,9 @@ def tool_write(file_path: str, content: str) -> str:
     將內容寫入指定路徑的檔案。
     自動建立不存在的父目錄（mkdir -p），簡化 agent 的操作步驟。
     """
+    err = _check_path_allowed(file_path)
+    if err:
+        return err
     try:
         p = Path(file_path)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -122,6 +155,9 @@ def tool_edit(file_path: str, old_string: str, new_string: str) -> str:
     在檔案中找到 old_string 並替換為 new_string（只替換第一個出現的位置）。
     若 old_string 不存在則回傳錯誤，讓 Gemini 知道需要先確認內容再修改。
     """
+    err = _check_path_allowed(file_path)
+    if err:
+        return err
     try:
         p = Path(file_path)
         content = p.read_text(encoding="utf-8")
