@@ -113,6 +113,13 @@ async def route_outbound(jid: str, text: str) -> None:
                     )
                 except Exception:
                     pass
+            else:
+                # All chunks failed (or this was the only chunk) — notify user
+                # Fixes #86: complete delivery failure was silently dropped
+                try:
+                    await ch.send_message(jid, "⚠️ 回應傳送失敗，請再試一次。")
+                except Exception:
+                    pass
             break
 
 

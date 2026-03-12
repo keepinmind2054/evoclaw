@@ -87,7 +87,11 @@ def compute_fitness(jid: str, window_days: int = 7) -> float:
     valid_times = [r["response_ms"] for r in rows if r.get("response_ms") and r["response_ms"] > 0 and r.get("success")]
     if valid_times:
         avg_ms = sum(valid_times) / len(valid_times)
-        speed_score = 1.0 - (avg_ms - SPEED_TARGET_MS) / (SPEED_FLOOR_MS - SPEED_TARGET_MS)
+        # Fixes #89: use max(0.0, ...) in numerator so sub-target response times
+        # score 1.0 (perfect) instead of producing values > 1.0 before clamping.
+        # Speed: 0.0 = at/above floor, 1.0 = at/below target
+        over_target = max(0.0, avg_ms - SPEED_TARGET_MS)
+        speed_score = 1.0 - over_target / (SPEED_FLOOR_MS - SPEED_TARGET_MS)
         speed_score = max(0.0, min(1.0, speed_score))
     else:
         speed_score = 0.5

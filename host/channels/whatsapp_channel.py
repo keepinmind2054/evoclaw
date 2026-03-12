@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import logging
 import os
+from collections import OrderedDict
 from typing import Callable, Optional
 
 import aiohttp
@@ -23,7 +24,7 @@ class WhatsAppChannel:
         self._on_chat_metadata = on_chat_metadata
         self._registered_groups = registered_groups
         self._connected = False
-        self._last_wamid: dict[str, str] = {}  # jid → most recent received wamid
+        self._last_wamid: OrderedDict[str, str] = OrderedDict()  # jid → most recent wamid (LRU, max 10K)
         self._runner: Optional[web.AppRunner] = None
         self._session: Optional[aiohttp.ClientSession] = None
 
@@ -127,7 +128,12 @@ class WhatsAppChannel:
                     jid = self._jid(phone_number_id, chat_id)
                     wamid = msg.get("id", "")
                     if wamid:
+                        # Fixes #88: use LRU OrderedDict capped at 10K entries to prevent
+                        # unbounded memory growth with many unique senders.
                         self._last_wamid[jid] = wamid
+                        self._last_wamid.move_to_end(jid)
+                        if len(self._last_wamid) > 10_000:
+                            self._last_wamid.popitem(last=False)
 
                     groups = {g["jid"]: g for g in self._registered_groups}
                     group = groups.get(jid)
