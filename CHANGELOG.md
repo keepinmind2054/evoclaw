@@ -5,6 +5,19 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.25] - 2026-03-12
+
+### Fixed
+- **#105** `main.py`: `_is_duplicate_message()` TOCTOU race — converted to `async def`, added `_dedup_lock = asyncio.Lock()` initialized in `main()`, and wrapped the entire check-then-insert sequence in a single `async with _dedup_lock:` block so no two coroutines can read/insert simultaneously
+- **#106** `task_scheduler.py`: `run_task()` now advances `next_run` in a `finally` block — the computed `next_run_ts` is always written via `db.update_task()` regardless of whether the run succeeded or raised an exception, preventing tasks from getting stuck at a past timestamp
+- **#107** `webportal.py`: `_pending_replies` changed from `dict[str, str]` to `dict[str, tuple[str, float]]` storing `(session_id, created_at_timestamp)`; `_cleanup_pending_replies()` now also evicts entries older than 300 seconds (5-minute TTL) in addition to entries whose session no longer exists
+- **#108** `evolution/immune.py`: `check_message()` changed from fail-open to fail-secure — exceptions from DB calls now return `(False, "immune_check_error")` (deny) instead of `(True, None)` (allow); a DB outage can no longer bypass the immune check
+- **#109** `ipc_watcher.py`: `apply_skill` and `uninstall_skill` IPC operations wrapped in `asyncio.wait_for(..., timeout=300.0)`; a `TimeoutError` logs an error and sends a user-facing notification instead of hanging the `_skills_lock` indefinitely
+- **#110** `container_runner.py`: added `_SECRET_PATTERNS` regex list and `_redact_secrets()` function; all container stderr lines are now passed through `_redact_secrets()` before being logged, preventing API keys, tokens, and passwords from appearing in host logs or the dashboard log stream
+
+### Chore
+- Version bump 1.10.24 → 1.10.25
+
 ## [1.10.24] - 2026-03-12
 
 ### Fixed

@@ -152,7 +152,36 @@ After release, verify:
 
 ---
 
-**Last Updated:** 2026-03-12 (v1.10.24)
+**Last Updated:** 2026-03-12 (v1.10.25)
+
+---
+
+## v1.10.25 Release Notes
+
+### Concurrency, Security, and Reliability Fixes (Issues #105–#110)
+
+**Problems Fixed**:
+
+1. *`_is_duplicate_message()` TOCTOU race condition* (#105): The deduplication check-then-insert in `main.py` was not atomic. Two coroutines processing messages concurrently could both pass the `if fp in _seen_msg_fingerprints` check before either had inserted the fingerprint, allowing the same message to be processed twice. Fixed by converting `_is_duplicate_message()` to `async def` and wrapping the full read+write sequence in a single `async with _dedup_lock:` block. `_dedup_lock` is an `asyncio.Lock` initialized in `main()` after the event loop starts.
+
+2. *`task_scheduler.py` `next_run` not advanced on unexpected exception* (#106): If an exception escaped both the normal success path and the `except Exception` block in `run_task()`, `next_run` would remain at its original past timestamp. On the next scheduler poll the task would immediately re-fire, creating a tight loop. `next_run_ts` is now computed in both the success and except paths and applied unconditionally in a `finally` block, ensuring `next_run` is always advanced.
+
+3. *`webportal.py` `_pending_replies` no TTL eviction* (#107): `_pending_replies` entries were only evicted when their session was deleted. Entries from sessions that were never explicitly deleted (e.g. browser tab closed without logout) accumulated indefinitely. `_pending_replies` now stores `(session_id, created_at_timestamp)` tuples, and `_cleanup_pending_replies()` also removes entries older than 300 seconds.
+
+4. *`immune.py` fails-open on DB error* (#108): A database failure during `check_message()` caused the function to silently return `(True, None)` — allowing the message through without any immune check. Changed to fail-secure: exceptions now return `(False, "immune_check_error")`, denying the message when the immune system cannot safely evaluate it.
+
+5. *Skill IPC operations have no timeout* (#109): `apply_skill` and `uninstall_skill` called via `asyncio.to_thread()` in `ipc_watcher.py` had no timeout. A hung skill operation (e.g. slow network download) would hold `_skills_lock` indefinitely, blocking all subsequent skill operations. Both operations are now wrapped in `asyncio.wait_for(..., timeout=300.0)`. A `TimeoutError` logs an error and sends a `⚠️ Skill operation timed out` notification to the user.
+
+6. *Container stderr logs may contain secrets* (#110): Container agents print environment setup details to stderr that can include API keys, tokens, and passwords. These lines were logged verbatim to the host log files and the dashboard SSE log stream. Added `_SECRET_PATTERNS` (four compiled regexes matching common key patterns, OpenAI keys, GitHub tokens, and Google API keys) and `_redact_secrets()` in `container_runner.py`. Every stderr line is now passed through `_redact_secrets()` before being logged.
+
+**Upgrade**:
+
+No `docker build` needed — all changes are in the host process. Restart EvoClaw to apply.
+
+```bash
+git pull
+python run.py start
+```
 
 ---
 

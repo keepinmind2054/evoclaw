@@ -71,6 +71,9 @@ async def run_task(task: dict, get_group_fn: Callable, run_agent_fn: Callable) -
 
     log.info(f"Running task {task_id} for {group_folder}")
 
+    # next_run_ts is computed in the success or except branch, then applied in finally.
+    # This ensures next_run is ALWAYS advanced regardless of success or failure (Fix #106).
+    next_run_ts = None
     try:
         result = await run_agent_fn(
             group=group,
@@ -84,10 +87,11 @@ async def run_task(task: dict, get_group_fn: Callable, run_agent_fn: Callable) -
         # 記錄本次執行結果（供監控與除錯用）
         db.log_task_run(task_id, start, duration, status, result.get("result"), result.get("error"))
         # 更新任務狀態：記錄最後執行時間、結果摘要，並計算下次執行時間
+        next_run_ts = compute_next_run(task["schedule_type"], task["schedule_value"], start)
         db.update_task(task_id,
                        last_run=start,
                        last_result=result.get("result", "")[:500],  # 只存前 500 字，節省空間
-                       next_run=compute_next_run(task["schedule_type"], task["schedule_value"], start))
+                       next_run=next_run_ts)
     except Exception as e:
         log.error(f"Task {task_id} failed: {e}")
         # 失敗時記錄 log 並推進 next_run，防止任務因 next_run 未更新而在每次
@@ -95,8 +99,11 @@ async def run_task(task: dict, get_group_fn: Callable, run_agent_fn: Callable) -
         db.log_task_run(task_id, start, 0, "error", None, str(e))
         # Compute a backoff next_run so the task retries after a normal cycle,
         # not immediately on every scheduler poll.
-        backoff_next = compute_next_run(task["schedule_type"], task["schedule_value"], start)
-        db.update_task(task_id, next_run=backoff_next)
+        next_run_ts = compute_next_run(task["schedule_type"], task["schedule_value"], start)
+    finally:
+        # Always advance next_run so the task is never stuck at a past timestamp
+        # even if an unexpected exception escapes both the try and except blocks.
+        db.update_task(task_id, next_run=next_run_ts)
 
 async def start_scheduler_loop(
     get_group_fn: Callable,

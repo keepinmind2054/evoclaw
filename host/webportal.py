@@ -221,7 +221,7 @@ class _WebPortalHandler(http.server.BaseHTTPRequestHandler):
             # Track reply association; evict stale entries to avoid unbounded growth
             with _sessions_lock:
                 _cleanup_pending_replies()
-                _pending_replies[msg_id] = session_id
+                _pending_replies[msg_id] = (session_id, time.time())
             self._send_json({"ok": True, "msg_id": msg_id})
         except ValueError:
             pass  # _read_body already sent 413
@@ -237,15 +237,22 @@ class _WebPortalHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(html)
 
 
-# Pending reply tracking: msg_id -> session_id
+# Pending reply tracking: msg_id -> (session_id, created_at_timestamp)
 # Cleaned up lazily on every _api_send to prevent unbounded growth.
-_pending_replies: dict[str, str] = {}
+# TTL: entries older than 300 seconds are also evicted (Fix #107).
+_PENDING_REPLY_TTL = 300  # seconds
+_pending_replies: dict[str, tuple[str, float]] = {}
 
 
 def _cleanup_pending_replies() -> None:
-    """Evict _pending_replies entries whose session no longer exists.
+    """Evict _pending_replies entries whose session no longer exists or that have
+    exceeded the TTL of _PENDING_REPLY_TTL seconds (Fix #107).
     Must be called while holding _sessions_lock."""
-    stale = [mid for mid, sid in _pending_replies.items() if sid not in _sessions]
+    now = time.time()
+    stale = [
+        mid for mid, (sid, created_at) in _pending_replies.items()
+        if sid not in _sessions or now - created_at > _PENDING_REPLY_TTL
+    ]
     for mid in stale:
         _pending_replies.pop(mid, None)
     if stale:

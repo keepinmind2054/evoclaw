@@ -117,23 +117,28 @@ def _is_rate_limited(jid: str) -> bool:
 # Uses an OrderedDict as a bounded LRU cache: oldest entries are evicted when full.
 _DEDUP_MAX = 1000  # maximum entries before oldest is evicted
 _seen_msg_fingerprints: collections.OrderedDict = collections.OrderedDict()
+_dedup_lock: asyncio.Lock | None = None  # initialized in main() after event loop starts
 
 
-def _is_duplicate_message(jid: str, sender: str, content: str) -> bool:
+async def _is_duplicate_message(jid: str, sender: str, content: str) -> bool:
     """Return True if this (jid, sender, content) combination was seen recently.
 
     A SHA-256 fingerprint of the three values is used as the key to bound memory
     usage. If the dedup set is full, the oldest entry is evicted (LRU eviction).
+
+    The entire check-then-insert is wrapped in a single async with _dedup_lock:
+    block so no two coroutines can check/insert simultaneously (Fix #105).
     """
     raw = f"{jid}\x00{sender}\x00{content}"
     fp = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()
-    if fp in _seen_msg_fingerprints:
-        _seen_msg_fingerprints.move_to_end(fp)  # mark as recently used
-        return True
-    _seen_msg_fingerprints[fp] = True
-    if len(_seen_msg_fingerprints) > _DEDUP_MAX:
-        _seen_msg_fingerprints.popitem(last=False)  # evict oldest
-    return False
+    async with _dedup_lock:
+        if fp in _seen_msg_fingerprints:
+            _seen_msg_fingerprints.move_to_end(fp)  # mark as recently used
+            return True
+        _seen_msg_fingerprints[fp] = True
+        if len(_seen_msg_fingerprints) > _DEDUP_MAX:
+            _seen_msg_fingerprints.popitem(last=False)  # evict oldest
+        return False
 
 
 def _load_state() -> None:
@@ -219,7 +224,7 @@ async def _on_message(jid: str, sender: str, sender_name: str, content: str,
         return
 
     # 去重複檢查：防止頻道 webhook 重試造成相同訊息被處理兩次
-    if _is_duplicate_message(jid, sender, content):
+    if await _is_duplicate_message(jid, sender, content):
         log.debug("Duplicate message fingerprint detected from %s in %s — skipping", sender, jid)
         return
 
@@ -474,9 +479,10 @@ async def main() -> None:
     6. 設定 SIGTERM/SIGINT 優雅關機處理器
     7. 同時啟動訊息輪詢、IPC watcher 及排程器三個背景迴圈
     """
-    global _registered_groups, _sender_allowlist, _stop_event, _group_fail_lock
+    global _registered_groups, _sender_allowlist, _stop_event, _group_fail_lock, _dedup_lock
     _stop_event = asyncio.Event()
     _group_fail_lock = asyncio.Lock()
+    _dedup_lock = asyncio.Lock()
 
     log.info("EvoClaw starting up...")
 

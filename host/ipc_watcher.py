@@ -446,7 +446,17 @@ async def _run_apply_skill(
             jid = group["jid"] if group else ""
 
             # skills_engine.apply_skill 是同步函式，用 to_thread 避免阻塞 event loop
-            result = await asyncio.to_thread(apply_skill, skill_path)
+            # Fix #109: wrap with asyncio.wait_for to prevent indefinite hangs
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(apply_skill, skill_path),
+                    timeout=300.0,
+                )
+            except asyncio.TimeoutError:
+                log.error("Skill operation timed out after 300s")
+                if jid:
+                    await route_fn(jid, "⚠️ Skill operation timed out (>5 min). Try again.")
+                return
 
             if result.success:
                 msg = f"✅ Skill applied: {result.skill} v{result.version}"
@@ -490,7 +500,17 @@ async def _run_uninstall_skill(
             group = next((g for g in groups if g["folder"] == group_folder), None)
             jid = group["jid"] if group else ""
 
-            result = await asyncio.to_thread(uninstall_skill, skill_name)
+            # Fix #109: wrap with asyncio.wait_for to prevent indefinite hangs
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(uninstall_skill, skill_name),
+                    timeout=300.0,
+                )
+            except asyncio.TimeoutError:
+                log.error("Skill operation timed out after 300s")
+                if jid:
+                    await route_fn(jid, "⚠️ Skill operation timed out (>5 min). Try again.")
+                return
 
             if result.success:
                 msg = f"✅ Skill uninstalled: {result.skill}"

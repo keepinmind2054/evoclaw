@@ -139,11 +139,11 @@ def check_message(content: str, sender_jid: str) -> tuple[bool, Optional[str]]:
             return (False, "spam")
 
         return (True, None)
-    except Exception as e:
-        # 免疫系統故障時靜默放行，確保正常對話不受影響
-        log.warning("Immune check error (allowing through): %s", type(e).__name__)
-        log.debug("Immune check detail: %s", e)
-        return (True, None)
+    except Exception as exc:
+        # Fix #108: fail-secure — deny on DB error rather than fail-open (allowing through).
+        # A DB outage must not silently bypass the immune check and let unvetted messages through.
+        log.error("immune check_message DB error: %s", exc)
+        return (False, "immune_check_error")
 
 
 def get_immune_status() -> dict:

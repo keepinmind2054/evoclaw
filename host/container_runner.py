@@ -4,6 +4,7 @@ import atexit
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,26 @@ import threading as _threading
 from . import config, db
 from .env import read_env_file
 from .evolution import record_run, get_adaptive_hints, get_genome_style_hints
+
+# ── Secret redaction for container stderr logs (Fix #110) ─────────────────────
+# Applied to every stderr line before logging to prevent API keys and credentials
+# from appearing in host log files or the dashboard log stream.
+_SECRET_PATTERNS = [
+    re.compile(r'(?i)(api[_-]?key|token|password|secret|bearer|authorization)\s*[=:]\s*\S+'),
+    re.compile(r'sk-[A-Za-z0-9]{20,}'),       # OpenAI-style keys
+    re.compile(r'ghp_[A-Za-z0-9]{36}'),         # GitHub tokens
+    re.compile(r'AIza[A-Za-z0-9_-]{35}'),        # Google API keys
+]
+
+
+def _redact_secrets(text: str) -> str:
+    """Replace secret values in a log line with [REDACTED] before emitting."""
+    for pat in _SECRET_PATTERNS:
+        text = pat.sub(
+            lambda m: m.group(0).split('=')[0] + '=[REDACTED]' if '=' in m.group(0) else '[REDACTED]',
+            text,
+        )
+    return text
 
 
 def _is_windows() -> bool:
@@ -404,14 +425,16 @@ async def run_container_agent(
                     line = line_bytes.decode(errors="replace").rstrip()
                     if line:
                         stderr_lines.append(line)
+                        # Redact secrets before logging (Fix #110)
+                        safe_line = _redact_secrets(line)
                         # Elevate structured agent log lines to INFO
-                        if any(e in line for e in _EMOJI_TAGS):
-                            log.info("[%s] %s", container_name, line)
+                        if any(e in safe_line for e in _EMOJI_TAGS):
+                            log.info("[%s] %s", container_name, safe_line)
                         else:
-                            log.debug("[%s] %s", container_name, line)
+                            log.debug("[%s] %s", container_name, safe_line)
                         async with _active_lock:
                             if container_name in _active_containers:
-                                _active_containers[container_name]["current_activity"] = line
+                                _active_containers[container_name]["current_activity"] = safe_line
 
             async def _collect() -> tuple[bytes, bytes]:
                 stdout_task = asyncio.create_task(proc.stdout.read())
@@ -429,7 +452,7 @@ async def run_container_agent(
 
         log.debug(f"[DEBUG] Container stdout preview: {stdout[:200]!r}")
         if stderr:
-            log.debug(f"[DEBUG] Container stderr: {stderr[:500]}")
+            log.debug(f"[DEBUG] Container stderr: {_redact_secrets(stderr[:500])}")
 
         # 從 stdout 中尋找輸出標記，截取 JSON 結果
         # agent 可能在標記前後有其他 debug 輸出，只取標記之間的部分
@@ -443,7 +466,7 @@ async def run_container_agent(
                 log.warning(
                     "Container %s stderr (last 5 lines):\n%s",
                     container_name,
-                    "\n".join(stderr_lines[-5:])
+                    "\n".join(_redact_secrets(l) for l in stderr_lines[-5:])
                 )
             log.warning("No valid output markers in container stdout")
             return {"status": "error", "error": "no output markers", "messages": []}
