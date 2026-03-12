@@ -24,12 +24,13 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
-# 演化週期間隔（秒）：預設 24 小時
-EVOLUTION_INTERVAL_SECS = 24 * 3600
+# 演化週期間隔（秒）：預設 1 小時（原為 24 小時，對測試不友好）
+EVOLUTION_INTERVAL_SECS = 3600
 
 # 觸發演化所需的最少執行樣本數
 # 樣本太少時跳過，避免少數異常值導致錯誤的演化方向
-MIN_SAMPLES = 10
+# 降低至 3（原為 10），讓群組更容易達到觸發門檻
+MIN_SAMPLES = 3
 
 # 計算適應度時的回顧時間視窗（天）
 FITNESS_WINDOW_DAYS = 7
@@ -45,7 +46,7 @@ async def evolution_loop(stop_event: asyncio.Event) -> None:
 
     第一次等待後才執行（系統啟動時沒有足夠數據，等 24 小時再說）。
     """
-    log.info("Evolution daemon started (first cycle in 24h)")
+    log.info("Evolution daemon started (first cycle in 1h)")
     while True:
         # 先等待，再執行（讓系統先跑一段時間累積數據）
         try:

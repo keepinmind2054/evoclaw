@@ -1190,6 +1190,9 @@ def main():
     evolution_hints = inp.get("evolutionHints", "")
     assistant_name = inp.get("assistantName", "") or "Eve"
     conversation_history = inp.get("conversationHistory", [])
+    # Read sessionId passed in by the host so it can be preserved in the response.
+    # This allows the host to maintain conversation continuity across container runs.
+    session_id = inp.get("sessionId") or None
 
     messages = inp.get("conversationHistory", [])
     _log("📥 INPUT", f"jid={chat_jid} group={group_folder} msgs={len(messages)}")
@@ -1334,7 +1337,10 @@ def main():
         # 則清空 result 欄位，避免 host 的 container_runner 再次發送（雙重訊息 + 超長訊息 bug）
         # 若 agent 沒有呼叫工具（純文字回覆），則由 host 負責發送 result
         emit_result = "" if _messages_sent_via_tool else result
-        emit({"status": "success", "result": emit_result, "newSessionId": str(uuid.uuid4())})
+        # Preserve the incoming sessionId so the host can track conversation continuity.
+        # Only fall back to generating a new UUID if no sessionId was provided.
+        preserved_session_id = session_id if session_id else str(uuid.uuid4())
+        emit({"status": "success", "result": emit_result, "newSessionId": preserved_session_id})
     except Exception as e:
         _log("❌ ERROR", f"{type(e).__name__}: {e}")
         traceback.print_exc(file=sys.stderr)

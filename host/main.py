@@ -295,9 +295,9 @@ async def _process_group_messages(group: dict, messages: list[dict],
     if not messages:
         return
 
-    # 取得最近 20 條對話歷史，轉為原生 multi-turn 格式
+    # 取得最近 50 條對話歷史，轉為原生 multi-turn 格式（原為 20 ≈ 10 輪，提升至 50 ≈ 25 輪）
     new_ts_set = {m["timestamp"] for m in messages}
-    raw_history = [m for m in db.get_conversation_history(jid, limit=20) if m["timestamp"] not in new_ts_set]
+    raw_history = [m for m in db.get_conversation_history(jid, limit=50) if m["timestamp"] not in new_ts_set]
     conversation_history = [
         {
             "role": "assistant" if m.get("is_bot_message") else "user",

@@ -48,9 +48,9 @@ def record_run(
     from host import db
     try:
         db.record_evolution_run(jid, run_id, response_ms, retry_count, success)
-    except Exception as e:
-        # 適應度記錄失敗不應中斷主流程，靜默忽略
-        log.warning(f"Failed to record evolution run for {jid}: {e}")
+    except Exception as exc:
+        # 適應度記錄失敗不應中斷主流程，但必須記錄錯誤以便排查
+        log.error("record_run failed (jid=%s): %s", jid, exc)
 
 
 def compute_fitness(jid: str, window_days: int = 7) -> float:

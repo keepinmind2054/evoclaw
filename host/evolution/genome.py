@@ -62,8 +62,8 @@ def upsert_genome(jid: str, **kwargs) -> None:
     from host import db
     try:
         db.upsert_group_genome(jid, **kwargs)
-    except Exception as e:
-        log.warning(f"Failed to upsert genome for {jid}: {e}")
+    except Exception as exc:
+        log.error("upsert_genome failed (jid=%s): %s", jid, exc)
 
 
 def evolve_genome_from_fitness(jid: str, fitness: float, avg_response_ms: float) -> None:

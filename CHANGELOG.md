@@ -5,6 +5,21 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.28] - 2026-03-12
+
+### Fixed
+- **#128** `agent.py`: `newSessionId` now preserves the incoming `sessionId` from the host instead of always generating a new `uuid.uuid4()` — every container run was starting a fresh session, destroying cross-turn conversation memory; now the host-provided session ID is echoed back and only falls back to a new UUID when no session ID was passed
+- **#128** `main.py`: `get_conversation_history(jid, limit=20)` increased to `limit=50` — the previous 20-message window (≈10 turns) was too small for meaningful multi-turn context; 50 messages (≈25 turns) gives the LLM substantially more conversation history
+- **#129** `daemon.py`: `EVOLUTION_INTERVAL_SECS` reduced from `24 * 3600` (24h) to `3600` (1h) — the 24-hour first-cycle delay made evolution impossible to observe or test; with a 1-hour interval the daemon becomes practical in development and production alike
+- **#129** `daemon.py`: `MIN_SAMPLES` reduced from `10` to `3` — requiring 10 runs before evolution triggers meant groups almost never crossed the threshold; 3 samples is sufficient to make basic fitness decisions while still avoiding single-sample noise
+- **#129** `container_runner.py`: `record_run(..., success=False)` is now called when container output has no valid markers or when JSON parsing fails — these error paths previously returned early without recording, causing silent data loss and underestimating failure rates in fitness calculations
+- **#129** `fitness.py`: `record_run()` exception handler changed from silent `log.warning` to `log.error("record_run failed (jid=%s): %s", jid, exc)` — DB errors were previously easy to miss in high-volume logs
+- **#129** `genome.py`: `upsert_genome()` exception handler changed from `log.warning` to `log.error("upsert_genome failed (jid=%s): %s", jid, exc)` — genome update failures are now clearly visible in error logs
+- **#129** `db.py`: `get_active_evolution_jids()` now includes cold-start groups — previously it only queried `evolution_runs` (returning empty list when the table was empty), causing "Evaluating 0 group(s)" on fresh deployments; now also includes groups with recent conversation history so the daemon can bootstrap their first genome
+
+### Chore
+- Version bump 1.10.27 → 1.10.28
+
 ## [1.10.27] - 2026-03-12
 
 ### Fixed

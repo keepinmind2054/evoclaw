@@ -152,7 +152,31 @@ After release, verify:
 
 ---
 
-**Last Updated:** 2026-03-12 (v1.10.27)
+**Last Updated:** 2026-03-12 (v1.10.28)
+
+---
+
+## v1.10.28 Release Notes
+
+### Memory System and Evolution System Root Cause Fixes (Issues #128–#129)
+
+**Problems Fixed**:
+
+1. *sessionId always regenerated — conversation history lost* (#128): `agent.py` emitted `newSessionId: str(uuid.uuid4())` on every successful run, discarding the `sessionId` passed in by the host. Each container run started a completely fresh session even though the host correctly passed in the previous session ID. Fixed by reading `session_id = inp.get("sessionId")` from the input JSON and echoing it back in the response (falling back to a new UUID only when no session ID is provided).
+
+2. *Conversation history context window too small* (#128): `main.py` called `get_conversation_history(jid, limit=20)`, providing only ≈10 turns of context to the LLM. Fixed by increasing to `limit=50` (≈25 turns), giving the agent substantially more conversational memory.
+
+3. *Evolution interval 24h — first cycle unreachable in testing* (#129): `EVOLUTION_INTERVAL_SECS = 24 * 3600` meant the first evolution cycle ran 24 hours after startup, making it impossible to observe or test. Reduced to `3600` (1 hour).
+
+4. *MIN_SAMPLES = 10 — threshold almost never met* (#129): Groups needed ≥10 evolution run records before the daemon would evolve their genome, a threshold rarely reached. Reduced to `3` samples, which is sufficient for basic fitness decisions while avoiding single-sample noise.
+
+5. *Error/malformed JSON container output not recorded in evolution_runs* (#129): `container_runner.py` returned early on missing output markers or JSON parse errors without calling `record_run()`, causing silent data loss and underestimating failure rates in fitness calculations. Fixed by calling `record_run(..., success=False)` before all early-exit error paths.
+
+6. *fitness.py record_run silent warning* (#129): The `except Exception` block in `record_run()` used `log.warning`, making DB errors easy to miss. Changed to `log.error("record_run failed (jid=%s): %s", jid, exc)`.
+
+7. *genome.py upsert_genome silent warning* (#129): Similarly changed from `log.warning` to `log.error("upsert_genome failed (jid=%s): %s", jid, exc)`.
+
+8. *get_active_evolution_jids returns empty on cold start* (#129): `db.get_active_evolution_jids()` only queried `evolution_runs`, returning an empty list on fresh deployments (causing "Evaluating 0 group(s)"). Fixed by also including groups with recent conversation history in `messages` table, bootstrapping the evolution daemon for cold-start deployments.
 
 ---
 

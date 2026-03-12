@@ -469,6 +469,10 @@ async def run_container_agent(
                     "\n".join(_redact_secrets(l) for l in stderr_lines[-5:])
                 )
             log.warning("No valid output markers in container stdout")
+            # 記錄失敗執行到演化引擎，確保適應度計算有完整樣本（含錯誤案例）
+            response_ms = int((time.time() - t0) * 1000)
+            record_run(jid, run_id, response_ms, retry_count=0, success=False)
+            _record_docker_failure()
             return {"status": "error", "error": "no output markers", "messages": []}
 
         # 截取兩個標記之間的內容並解析為 JSON
@@ -481,6 +485,10 @@ async def run_container_agent(
             result = json.loads(raw)
         except json.JSONDecodeError as e:
             log.error("Container output JSON parse error: %s | raw=%r", e, raw[:200])
+            # 記錄 JSON 解析失敗的執行，確保演化引擎收到完整的失敗樣本
+            response_ms = int((time.time() - t0) * 1000)
+            record_run(jid, run_id, response_ms, retry_count=0, success=False)
+            _record_docker_failure()
             return {"status": "error", "error": f"JSON parse error: {e}", "messages": []}
 
         # 若 container 有產生回覆文字，透過 on_output callback 發送到聊天室

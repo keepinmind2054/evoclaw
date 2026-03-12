@@ -544,19 +544,35 @@ def get_evolution_runs(jid: str, days: int = 7) -> list[dict]:
 
 def get_active_evolution_jids(days: int = 7) -> list[str]:
     """
-    取得在過去 days 天內有執行記錄的所有群組 JID 清單。
+    取得需要演化評估的所有群組 JID 清單。
 
-    演化 daemon 用此函式找出需要評估的群組，
-    避免對沒有活躍數據的群組做無意義的演化計算。
+    包含兩類群組：
+    1. 在過去 days 天內有 evolution_runs 記錄的群組
+    2. 冷啟動群組：有對話歷史但尚無 evolution_runs 的群組（確保新群組也能被評估）
+
+    若只查 evolution_runs，剛啟動的系統（表為空）永遠回傳空列表，
+    導致 Evolution daemon 顯示「Evaluating 0 group(s)」並跳過所有群組。
     _db_lock ensures thread-safety (called from evolution daemon via asyncio.to_thread).
     """
     with _db_lock:
         db = get_db()
+        # Groups with recent evolution run records
         rows = db.execute("""
             SELECT DISTINCT jid FROM evolution_runs
             WHERE timestamp > datetime('now', ? || ' days')
         """, (f"-{days}",)).fetchall()
-        return [r["jid"] for r in rows]
+        jids = {r["jid"] for r in rows}
+
+        # Cold-start bootstrap: also include groups that have conversation history
+        # but no evolution_runs yet, so the daemon can seed their first genome.
+        history_rows = db.execute("""
+            SELECT DISTINCT chat_jid FROM messages
+            WHERE timestamp > ? AND is_bot_message = 0
+        """, (int((time.time() - days * 86400) * 1000),)).fetchall()
+        for r in history_rows:
+            jids.add(r["chat_jid"])
+
+        return sorted(jids)
 
 
 def get_recent_run_stats(minutes: int = 5) -> Optional[dict]:
