@@ -69,7 +69,12 @@ async def evolution_loop(stop_event: asyncio.Event) -> None:
         # Running here means maintenance happens every 24h without an additional loop,
         # ensuring long-running processes don't accumulate rows indefinitely.
         try:
-            await asyncio.to_thread(_sync_prune_logs)
+            await asyncio.wait_for(
+                asyncio.to_thread(_sync_prune_logs),
+                timeout=300.0,
+            )
+        except asyncio.TimeoutError:
+            log.warning("evolution: prune_logs timed out after 300s — skipping this cycle")
         except Exception as e:
             log.warning("Periodic log pruning failed (non-fatal): %s", e)
 

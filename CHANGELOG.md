@@ -5,6 +5,18 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.26] - 2026-03-12
+
+### Fixed
+- **#112** `evolution/daemon.py`: `_sync_prune_logs()` called via `asyncio.to_thread()` now wrapped in `asyncio.wait_for(..., timeout=300.0)`; a `TimeoutError` logs a warning and skips the pruning cycle instead of hanging the evolution daemon indefinitely
+- **#113** `ipc_watcher.py`: `_sanitize_error_for_notification()` improved to replace absolute paths with `<path>` using two regex patterns (Windows drive-letter paths and Unix absolute paths with 3+ char components); length cap raised from 120 to 500 characters with ellipsis suffix
+- **#114** `ipc_watcher.py`: subagent result truncation in `_run_subagent()` changed from character-index slicing (`result_text[:N]`) to byte-aware truncation (`_encoded[:N].decode("utf-8", errors="ignore")`), ensuring multi-byte UTF-8 characters are not split at a byte boundary
+- **#115** `task_scheduler.py`: when `get_group_fn(jid)` returns `None` in `run_task()`, instead of marking the task as `status="error"` (permanent disable), a 1-hour backoff is applied via `db.update_task(task_id, next_run=backoff_next)` so orphaned tasks retry after a cooldown rather than being silently killed
+- **#116** `main.py`: group fail counter no longer resets to 0 when cooldown expires; instead decays by 2 (`max(0, count - 2)`) so groups with repeated failures accumulate longer cooldowns; cooldown expiry now logged at INFO with jid and remaining count
+
+### Chore
+- Version bump 1.10.25 → 1.10.26
+
 ## [1.10.25] - 2026-03-12
 
 ### Fixed

@@ -55,16 +55,17 @@ def _ipc_task_done_callback(task: asyncio.Task) -> None:
         log.error("Unhandled exception in IPC task %s: %s", task.get_name(), exc, exc_info=exc)
 
 
+import re as _re
+
 def _sanitize_error_for_notification(error: str) -> str:
-    """Strip filesystem paths and sensitive details from error strings before
-    sending them to user-facing chat.  Only the exception type and a short
-    summary are kept to avoid leaking internal directory layout."""
-    import re
-    # Remove absolute paths (Unix and Windows style)
-    sanitized = re.sub(r"[/\\][^\s'\",:;()[\]{}]+", "<path>", error)
-    # Collapse whitespace and truncate
-    sanitized = " ".join(sanitized.split())
-    return sanitized[:120]
+    """Remove or relativize filesystem paths from error messages."""
+    # Replace any absolute path starting with / or drive letter
+    error = _re.sub(r'[A-Za-z]:[\\\/][^\s\'",:;()\[\]{}]*', '<path>', error)
+    error = _re.sub(r'\/[^\s\'",:;()\[\]{}]{3,}', '<path>', error)
+    # Cap length
+    if len(error) > 500:
+        error = error[:500] + '…'
+    return error
 
 
 def _notify_main_group_error(filename: str, error: str) -> None:
@@ -623,12 +624,10 @@ async def _run_subagent(
             )
             result_text = result.get("result") or result.get("error") or "(no output)"
         # Enforce size cap before writing to disk (Issue #57)
-        if len(result_text.encode("utf-8", errors="replace")) > _SUBAGENT_RESULT_MAX_BYTES:
-            log.warning(
-                "Subagent %s result truncated: %d bytes > %d byte cap",
-                request_id, len(result_text), _SUBAGENT_RESULT_MAX_BYTES,
-            )
-            result_text = result_text[:_SUBAGENT_RESULT_MAX_BYTES] + "\n...[truncated]"
+        _encoded = result_text.encode("utf-8", errors="replace")
+        if len(_encoded) > _SUBAGENT_RESULT_MAX_BYTES:
+            result_text = _encoded[:_SUBAGENT_RESULT_MAX_BYTES].decode("utf-8", errors="ignore")
+            log.warning("Subagent result truncated from %d to %d bytes", len(_encoded), _SUBAGENT_RESULT_MAX_BYTES)
         output_file.write_text(
             json.dumps({"requestId": request_id, "output": result_text}),
             encoding="utf-8"

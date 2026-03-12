@@ -64,9 +64,11 @@ async def run_task(task: dict, get_group_fn: Callable, run_agent_fn: Callable) -
     start = int(time.time() * 1000)
 
     group = get_group_fn(jid)
-    if not group:
-        log.warning(f"Task {task_id}: group not found for JID {jid!r} — disabling task")
-        db.update_task(task_id, status="error", last_result=f"Group not found for JID: {jid!r}")
+    if group is None:
+        log.warning("task_scheduler: group %s not found for task %s — applying backoff", jid, task_id)
+        # Backoff: delay 1 hour before next retry (task may have been orphaned)
+        backoff_next = int(time.time()) + 3600
+        db.update_task(task_id, next_run=backoff_next)
         return
 
     log.info(f"Running task {task_id} for {group_folder}")

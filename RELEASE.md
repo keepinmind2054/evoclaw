@@ -152,7 +152,34 @@ After release, verify:
 
 ---
 
-**Last Updated:** 2026-03-12 (v1.10.25)
+**Last Updated:** 2026-03-12 (v1.10.26)
+
+---
+
+## v1.10.26 Release Notes
+
+### Reliability, Safety, and Correctness Fixes (Issues #112–#116)
+
+**Problems Fixed**:
+
+1. *`evolution/daemon.py` prune_logs has no timeout* (#112): `asyncio.to_thread(_sync_prune_logs)` was called with no timeout. A slow or locked SQLite database during WAL checkpoint or log pruning could hang the evolution daemon's background thread indefinitely. Wrapped in `asyncio.wait_for(..., timeout=300.0)`; a `TimeoutError` logs a warning and skips the pruning cycle, allowing the evolution loop to continue normally on the next 24-hour cycle.
+
+2. *`ipc_watcher.py` `_sanitize_error_for_notification()` shows relative paths only* (#113): The previous regex `r"[/\\][^\s'\",:;()[\]{}]+"` was anchored to the first path separator character and did not reliably strip Windows absolute paths (e.g. `C:\Users\foo\...`). Replaced with two regexes: one for Windows drive-letter paths (`[A-Za-z]:[\\\/]...`) and one for Unix absolute paths with 3+ component characters (`\/[^\s...]{3,}`). Cap raised from 120 to 500 characters with an ellipsis suffix for better diagnostic context.
+
+3. *`ipc_watcher.py` subagent result byte truncation incorrect* (#114): `_run_subagent()` checked the result size in bytes but then sliced with `result_text[:_SUBAGENT_RESULT_MAX_BYTES]`, which counts characters not bytes. For multi-byte UTF-8 text (CJK, emoji) this could write a result that still exceeds the byte cap. Changed to encode first, slice the byte array, then decode with `errors="ignore"` to drop any partial multi-byte sequence at the cut point.
+
+4. *`task_scheduler.py` orphan task permanently disabled when group not found* (#115): When `get_group_fn(jid)` returned `None`, `run_task()` called `db.update_task(task_id, status="error")`, permanently disabling the task. This was too aggressive — the group may be temporarily unavailable or about to be re-registered. Changed to apply a 1-hour backoff (`next_run = now + 3600`) and return, allowing the task to retry after the cooldown rather than being killed outright.
+
+5. *`main.py` group fail counter resets to zero after cooldown* (#116): After `_GROUP_FAIL_COOLDOWN` elapsed, `_group_fail_counts[jid]` was reset to 0. This meant a group that had accumulated 5 failures and recovered would have the same cooldown behaviour as a group with 1 failure on the very next error. Changed to decay by 2 per cooldown cycle (`max(0, count - 2)`) so groups with a history of repeated failures take longer to fully recover their full retry budget. Cooldown expiry is now logged at INFO level with the jid and resulting count.
+
+**Upgrade**:
+
+No `docker build` needed — all changes are in the host process. Restart EvoClaw to apply.
+
+```bash
+git pull
+python run.py start
+```
 
 ---
 

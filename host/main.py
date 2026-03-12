@@ -275,9 +275,12 @@ async def _process_group_messages(group: dict, messages: list[dict],
                 )
                 return
             else:
-                # Cooldown expired — reset counter and allow retry
-                _group_fail_counts[jid] = 0
+                # Cooldown expired — decay counter and allow retry
+                # Instead of resetting to 0, reduce by 2 so repeated failures
+                # accumulate longer cooldowns
+                _group_fail_counts[jid] = max(0, _group_fail_counts.get(jid, 0) - 2)
                 _group_fail_timestamps.pop(jid, None)
+                log.info("group %s cooldown expired; fail_count decayed to %d", jid, _group_fail_counts[jid])
 
     requires_trigger = bool(group.get("requires_trigger", True))
     is_main = bool(group.get("is_main"))
