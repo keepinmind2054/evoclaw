@@ -152,7 +152,49 @@ After release, verify:
 
 ---
 
-**Last Updated:** 2026-03-12 (v1.10.20)
+**Last Updated:** 2026-03-12 (v1.10.21)
+
+---
+
+## v1.10.21 Release Notes
+
+### Docker: Production-Ready Image with Full MCP/Tool-Use Support
+
+**Problems Fixed / Capabilities Added**:
+
+1. *Document generation limited to PPT only* (Issue #77): Pre-install `reportlab` (PDF), `openpyxl` (Excel), `python-docx` (Word) in the image. All four document types (PPT/PDF/Excel/Word) are now available without any runtime pip install or network dependency.
+
+2. *No Python web scraping libraries* (Issue #78): Pre-install `httpx`, `beautifulsoup4`, `lxml`. Agents can now scrape and parse HTML/XML pages using lightweight Python libraries, complementing the existing Chromium browser automation.
+
+3. *No image processing support* (Issue #79): Pre-install `Pillow` with required system libs (`libjpeg-dev`, `libpng-dev`, `zlib1g-dev`, `libcairo2`). Agents can now resize, convert, annotate, and embed images in generated documents.
+
+4. *No data science libraries* (Issue #80): Pre-install `pandas`, `numpy`, `matplotlib`. Agents can now analyze tabular data, compute statistics, and generate charts in-container.
+
+5. *Incomplete CJK font stack* (Issue #81): Add `fonts-liberation` and `fonts-noto-color-emoji` alongside existing Noto CJK and WQY fonts. Full Japanese, Korean, and Chinese (simplified + traditional) rendering across all generated document types.
+
+6. *Missing common system utilities* (Issue #82): Add `wget`, `unzip`, `jq`, `ffmpeg`. Standard tools needed by MCP server setup scripts, archive handling, JSON shell processing, and media conversion.
+
+7. *Slim base image blocks native Python extension builds* (Issue #83): Upgrade from `node:22-slim` to `node:22` (full Debian). Add `python3-dev`, `build-essential`, `gcc`. Native extensions (lxml, numpy, Pillow) now compile from source when pre-built wheels are unavailable.
+
+8. *`apt-get install` without `--no-install-recommends`*: Added the flag to the install block to keep the image lean despite the base upgrade.
+
+**Architecture**:
+
+- Base: `node:22` (Node.js 22 LTS, full Debian) — Node.js included for MCP servers
+- User: `node` (uid 1000, non-root) — production security
+- Python: system Python 3 via apt + pip with `--break-system-packages`
+- Infrastructure packages: owned by Dockerfile (document gen, scraping, images, data science)
+- Project packages: owned by `requirements.txt` (google-genai, openai, anthropic)
+
+**Upgrade**:
+
+Rebuild the agent container image to pick up all new capabilities:
+
+```bash
+git pull
+docker build -t evoclaw-agent:1.10.21 container/
+docker tag evoclaw-agent:1.10.21 evoclaw-agent:latest
+```
 
 ---
 

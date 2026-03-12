@@ -1,22 +1,38 @@
-# EvoClaw Agent Container
-# Runs Gemini API agent (Python) in isolated Linux VM with browser automation
+# EvoClaw Agent Container - Production Ready v1.10.21
+# Supports: Multi-provider LLM (Gemini/Claude/OpenAI), document generation,
+#           web scraping, browser automation, image processing, data analysis,
+#           MCP protocol (Node.js), CJK fonts, non-root security
 
-FROM node:22-slim
+FROM node:22
 
-# Install system dependencies: Python3, Chromium, fonts, CJK fonts, PPT/PDF support
-RUN apt-get update && apt-get install -y \
+# ── System dependencies ────────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Python runtime + build tools
     python3 \
     python3-pip \
     python3-venv \
+    python3-dev \
+    build-essential \
+    gcc \
+    # Network utilities
+    curl \
+    wget \
+    git \
+    # Archive / data utilities
+    unzip \
+    jq \
+    # Browser automation (Chromium for Playwright / agent-browser)
     chromium \
-    fonts-liberation \
-    fonts-noto-cjk \
-    fonts-noto-color-emoji \
-    fonts-wqy-zenhei \
-    fonts-wqy-microhei \
+    # Font rendering libraries
     libfreetype6 \
-    libpng16-16 \
-    zlib1g \
+    libfontconfig1 \
+    libpangocairo-1.0-0 \
+    # Image / graphics libraries
+    libjpeg-dev \
+    libpng-dev \
+    zlib1g-dev \
+    libcairo2 \
+    # Chromium runtime dependencies
     libgbm1 \
     libnss3 \
     libatk-bridge2.0-0 \
@@ -26,54 +42,77 @@ RUN apt-get update && apt-get install -y \
     libxdamage1 \
     libxrandr2 \
     libasound2 \
-    libpangocairo-1.0-0 \
-    libcups2 \
     libdrm2 \
     libxshmfence1 \
-    curl \
-    git \
+    libcups2 \
+    # Media processing
+    ffmpeg \
+    # CJK and general fonts — comprehensive coverage
+    fonts-liberation \
+    fonts-noto-cjk \
+    fonts-noto-color-emoji \
+    fonts-wqy-zenhei \
+    fonts-wqy-microhei \
     && rm -rf /var/lib/apt/lists/* \
     && fc-cache -fv
 
-# Set Chromium path for agent-browser
+# ── Browser paths for agent-browser / Playwright ──────────────────────────────
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Install agent-browser globally (Node.js tool for web browsing)
+# ── Node.js: install agent-browser globally ────────────────────────────────────
 RUN npm install -g agent-browser
 
-# Set up Python app directory
+# ── Python: pre-install infrastructure packages ───────────────────────────────
+# Separated from requirements.txt so project deps stay lean and focused.
+# Infrastructure packages rarely change; this layer is cached between builds.
+RUN pip3 install --no-cache-dir --break-system-packages \
+    # Document generation (Issue #77)
+    python-pptx==1.0.2 \
+    reportlab \
+    openpyxl \
+    python-docx \
+    # Web scraping (Issue #78)
+    httpx \
+    beautifulsoup4 \
+    lxml \
+    # Image processing (Issue #79)
+    Pillow \
+    # Data analysis (Issue #80)
+    pandas \
+    numpy \
+    matplotlib \
+    # Utilities
+    python-dateutil \
+    pytz \
+    aiohttp
+
+# ── Python: install agent-specific requirements ───────────────────────────────
 WORKDIR /app
-
-# Pre-install python-pptx (eliminates runtime pip install / network dependency)
-RUN pip3 install --break-system-packages --no-cache-dir \
-    python-pptx==1.0.2
-
-# Install Python dependencies
 COPY agent-runner/requirements.txt ./
-RUN pip3 install --break-system-packages -r requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 
-# Copy Python agent
+# ── Copy agent source ─────────────────────────────────────────────────────────
 COPY agent-runner/agent.py ./
 
-# Create workspace directories
-RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input
+# ── Create workspace directories ──────────────────────────────────────────────
+RUN mkdir -p /workspace/group /workspace/global /workspace/extra \
+             /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input
 
-# Create entrypoint: read stdin JSON, run Python agent
-RUN printf '#!/bin/bash\nset -e\ncat > /tmp/input.json\npython3 /app/agent.py < /tmp/input.json\n' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+# ── Entrypoint: read stdin JSON → run Python agent → stdout JSON ──────────────
+RUN printf '#!/bin/bash\nset -e\ncat > /tmp/input.json\npython3 /app/agent.py < /tmp/input.json\n' \
+    > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
-# Set ownership for non-root user
+# ── Non-root security: use the built-in 'node' user (uid 1000) ───────────────
 RUN chown -R node:node /workspace && chmod 777 /home/node
 
-# Switch to non-root user
 USER node
 
-# Set working directory
 WORKDIR /workspace/group
 
-# Environment settings
+# ── Runtime environment ───────────────────────────────────────────────────────
 ENV PYTHONUNBUFFERED=1
 ENV LANG=C.UTF-8
+ENV NODE_ENV=production
 
-# Entry point reads JSON from stdin, outputs JSON to stdout
 ENTRYPOINT ["/app/entrypoint.sh"]

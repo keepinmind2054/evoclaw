@@ -5,6 +5,24 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.21] - 2026-03-12
+
+### Added
+- **Production-ready Docker image** (`container/Dockerfile`): upgraded base from `node:22-slim` to `node:22` (full Debian) for broader system library compatibility needed by native Python extensions and MCP tooling (Issue #83)
+- **Complete document generation stack** pre-installed in image: `reportlab` (PDF), `openpyxl` (Excel), `python-docx` (Word) alongside existing `python-pptx==1.0.2` — eliminates runtime pip installs for all document types (Issue #77)
+- **Web scraping stack** pre-installed: `httpx`, `beautifulsoup4`, `lxml` — agents can scrape and parse HTML without runtime network dependency (Issue #78)
+- **Image processing** pre-installed: `Pillow` with system libs `libjpeg-dev`, `libpng-dev`, `zlib1g-dev`, `libcairo2` — required by reportlab image embedding and future vision workflows (Issue #79)
+- **Data science stack** pre-installed: `pandas`, `numpy`, `matplotlib` — enables in-container data analysis, tabular processing, and chart generation (Issue #80)
+- **Complete CJK font coverage**: added `fonts-liberation`, `fonts-noto-color-emoji` alongside existing `fonts-noto-cjk`, `fonts-wqy-zenhei`, `fonts-wqy-microhei`; all run through `fc-cache -fv` (Issue #81)
+- **System utilities**: added `wget`, `unzip`, `jq`, `ffmpeg` — covers archive extraction, JSON shell scripting, and media processing required by many MCP server setup scripts (Issue #82)
+- **Build tools**: added `python3-dev`, `build-essential`, `gcc` so pip packages with C extensions (lxml, Pillow, numpy) compile correctly without pre-built wheels
+- **Infrastructure vs project separation**: Dockerfile now owns all infrastructure Python packages; `requirements.txt` stays lean (only `google-genai`, `openai`, `anthropic`)
+- **`libfontconfig1`** and **`libpangocairo-1.0-0`** added to ensure font rendering works correctly in headless PDF/PPT generation
+
+### Changed
+- Base image: `node:22-slim` → `node:22` for full system library availability (Issue #83)
+- `apt-get install` now uses `--no-install-recommends` to keep image size minimal despite upgrading base
+
 ## [1.10.20] - 2026-03-12
 
 ### Changed
