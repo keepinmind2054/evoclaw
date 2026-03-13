@@ -379,6 +379,8 @@ async def run_container_agent(
     ]
 
     log.info(f"Starting container {container_name} for group {folder} (run_id={run_id})")
+    _started_at = time.monotonic()
+    db.log_container_start(run_id, jid, folder, container_name, time.time())
 
     input_bytes = input_json.encode("utf-8")
 
@@ -478,6 +480,7 @@ async def run_container_agent(
             # 記錄失敗執行到演化引擎，確保適應度計算有完整樣本（含錯誤案例）
             response_ms = int((time.time() - t0) * 1000)
             record_run(jid, run_id, response_ms, retry_count=0, success=False)
+            db.log_container_finish(run_id, time.time(), "error", _redact_secrets(stderr) if stderr else "", stdout[:200] if stdout else "", response_ms)
             _record_docker_failure()
             return {"status": "error", "error": "no output markers", "messages": []}
 
@@ -494,6 +497,7 @@ async def run_container_agent(
             # 記錄 JSON 解析失敗的執行，確保演化引擎收到完整的失敗樣本
             response_ms = int((time.time() - t0) * 1000)
             record_run(jid, run_id, response_ms, retry_count=0, success=False)
+            db.log_container_finish(run_id, time.time(), "error", _redact_secrets(stderr) if stderr else "", stdout[:200] if stdout else "", response_ms)
             _record_docker_failure()
             return {"status": "error", "error": f"JSON parse error: {e}", "messages": []}
 
@@ -520,6 +524,9 @@ async def run_container_agent(
         response_ms = int((time.time() - t0) * 1000)
         # 記錄成功執行數據到演化引擎（適應度追蹤）
         record_run(jid, run_id, response_ms, retry_count=0, success=True)
+        safe_stderr = _redact_secrets(stderr) if stderr else ""
+        stdout_preview = stdout[:200] if stdout else ""
+        db.log_container_finish(run_id, time.time(), "success", safe_stderr, stdout_preview, response_ms)
         _record_docker_success()
 
         if on_success:
@@ -532,7 +539,9 @@ async def run_container_agent(
         log.error(f"Container {folder} timed out after {config.CONTAINER_TIMEOUT}s")
         await _stop_container(container_name)
         # 記錄超時失敗數據（適應度扣分）
-        record_run(jid, run_id, int(config.CONTAINER_TIMEOUT * 1000), retry_count=0, success=False)
+        _timeout_ms = int(config.CONTAINER_TIMEOUT * 1000)
+        record_run(jid, run_id, _timeout_ms, retry_count=0, success=False)
+        db.log_container_finish(run_id, time.time(), "timeout", "Container timed out", "", _timeout_ms)
         _record_docker_failure()
         return {"status": "error", "result": None, "error": "Container timed out"}
     except asyncio.CancelledError:
@@ -548,6 +557,7 @@ async def run_container_agent(
         response_ms = int((time.time() - t0) * 1000)
         # 記錄異常失敗數據
         record_run(jid, run_id, response_ms, retry_count=0, success=False)
+        db.log_container_finish(run_id, time.time(), "error", str(e), "", response_ms)
         _record_docker_failure()
         return {"status": "error", "result": None, "error": str(e)}
     finally:

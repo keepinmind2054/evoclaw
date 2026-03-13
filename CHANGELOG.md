@@ -5,6 +5,15 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.5] — 2026-03-13
+
+### Added
+- `host/db.py`: 新增 `container_logs` 資料表，記錄每次 container 執行的 stderr/stdout 摘要
+- `host/db.py`: 新增 `log_container_start()` / `log_container_finish()` / `get_container_logs()` 函數
+- `host/container_runner.py`: 在所有執行路徑（success/error/timeout/exception）呼叫 log 函數
+- `host/dashboard.py`: 新增「🐳 Container Logs」分頁 — 可依群組/狀態過濾，顯示執行時間、耗時、stderr 摘要
+- 新增 `GET /api/container-logs` 端點（支援 `jid`、`status`、`limit` 查詢參數）
+
 ## [1.11.4] — 2026-03-13
 
 ### Added
