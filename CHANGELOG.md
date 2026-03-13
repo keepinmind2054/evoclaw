@@ -5,6 +5,11 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.10] — 2026-03-13
+
+### Fixed
+- `container/agent-runner/agent.py`: secrets 設入 `os.environ` 後自動執行 `gh auth login --with-token`，解決 `gh repo create` 及 `git push` 因「no credentials found」失敗的問題；認證成功/失敗/gh 未安裝均有 log
+
 ## [1.11.9] — 2026-03-13
 
 ### Changed

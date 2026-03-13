@@ -17,11 +17,11 @@
 
 | 版本 | 摘要 |
 |------|------|
+| **v1.11.10** | Container 啟動後自動 `gh auth login --with-token`，修復 `gh repo create` / `git push` 因無憑證失敗問題 |
 | **v1.11.9** | `🔧 TOOL args=` 和 `🔧 RESULT` 截斷上限 400→1500 字，Container Logs 可見完整 bash command 和執行結果 |
 | **v1.11.8** | `📋 SYSTEM` log 顯示 system prompt 前 800 字；`📚 HISTORY` log 顯示最近 3 輪對話，Container Logs 可見完整 LLM context |
 | **v1.11.7** | `💬 USER` + `📤 REPLY` log 顯示實際訊息內容；修復 Dashboard Modal undefined；stderr 上限 8KB→32KB |
 | **v1.11.6** | Container Logs 分頁新增「📋 展開」按鈕，Modal 顯示完整 stderr；摘要由 3 行升至 5 行 |
-| **v1.11.5** | 新增 `container_logs` 表，持久化每次 container 的 stderr/stdout 摘要；Dashboard 新增「🐳 Container Logs」分頁和 `/api/container-logs` 端點 |
 
 ---
 

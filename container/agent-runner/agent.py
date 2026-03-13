@@ -1212,6 +1212,30 @@ def main():
     for k, v in secrets.items():
         os.environ[k] = v
 
+    # ── Auto-authenticate gh CLI ───────────────────────────────────────────────
+    # gh CLI requires explicit auth even if GITHUB_TOKEN is in os.environ.
+    # Run `gh auth login --with-token` so the agent can use gh repo create, etc.
+    _gh_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN", "")
+    if _gh_token:
+        import subprocess as _subprocess
+        try:
+            _gh_result = _subprocess.run(
+                ["gh", "auth", "login", "--with-token"],
+                input=_gh_token.encode(),
+                capture_output=True,
+                timeout=10,
+            )
+            if _gh_result.returncode == 0:
+                _log("🔑 GH AUTH", "gh CLI authenticated ✓")
+            else:
+                _log("⚠️ GH AUTH", f"gh auth failed: {_gh_result.stderr.decode(errors='replace')[:200]}")
+        except FileNotFoundError:
+            _log("⚠️ GH AUTH", "gh CLI not installed in container")
+        except Exception as _gh_exc:
+            _log("⚠️ GH AUTH", f"gh auth error: {_gh_exc}")
+    else:
+        _log("⚠️ GH AUTH", "no GITHUB_TOKEN in secrets — gh CLI unauthenticated")
+
     # ── Dynamic tool hot-loading ──────────────────────────────────────────────
     # 從 /app/dynamic_tools/ 掛載目錄載入 Skills 安裝的 container_tools
     # 必須在 API key 設定後、LLM loop 前執行，讓工具有機會使用環境變數

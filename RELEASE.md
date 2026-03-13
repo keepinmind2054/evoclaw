@@ -1,3 +1,20 @@
+# v1.11.10 — Container 啟動時自動執行 gh auth login
+
+**Released**: 2026-03-13
+
+## 修復
+
+- `container/agent-runner/agent.py`: secrets 設入 `os.environ` 後自動執行 `gh auth login --with-token`，解決 `gh repo create` 及 `git push` 顯示「no credentials found」的問題
+- 認證成功記錄 `🔑 GH AUTH gh CLI authenticated ✓`；失敗、gh 未安裝、無 token 均有對應 `⚠️ GH AUTH` log
+
+## 升級說明
+
+```bash
+git pull origin main
+```
+
+---
+
 # v1.11.9 — Tool Log 截斷上限 400→1500 字
 
 **Released**: 2026-03-13
