@@ -5,6 +5,11 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.13] — 2026-03-13
+
+### Added
+- `.env.example`: 加入 `GITHUB_TOKEN` 說明（附 GitHub settings token 連結），讓用戶知道必須設定此值才能讓 container 使用 git push / gh CLI
+
 ## [1.11.12] — 2026-03-13
 
 ### Fixed
