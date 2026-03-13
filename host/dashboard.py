@@ -177,6 +177,12 @@ tr:nth-child(even) td{background:#1a1a2e}
     <div class="nav-item" onclick="showTab('memory')" id="nav-memory">
       <span class="icon">🧠</span><span>記憶查看</span>
     </div>
+    <div class="nav-item" onclick="showTab('skills')" id="nav-skills">
+      <span class="icon">⚡</span><span>Skills</span>
+    </div>
+    <div class="nav-item" onclick="showTab('usage')" id="nav-usage">
+      <span class="icon">📈</span><span>使用統計</span>
+    </div>
   </div>
   <div id="main">
     <div id="tab-status"></div>
@@ -187,6 +193,8 @@ tr:nth-child(even) td{background:#1a1a2e}
     <div id="tab-evolution" style="display:none"></div>
     <div id="tab-devengine" style="display:none"></div>
     <div id="tab-memory" style="display:none"></div>
+    <div id="tab-skills" style="display:none"></div>
+    <div id="tab-usage" style="display:none"></div>
   </div>
 </div>
 
@@ -206,7 +214,7 @@ let _logEs = null;
 let _autoRefresh = null;
 
 function showTab(name) {
-  ['status','logs','manage','settings','messages','evolution','devengine','memory'].forEach(t => {
+  ['status','logs','manage','settings','messages','evolution','devengine','memory','skills','usage'].forEach(t => {
     document.getElementById('tab-'+t).style.display = t===name?'':'none';
     document.getElementById('nav-'+t).classList.toggle('active', t===name);
   });
@@ -221,6 +229,8 @@ function showTab(name) {
   else if (name==='evolution') { loadEvolution(); _autoRefresh = setInterval(loadEvolution, 10000); }
   else if (name==='devengine') { loadDevEngine(); _autoRefresh = setInterval(loadDevEngine, 4000); }
   else if (name==='memory') { loadMemory(); _autoRefresh = setInterval(loadMemory, 15000); }
+  else if (name==='skills') { loadSkills(); _autoRefresh = setInterval(loadSkills, 30000); }
+  else if (name==='usage') { loadUsage(); _autoRefresh = setInterval(loadUsage, 15000); }
 }
 
 // ── Fetch helper ───────────────────────────────────────────────────────────
@@ -1166,6 +1176,102 @@ async function loadMemory() {
   document.getElementById('tab-memory').innerHTML = html;
 }
 
+// ── Tab 9: ⚡ Skills ───────────────────────────────────────────────────────
+async function loadSkills() {
+  let html = '<div class="section-title">⚡ Skills 瀏覽器</div>';
+  const data = await api('/api/skills');
+  if (!data) {
+    html += '<div class="card"><div class="empty">無法載入 Skills 資料</div></div>';
+    document.getElementById('tab-skills').innerHTML = html;
+    return;
+  }
+  html += `<div class="card"><h3>已安裝技能（${data.count || 0} 個）</h3>`;
+  if (data.skills && data.skills.length > 0) {
+    html += '<table><thead><tr><th>名稱</th><th>版本</th><th>作者</th><th>說明</th><th>來源</th></tr></thead><tbody>';
+    for (const s of data.skills) {
+      html += `<tr>
+        <td style="font-weight:bold;color:#a78bfa">${esc(s.name)}</td>
+        <td>${s.version ? badge(s.version,'blue') : '<span class="na">—</span>'}</td>
+        <td style="font-size:11px">${esc(s.author) || '<span class="na">—</span>'}</td>
+        <td style="font-size:11px;max-width:320px;word-break:break-word">${esc(s.description) || '<span class="na">—</span>'}</td>
+        <td style="font-size:10px;color:#6b7280;word-break:break-all">${s.source ? `<a href="${esc(s.source)}" style="color:#60a5fa">${esc(s.source)}</a>` : '<span class="na">—</span>'}</td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+  } else {
+    html += '<div class="empty">skills/ 目錄下尚無技能</div>';
+  }
+  html += '</div>';
+  document.getElementById('tab-skills').innerHTML = html;
+}
+
+// ── Tab 10: 📈 使用統計 ────────────────────────────────────────────────────
+async function loadUsage() {
+  let html = '<div class="section-title">📈 使用統計</div>';
+  const data = await api('/api/usage');
+  if (!data) {
+    html += '<div class="card"><div class="empty">無法載入統計資料</div></div>';
+    document.getElementById('tab-usage').innerHTML = html;
+    return;
+  }
+
+  // Task run stats summary cards
+  const ts = data.task_stats || {};
+  const total = ts.total || 0;
+  const successRate = total > 0 ? Math.round((ts.success || 0) / total * 100) : 0;
+  html += '<div class="grid-4" style="margin-bottom:12px">';
+  html += statCard('Task Runs', total, '全部執行次數');
+  html += statCard('Success Rate', successRate + '%', `${ts.success||0} 成功 / ${ts.error||0} 失敗`);
+  html += statCard('Avg Duration', (ts.avg_ms||0) + ' ms', '平均每次任務時間');
+  const msgTotal = (data.message_stats || []).reduce((s, r) => s + (r.count || 0), 0);
+  html += statCard('Total Messages', msgTotal, '訊息總數（前 10 群組）');
+  html += '</div>';
+
+  // Top groups by message count
+  html += '<div class="card"><h3>💬 訊息最多的群組（Top 10）</h3>';
+  if (data.message_stats && data.message_stats.length > 0) {
+    const maxCount = data.message_stats[0].count || 1;
+    html += '<table><thead><tr><th>群組 JID</th><th>訊息數</th><th>佔比</th></tr></thead><tbody>';
+    for (const r of data.message_stats) {
+      const pct = Math.round((r.count / maxCount) * 100);
+      html += `<tr>
+        <td style="font-size:11px">${esc(r.jid)}</td>
+        <td style="color:#a78bfa;font-weight:bold">${r.count}</td>
+        <td style="min-width:120px">
+          <div style="background:#1a1a2e;border-radius:3px;height:8px;width:120px">
+            <div style="width:${pct}%;background:#7c3aed;height:8px;border-radius:3px"></div>
+          </div>
+        </td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+  } else {
+    html += '<div class="empty">尚無訊息記錄</div>';
+  }
+  html += '</div>';
+
+  // Evolution stats per group
+  html += '<div class="card"><h3>🧬 進化執行統計（Top 10 群組）</h3>';
+  if (data.evolution_stats && data.evolution_stats.length > 0) {
+    html += '<table><thead><tr><th>群組 JID</th><th>執行次數</th><th>成功次數</th><th>平均回應 ms</th></tr></thead><tbody>';
+    for (const r of data.evolution_stats) {
+      const succRate = r.runs > 0 ? Math.round((r.successes / r.runs) * 100) : 0;
+      html += `<tr>
+        <td style="font-size:11px">${esc(r.jid)}</td>
+        <td style="color:#a78bfa">${r.runs}</td>
+        <td>${r.successes} ${badge(succRate+'%', succRate>=80?'green':succRate>=50?'yellow':'red')}</td>
+        <td style="color:#60a5fa">${r.avg_ms} ms</td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+  } else {
+    html += '<div class="empty">尚無進化執行記錄</div>';
+  }
+  html += '</div>';
+
+  document.getElementById('tab-usage').innerHTML = html;
+}
+
 // Initial load
 showTab('status');
 </script>
@@ -1538,6 +1644,64 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 })
             except Exception as exc:
                 self._json({"error": str(exc)}, 500)
+
+        elif path == "/api/skills":
+            import yaml as _yaml
+            skills_dir = config.BASE_DIR / "skills"
+            skills = []
+            if skills_dir.exists():
+                for skill_path in sorted(skills_dir.iterdir()):
+                    manifest_file = skill_path / "manifest.yaml"
+                    if not manifest_file.exists():
+                        continue
+                    try:
+                        data = _yaml.safe_load(manifest_file.read_text(encoding="utf-8"))
+                        skills.append({
+                            "name": data.get("skill", skill_path.name),
+                            "version": data.get("version", ""),
+                            "description": data.get("description", ""),
+                            "author": data.get("author", ""),
+                            "source": data.get("source", ""),
+                        })
+                    except Exception as e:
+                        skills.append({"name": skill_path.name, "version": "", "description": str(e), "author": "", "source": ""})
+            self._json({"skills": skills, "count": len(skills)})
+
+        elif path == "/api/usage":
+            # Message stats per group
+            msg_stats = _fetch(
+                "SELECT chat_jid as jid, COUNT(*) as count FROM messages "
+                "GROUP BY chat_jid ORDER BY count DESC LIMIT 10"
+            )
+            # Task run stats
+            task_stats = {"total": 0, "success": 0, "error": 0, "avg_ms": 0}
+            try:
+                r = _fetch_one(
+                    "SELECT COUNT(*) as total, "
+                    "SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) as success, "
+                    "SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) as err, "
+                    "AVG(duration_ms) as avg_ms "
+                    "FROM task_run_logs"
+                )
+                if r:
+                    task_stats = {
+                        "total": r.get("total") or 0,
+                        "success": r.get("success") or 0,
+                        "error": r.get("err") or 0,
+                        "avg_ms": round(r.get("avg_ms") or 0),
+                    }
+            except Exception:
+                pass
+            # Evolution stats per group
+            evo_stats = _fetch(
+                "SELECT jid, COUNT(*) as runs, AVG(response_ms) as avg_ms, SUM(success) as successes "
+                "FROM evolution_runs GROUP BY jid ORDER BY runs DESC LIMIT 10"
+            )
+            evo_out = [
+                {"jid": r["jid"], "runs": r["runs"], "avg_ms": round(r.get("avg_ms") or 0), "successes": r.get("successes") or 0}
+                for r in evo_stats
+            ]
+            self._json({"message_stats": msg_stats, "task_stats": task_stats, "evolution_stats": evo_out})
 
         elif path == "/health":
             h = _get_health()

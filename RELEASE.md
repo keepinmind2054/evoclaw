@@ -1,3 +1,27 @@
+# v1.11.4 — Dashboard Skills 瀏覽器 + 使用統計
+
+**Released**: 2026-03-13
+
+## 新增功能
+
+- Dashboard 新增「⚡ Skills」分頁
+  - 掃描 `skills/` 目錄下所有子目錄的 `manifest.yaml`
+  - 顯示技能名稱、版本、作者、說明、來源連結
+- Dashboard 新增「📈 使用統計」分頁
+  - 訊息最多的群組 Top 10（含視覺化長條）
+  - 任務執行摘要：總數、成功率、失敗數、平均執行時間
+  - 進化執行統計：每群組執行次數、成功次數、平均回應 ms
+- 新增 `GET /api/skills` API 端點
+- 新增 `GET /api/usage` API 端點
+
+## 升級說明
+
+```bash
+git pull origin main
+```
+
+---
+
 # v1.11.3 — Dashboard 記憶系統查看器
 
 **Released**: 2026-03-13
