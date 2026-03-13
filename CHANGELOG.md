@@ -5,6 +5,14 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.4] — 2026-03-13
+
+### Added
+- `host/dashboard.py`: 新增「⚡ Skills」分頁 — 掃描 `skills/` 目錄並顯示每個技能的名稱、版本、作者、說明
+- `host/dashboard.py`: 新增「📈 使用統計」分頁 — 整合訊息數/群組、任務執行摘要（總數/成功率/平均時間）、進化執行統計
+- 新增 `GET /api/skills` 端點：掃描 `skills/*/manifest.yaml` 回傳技能清單
+- 新增 `GET /api/usage` 端點：整合 `messages`、`task_run_logs`、`evolution_runs` 三表統計
+
 ## [1.11.3] — 2026-03-13
 
 ### Added

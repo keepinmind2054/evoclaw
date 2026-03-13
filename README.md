@@ -17,11 +17,11 @@
 
 | 版本 | 摘要 |
 |------|------|
+| **v1.11.4** | Dashboard 新增「⚡ Skills 瀏覽器」（掃描 skills/ manifest.yaml）和「📈 使用統計」（訊息/任務/進化匯總）；新增 `/api/skills`、`/api/usage` 端點 |
 | **v1.11.3** | Dashboard 新增「🧠 記憶查看器」分頁：熱記憶、暖記憶日誌瀏覽、FTS5 混合搜尋；新增 `/api/memory` 端點 |
 | **v1.11.2** | 修復關機時 Telegram CRITICAL CancelledError：`finally` 順序改為先斷開頻道再取消 tasks；`disconnect()` 各步驟獨立 try/except (#135) |
 | **v1.11.1** | `CONTAINER_IMAGE` 預設改 `evoclaw-agent:latest`、新增 `Makefile` (#133) |
 | **v1.11.0** | OpenClaw 三層記憶系統：熱記憶（8KB MEMORY.md）、暖記憶（每日日誌 + Micro Sync）、冷記憶（FTS5 混合搜尋）、Weekly Compound |
-| **v1.10.28** | 修復記憶系統：保留 sessionId、歷史窗口 50 則；修復進化系統：週期 1h、MIN_SAMPLES 3 (#128–#129) |
 
 ---
 
