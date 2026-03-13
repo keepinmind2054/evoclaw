@@ -1,3 +1,26 @@
+# v1.11.5 — Container 執行 Log 持久化 + Dashboard 查看器
+
+**Released**: 2026-03-13
+
+## 新增功能
+
+- 新增 `container_logs` 資料表，持久化每次 container 執行的 stderr/stdout 摘要
+- `log_container_start()` / `log_container_finish()` 函數，覆蓋所有執行路徑（success/error/timeout/exception）
+- Dashboard 新增「🐳 Container Logs」分頁
+  - 依群組 JID 過濾
+  - 依狀態（success/error/timeout/running）過濾
+  - 顯示執行時間、耗時（ms）、stderr 最後 3 行摘要
+  - 每 5 秒自動刷新
+- 新增 `GET /api/container-logs` API 端點
+
+## 升級說明
+
+```bash
+git pull origin main
+```
+
+---
+
 # v1.11.4 — Dashboard Skills 瀏覽器 + 使用統計
 
 **Released**: 2026-03-13

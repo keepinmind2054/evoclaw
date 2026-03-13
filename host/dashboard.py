@@ -183,6 +183,9 @@ tr:nth-child(even) td{background:#1a1a2e}
     <div class="nav-item" onclick="showTab('usage')" id="nav-usage">
       <span class="icon">📈</span><span>使用統計</span>
     </div>
+    <div class="nav-item" onclick="showTab('container-logs')" id="nav-container-logs">
+      <span class="icon">🐳</span><span>Container Logs</span>
+    </div>
   </div>
   <div id="main">
     <div id="tab-status"></div>
@@ -195,6 +198,7 @@ tr:nth-child(even) td{background:#1a1a2e}
     <div id="tab-memory" style="display:none"></div>
     <div id="tab-skills" style="display:none"></div>
     <div id="tab-usage" style="display:none"></div>
+    <div id="tab-container-logs" style="display:none"></div>
   </div>
 </div>
 
@@ -214,7 +218,7 @@ let _logEs = null;
 let _autoRefresh = null;
 
 function showTab(name) {
-  ['status','logs','manage','settings','messages','evolution','devengine','memory','skills','usage'].forEach(t => {
+  ['status','logs','manage','settings','messages','evolution','devengine','memory','skills','usage','container-logs'].forEach(t => {
     document.getElementById('tab-'+t).style.display = t===name?'':'none';
     document.getElementById('nav-'+t).classList.toggle('active', t===name);
   });
@@ -231,6 +235,7 @@ function showTab(name) {
   else if (name==='memory') { loadMemory(); _autoRefresh = setInterval(loadMemory, 15000); }
   else if (name==='skills') { loadSkills(); _autoRefresh = setInterval(loadSkills, 30000); }
   else if (name==='usage') { loadUsage(); _autoRefresh = setInterval(loadUsage, 15000); }
+  else if (name==='container-logs') { loadContainerLogs(); _autoRefresh = setInterval(loadContainerLogs, 5000); }
 }
 
 // ── Fetch helper ───────────────────────────────────────────────────────────
@@ -1272,6 +1277,56 @@ async function loadUsage() {
   document.getElementById('tab-usage').innerHTML = html;
 }
 
+// ── Tab: 🐳 Container Logs ─────────────────────────────────────────────────
+let _clJid = '', _clStatus = '';
+async function loadContainerLogs() {
+  let qs = '';
+  if (_clJid) qs += '&jid=' + encodeURIComponent(_clJid);
+  if (_clStatus) qs += '&status=' + encodeURIComponent(_clStatus);
+  const data = await api('/api/container-logs?limit=100' + qs);
+  const logs = data?.logs || [];
+  const groups = [...new Set(logs.map(r => r.jid).filter(Boolean))];
+
+  let html = '<div class="section-title">🐳 Container Logs</div>';
+  html += '<div class="card" style="margin-bottom:10px">';
+  html += '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">';
+  html += `<select onchange="_clJid=this.value;loadContainerLogs()" style="background:#1a1a2e;color:#e2e8f0;border:1px solid #374151;padding:6px;border-radius:4px">`;
+  html += '<option value="">所有群組</option>';
+  for (const g of groups) html += `<option value="${esc(g)}" ${g===_clJid?'selected':''}>${esc(g)}</option>`;
+  html += '</select>';
+  html += `<select onchange="_clStatus=this.value;loadContainerLogs()" style="background:#1a1a2e;color:#e2e8f0;border:1px solid #374151;padding:6px;border-radius:4px">`;
+  html += '<option value="">所有狀態</option>';
+  for (const s of ['success','error','timeout','running']) {
+    html += `<option value="${s}" ${s===_clStatus?'selected':''}>${s}</option>`;
+  }
+  html += '</select>';
+  html += `<span style="color:#6b7280;font-size:12px">${logs.length} 筆記錄</span>`;
+  html += '</div></div>';
+
+  if (!logs.length) {
+    html += '<div class="card"><div class="empty">尚無 Container 執行記錄</div></div>';
+  } else {
+    html += '<div class="card" style="padding:0;overflow:hidden">';
+    html += '<table><thead><tr><th>時間</th><th>群組</th><th>Container</th><th>狀態</th><th>耗時</th><th>Stderr / 摘要</th></tr></thead><tbody>';
+    for (const r of logs) {
+      const ts = r.started_at ? new Date(r.started_at * 1000).toLocaleString('zh-TW') : '—';
+      const dur = r.response_ms ? r.response_ms + ' ms' : '—';
+      const stColor = r.status === 'success' ? '#22c55e' : r.status === 'running' ? '#60a5fa' : '#ef4444';
+      const stderrLines = (r.stderr || '').split('\n').filter(Boolean).slice(-3).join('\n');
+      html += `<tr>
+        <td style="font-size:11px;white-space:nowrap">${ts}</td>
+        <td style="font-size:10px;color:#9ca3af;max-width:140px;overflow:hidden;text-overflow:ellipsis">${esc(r.jid)}</td>
+        <td style="font-size:10px;color:#60a5fa">${esc(r.container_name || '—')}</td>
+        <td><span style="color:${stColor};font-weight:bold">${r.status}</span></td>
+        <td style="color:#a78bfa">${dur}</td>
+        <td style="font-size:10px;max-width:400px;white-space:pre-wrap;word-break:break-all;color:#9ca3af">${esc(stderrLines || r.stdout_preview || '—')}</td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+  }
+  document.getElementById('tab-container-logs').innerHTML = html;
+}
+
 // Initial load
 showTab('status');
 </script>
@@ -1702,6 +1757,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 for r in evo_stats
             ]
             self._json({"message_stats": msg_stats, "task_stats": task_stats, "evolution_stats": evo_out})
+
+        elif path == "/api/container-logs":
+            jid = qs.get("jid", "")
+            status = qs.get("status", "")
+            limit = int(qs.get("limit", 50))
+            from . import db as _db_module
+            rows = _db_module.get_container_logs(jid=jid, limit=limit, status=status)
+            self._json({"logs": rows, "count": len(rows)})
 
         elif path == "/health":
             h = _get_health()

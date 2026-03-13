@@ -146,6 +146,24 @@ def _create_tables(db: sqlite3.Connection) -> None:
         is_main INTEGER DEFAULT 0
     );
 
+    -- ── Container Logs 資料表 ──────────────────────────────────────────────────
+    -- container_logs：記錄每次 container 執行的 stderr/stdout，供 Dashboard 查看
+    CREATE TABLE IF NOT EXISTS container_logs (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id      TEXT NOT NULL,
+        jid         TEXT NOT NULL,
+        folder      TEXT NOT NULL DEFAULT '',
+        container_name TEXT NOT NULL DEFAULT '',
+        started_at  REAL NOT NULL,
+        finished_at REAL,
+        status      TEXT NOT NULL DEFAULT 'running',
+        stderr      TEXT,
+        stdout_preview TEXT,
+        response_ms INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_container_logs_jid ON container_logs(jid, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_container_logs_run_id ON container_logs(run_id);
+
     -- ── 演化引擎資料表 ──────────────────────────────────────────────────────
     -- evolution_runs：記錄每次 container 執行的效能數據，是適應度計算的原始資料
     CREATE TABLE IF NOT EXISTS evolution_runs (
@@ -1096,6 +1114,61 @@ def prune_old_logs(days: int = 30) -> None:
         "+ immune_threats noise > 90d",
         days,
     )
+
+
+# ── Container Logs ─────────────────────────────────────────────────────────────
+
+def log_container_start(run_id: str, jid: str, folder: str, container_name: str, started_at: float) -> None:
+    """Insert a 'running' row when a container starts."""
+    with _db_lock:
+        db = get_db()
+        db.execute(
+            "INSERT INTO container_logs (run_id, jid, folder, container_name, started_at, status)"
+            " VALUES (?, ?, ?, ?, ?, 'running')",
+            (run_id, jid, folder, container_name, started_at),
+        )
+        db.commit()
+
+
+def log_container_finish(
+    run_id: str,
+    finished_at: float,
+    status: str,
+    stderr: str,
+    stdout_preview: str,
+    response_ms: int,
+) -> None:
+    """Update the container_logs row when a container finishes."""
+    with _db_lock:
+        db = get_db()
+        db.execute(
+            "UPDATE container_logs SET finished_at=?, status=?, stderr=?, stdout_preview=?, response_ms=?"
+            " WHERE run_id=?",
+            (finished_at, status, stderr[:8192] if stderr else "", stdout_preview[:2048] if stdout_preview else "", response_ms, run_id),
+        )
+        db.commit()
+
+
+def get_container_logs(jid: str = "", limit: int = 50, status: str = "") -> list[dict]:
+    """Fetch recent container run logs."""
+    params: list = []
+    where_parts: list[str] = []
+    if jid:
+        where_parts.append("jid = ?")
+        params.append(jid)
+    if status:
+        where_parts.append("status = ?")
+        params.append(status)
+    where = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+    params.append(limit)
+    with _db_lock:
+        db = get_db()
+        rows = db.execute(
+            f"SELECT id, run_id, jid, folder, container_name, started_at, finished_at, status, stderr, stdout_preview, response_ms"
+            f" FROM container_logs {where} ORDER BY started_at DESC LIMIT ?",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ── Shutdown cleanup ───────────────────────────────────────────────────────────
