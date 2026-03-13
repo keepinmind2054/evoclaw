@@ -1,3 +1,23 @@
+# v1.11.3 — Dashboard 記憶系統查看器
+
+**Released**: 2026-03-13
+
+## 新增功能
+
+- Dashboard 新增「🧠 記憶查看器」分頁
+  - 熱記憶（MEMORY.md）全文顯示
+  - 暖記憶日誌瀏覽（可選 3/7/14/30 天）
+  - 關鍵字搜尋冷/暖記憶（FTS5 混合分數）
+- 新增 `GET /api/memory?jid=&days=&search=` API 端點
+
+## 升級說明
+
+```bash
+git pull origin main
+```
+
+---
+
 # v1.11.1 — Docker Image Tag 修復
 
 **Released**: 2026-03-13

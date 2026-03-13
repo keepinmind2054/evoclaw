@@ -174,6 +174,9 @@ tr:nth-child(even) td{background:#1a1a2e}
     <div class="nav-item" onclick="showTab('devengine')" id="nav-devengine">
       <span class="icon">🛠️</span><span>DevEngine</span>
     </div>
+    <div class="nav-item" onclick="showTab('memory')" id="nav-memory">
+      <span class="icon">🧠</span><span>記憶查看</span>
+    </div>
   </div>
   <div id="main">
     <div id="tab-status"></div>
@@ -183,6 +186,7 @@ tr:nth-child(even) td{background:#1a1a2e}
     <div id="tab-messages" style="display:none"></div>
     <div id="tab-evolution" style="display:none"></div>
     <div id="tab-devengine" style="display:none"></div>
+    <div id="tab-memory" style="display:none"></div>
   </div>
 </div>
 
@@ -202,7 +206,7 @@ let _logEs = null;
 let _autoRefresh = null;
 
 function showTab(name) {
-  ['status','logs','manage','settings','messages','evolution','devengine'].forEach(t => {
+  ['status','logs','manage','settings','messages','evolution','devengine','memory'].forEach(t => {
     document.getElementById('tab-'+t).style.display = t===name?'':'none';
     document.getElementById('nav-'+t).classList.toggle('active', t===name);
   });
@@ -216,6 +220,7 @@ function showTab(name) {
   else if (name==='messages') { loadMessages(); _autoRefresh = setInterval(loadMessages, 8000); }
   else if (name==='evolution') { loadEvolution(); _autoRefresh = setInterval(loadEvolution, 10000); }
   else if (name==='devengine') { loadDevEngine(); _autoRefresh = setInterval(loadDevEngine, 4000); }
+  else if (name==='memory') { loadMemory(); _autoRefresh = setInterval(loadMemory, 15000); }
 }
 
 // ── Fetch helper ───────────────────────────────────────────────────────────
@@ -1056,6 +1061,111 @@ async function devPollLogs(sessionId) {
   }
 }
 
+// ── Tab 8: 記憶查看 ────────────────────────────────────────────────────────
+let _memJid = '';
+let _memSearch = '';
+let _memDays = 7;
+
+async function loadMemory() {
+  const groups = await api('/api/stats');
+  const groupList = groups && groups.groups ? groups.groups : [];
+
+  const groupOptions = groupList.map(g =>
+    `<option value="${esc(g.jid)}" ${_memJid===g.jid?'selected':''}>${esc(g.folder)} (${esc(g.jid)})</option>`
+  ).join('');
+
+  let html = '<div class="section-title">🧠 記憶查看器</div>';
+
+  // Filter bar
+  html += `<div class="card" style="padding:10px 16px">
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <span style="color:#6b7280;font-size:11px">群組：</span>
+      <select id="mem-jid-select" onchange="_memJid=this.value;loadMemory()"
+        style="background:#0a0a14;border:1px solid #2d2d4e;border-radius:3px;padding:4px 8px;color:#e0e0e0;font-family:inherit;font-size:11px">
+        <option value="">— 選擇群組 —</option>
+        ${groupOptions}
+      </select>
+      <input id="mem-search-input" type="text" value="${esc(_memSearch)}" placeholder="搜尋記憶關鍵字..."
+        style="background:#0a0a14;border:1px solid #2d2d4e;border-radius:3px;padding:4px 8px;color:#e0e0e0;font-family:inherit;font-size:11px;width:200px"
+        onchange="_memSearch=this.value" onkeydown="if(event.key==='Enter'){_memSearch=this.value;loadMemory()}"/>
+      <select id="mem-days-select" onchange="_memDays=parseInt(this.value);loadMemory()"
+        style="background:#0a0a14;border:1px solid #2d2d4e;border-radius:3px;padding:4px 8px;color:#e0e0e0;font-family:inherit;font-size:11px">
+        <option value="3" ${_memDays===3?'selected':''}>最近 3 天</option>
+        <option value="7" ${_memDays===7?'selected':''}>最近 7 天</option>
+        <option value="14" ${_memDays===14?'selected':''}>最近 14 天</option>
+        <option value="30" ${_memDays===30?'selected':''}>最近 30 天</option>
+      </select>
+      <button class="btn btn-primary btn-sm" onclick="_memSearch=document.getElementById('mem-search-input').value;loadMemory()">🔍 搜尋</button>
+    </div>
+  </div>`;
+
+  if (!_memJid) {
+    html += '<div class="card"><div class="empty">請先選擇群組</div></div>';
+    document.getElementById('tab-memory').innerHTML = html;
+    return;
+  }
+
+  const params = new URLSearchParams({jid: _memJid, days: _memDays});
+  if (_memSearch) params.set('search', _memSearch);
+  const data = await api('/api/memory?' + params.toString());
+
+  if (!data || data.error) {
+    html += `<div class="card"><div class="empty">${data && data.error ? esc(data.error) : '無法載入記憶資料'}</div></div>`;
+    document.getElementById('tab-memory').innerHTML = html;
+    return;
+  }
+
+  // Hot Memory (MEMORY.md)
+  html += '<div class="card"><h3>🔥 熱記憶 (MEMORY.md — 即時上下文)</h3>';
+  if (data.hot_memory) {
+    html += `<textarea class="claude-editor" rows="12" readonly style="color:#a5f3fc;font-size:11px">${esc(data.hot_memory)}</textarea>`;
+  } else {
+    html += '<div class="empty">此群組尚無熱記憶</div>';
+  }
+  html += '</div>';
+
+  // Warm Logs
+  html += `<div class="card"><h3>🌤 暖記憶日誌 (最近 ${_memDays} 天，最新 20 筆)</h3>`;
+  if (data.warm_logs && data.warm_logs.length > 0) {
+    html += '<table><thead><tr><th style="width:100px">日期</th><th style="width:160px">時間戳</th><th>內容摘要</th></tr></thead><tbody>';
+    for (const w of data.warm_logs) {
+      const ts = w.created_at ? new Date(w.created_at * 1000).toLocaleString() : '—';
+      html += `<tr>
+        <td style="font-size:11px;color:#fbbf24">${esc(w.log_date)}</td>
+        <td style="font-size:10px;color:#6b7280">${esc(ts)}</td>
+        <td style="font-size:11px;white-space:pre-wrap;word-break:break-word;max-width:600px">${trunc(w.content, 200)}</td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+  } else {
+    html += '<div class="empty">此時段無暖記憶日誌</div>';
+  }
+  html += '</div>';
+
+  // Search Results
+  if (_memSearch) {
+    html += `<div class="card"><h3>🔍 搜尋結果：「${esc(_memSearch)}」</h3>`;
+    if (data.search_results && data.search_results.length > 0) {
+      html += '<table><thead><tr><th style="width:60px">來源</th><th style="width:100px">日期</th><th style="width:70px">分數</th><th>內容</th></tr></thead><tbody>';
+      for (const r of data.search_results) {
+        const scoreColor = r.score > 0.7 ? '#34d399' : r.score > 0.4 ? '#fbbf24' : '#9ca3af';
+        html += `<tr>
+          <td>${badge(r.source || 'warm', r.source==='cold'?'purple':'blue')}</td>
+          <td style="font-size:11px">${esc(r.date || r.log_date)}</td>
+          <td style="color:${scoreColor};font-weight:bold">${r.score != null ? r.score.toFixed(3) : '—'}</td>
+          <td style="font-size:11px;white-space:pre-wrap;word-break:break-word;max-width:500px">${trunc(r.content, 300)}</td>
+        </tr>`;
+      }
+      html += '</tbody></table>';
+    } else {
+      html += '<div class="empty">找不到符合的記憶</div>';
+    }
+    html += '</div>';
+  }
+
+  document.getElementById('tab-memory').innerHTML = html;
+}
+
 // Initial load
 showTab('status');
 </script>
@@ -1404,6 +1514,30 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 self._json(get_dev_logs(session_id, offset))
             except Exception as e:
                 self._json([])
+
+        elif path == "/api/memory":
+            jid = qs.get("jid", "")
+            search = qs.get("search", "")
+            days = int(qs.get("days", 7))
+            if not jid:
+                self._json({"error": "jid required"}, 400)
+                return
+            try:
+                from . import db as _db
+                hot = _db.get_hot_memory(jid)
+                warm = _db.get_warm_logs_recent(jid, days=days)
+                search_results = []
+                if search:
+                    from .memory.search import memory_search
+                    search_results = memory_search(jid, search.strip(), limit=10)
+                self._json({
+                    "jid": jid,
+                    "hot_memory": hot,
+                    "warm_logs": warm[-20:] if warm else [],
+                    "search_results": search_results,
+                })
+            except Exception as exc:
+                self._json({"error": str(exc)}, 500)
 
         elif path == "/health":
             h = _get_health()
