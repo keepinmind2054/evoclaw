@@ -1,3 +1,21 @@
+# v1.11.1 — Docker Image Tag 修復
+
+**Released**: 2026-03-13
+
+## 修復項目
+
+- `CONTAINER_IMAGE` 預設值改為 `evoclaw-agent:latest`，不再硬編碼版本號
+- 新增 `Makefile`：`make build` / `make start` / `make dev` / `make logs`
+
+## 升級說明
+
+```bash
+git pull origin main
+bash container/build.sh        # 或 make build
+```
+
+---
+
 # Release Process
 
 This document describes the release process for EvoClaw.

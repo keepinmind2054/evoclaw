@@ -17,11 +17,11 @@
 
 | 版本 | 摘要 |
 |------|------|
-| **v1.11.0** | OpenClaw 三層記憶系統：熱記憶（8KB MEMORY.md，每次對話自動注入）、暖記憶（每日日誌 + 3h Micro Sync）、冷記憶（SQLite FTS5 混合搜尋）、Weekly Compound（剪除 30 天低價值暖記憶）、IPC `memory_search` 命令 |
-| **v1.10.28** | 修復記憶系統：保留 sessionId（不再每次重新生成）、歷史窗口提升至 50 則；修復進化系統：週期降至 1h、MIN_SAMPLES 降至 3、靜默異常改為 log.error、container 錯誤也記錄 evolution_runs、冷啟動群組納入演化評估 (#128–#129) |
-| **v1.10.27** | rate-limit deque `maxlen` 上限、IPC result 檔案定期清理、immune 暫時 DB 鎖 fail-open、shutdown 立即取消 asyncio tasks、無效 cron 標記 `status=paused` (#118–#122) |
-| **v1.10.26** | daemon prune 300s 超時、路徑 redact 雙 regex、UTF-8 byte-aware 截斷、群組不存在 1h backoff、fail_count 衰減 -2 (#112–#116) |
-| **v1.10.25** | `_is_duplicate_message` TOCTOU 鎖、`next_run` finally 保證推進、pending_replies TTL、immune fail-secure、skill lock 逾時、stderr redact (#105–#110) |
+| **v1.11.1** | 修復 `CONTAINER_IMAGE` 預設值改為 `evoclaw-agent:latest`（不再硬編碼版本號造成 Docker pull 失敗）；新增 `Makefile` (#133) |
+| **v1.11.0** | OpenClaw 三層記憶系統：熱記憶（8KB MEMORY.md，每次對話自動注入）、暖記憶（每日日誌 + 3h Micro Sync）、冷記憶（SQLite FTS5 混合搜尋）、Weekly Compound、IPC `memory_search` 命令 |
+| **v1.10.28** | 修復記憶系統：保留 sessionId、歷史窗口 50 則；修復進化系統：週期 1h、MIN_SAMPLES 3、靜默異常 log.error (#128–#129) |
+| **v1.10.27** | rate-limit deque maxlen、IPC result 定期清理、immune DB 鎖 fail-open、shutdown 取消 tasks、無效 cron paused (#118–#122) |
+| **v1.10.26** | daemon prune 300s、路徑 redact、UTF-8 截斷、群組不存在 1h backoff、fail_count 衰減 (#112–#116) |
 
 ---
 

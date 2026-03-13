@@ -5,6 +5,12 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.1] — 2026-03-13
+
+### Fixed
+- `host/config.py`: `CONTAINER_IMAGE` 預設值從 `evoclaw-agent:1.11.0` 改為 `evoclaw-agent:latest`，避免每次版本 bump 都造成 Docker image 找不到錯誤 (#133)
+- 新增 `Makefile` 提供 `make build` / `make start` / `make dev` 等指令
+
 ## [1.11.0] — 2026-03-12
 
 ### Added
