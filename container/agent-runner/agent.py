@@ -1212,9 +1212,9 @@ def main():
     for k, v in secrets.items():
         os.environ[k] = v
 
-    # ── Auto-authenticate gh CLI ───────────────────────────────────────────────
-    # gh CLI requires explicit auth even if GITHUB_TOKEN is in os.environ.
-    # Run `gh auth login --with-token` so the agent can use gh repo create, etc.
+    # ── Auto-authenticate gh CLI + git credential helper ─────────────────────
+    # gh auth login  → authenticates gh CLI (gh repo create, gh pr create, etc.)
+    # gh auth setup-git → configures git credential helper so git push via HTTPS works
     _gh_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN", "")
     if _gh_token:
         import subprocess as _subprocess
@@ -1227,6 +1227,12 @@ def main():
             )
             if _gh_result.returncode == 0:
                 _log("🔑 GH AUTH", "gh CLI authenticated ✓")
+                # Configure git credential helper so git push/pull via HTTPS uses the token
+                _subprocess.run(["gh", "auth", "setup-git"], capture_output=True, timeout=10)
+                _log("🔑 GH AUTH", "git credential helper configured ✓")
+                # Set git identity so commits don't fail with "Please tell me who you are"
+                _subprocess.run(["git", "config", "--global", "user.email", "agent@evoclaw.local"], capture_output=True)
+                _subprocess.run(["git", "config", "--global", "user.name", "EvoClaw Agent"], capture_output=True)
             else:
                 _log("⚠️ GH AUTH", f"gh auth failed: {_gh_result.stderr.decode(errors='replace')[:200]}")
         except FileNotFoundError:

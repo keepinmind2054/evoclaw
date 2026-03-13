@@ -47,6 +47,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcups2 \
     # Media processing
     ffmpeg \
+    # GitHub CLI (gh) — for gh auth, gh repo create, gh pr create, etc.
+    # Installed via official GitHub apt repo below
+    apt-transport-https \
     # CJK and general fonts — comprehensive coverage
     fonts-liberation \
     fonts-noto-cjk \
@@ -55,6 +58,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-wqy-microhei \
     && rm -rf /var/lib/apt/lists/* \
     && fc-cache -fv
+
+# ── GitHub CLI (gh) ────────────────────────────────────────────────────────────
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
 
 # ── Browser paths for agent-browser / Playwright ──────────────────────────────
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium

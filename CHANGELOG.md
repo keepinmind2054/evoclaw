@@ -5,6 +5,13 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.12] — 2026-03-13
+
+### Fixed
+- `container/Dockerfile`: 安裝 GitHub CLI (`gh`)，修復 container 內 `gh: command not found` 根本原因
+- `container/agent-runner/agent.py`: `gh auth login` 成功後執行 `gh auth setup-git`，設定 git credential helper 讓 `git push` via HTTPS 能使用 token
+- `container/agent-runner/agent.py`: 設定 `git config user.email/user.name`（agent@evoclaw.local），避免「Please tell me who you are」commit 失敗
+
 ## [1.11.11] — 2026-03-13
 
 ### Fixed
