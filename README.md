@@ -17,6 +17,7 @@
 
 | 版本 | 摘要 |
 |------|------|
+| **v1.11.13** | `.env.example` 加入 `GITHUB_TOKEN` 設定說明，用戶必須在 `.env` 填入 token 才能讓 container 使用 gh CLI |
 | **v1.11.12** | Dockerfile 安裝 gh CLI + `gh auth setup-git` + git identity，徹底修復 container 內 git push 失敗問題 |
 | **v1.11.11** | `get_secrets()` 加入 `GITHUB_TOKEN` / `GH_TOKEN`，修復 container 永遠無法 gh auth 的根本原因 |
 | **v1.11.10** | Container 啟動後自動 `gh auth login --with-token`，修復 `gh repo create` / `git push` 因無憑證失敗問題 |
