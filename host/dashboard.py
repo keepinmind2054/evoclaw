@@ -1282,9 +1282,13 @@ let _clJid = '', _clStatus = '';
 const _clFullLogs = new Map();  // id → full stderr text
 
 function showContainerLog(id) {
-  const text = _clFullLogs.get(id) || '(no log)';
-  document.getElementById('cl-modal-body').textContent = text;
-  document.getElementById('cl-modal').style.display = 'flex';
+  // Try numeric and string keys to handle type coercion edge cases
+  const numId = (typeof id === 'number') ? id : parseInt(id, 10);
+  const text = _clFullLogs.get(numId) ?? _clFullLogs.get(id) ?? _clFullLogs.get(String(id)) ?? '(log not found — it may have been cleared by auto-refresh; click again)';
+  const bodyEl = document.getElementById('cl-modal-body');
+  if (bodyEl) bodyEl.textContent = (text !== undefined && text !== null) ? String(text) : '(empty)';
+  const modalEl = document.getElementById('cl-modal');
+  if (modalEl) modalEl.style.display = 'flex';
 }
 
 function hideContainerLog() {
@@ -1300,7 +1304,9 @@ async function loadContainerLogs() {
   const groups = [...new Set(logs.map(r => r.jid).filter(Boolean))];
   _clFullLogs.clear();
   for (const r of logs) {
-    _clFullLogs.set(r.id, r.stderr || '(empty)');
+    const key = (r.id !== undefined && r.id !== null) ? r.id : String(Math.random());
+    _clFullLogs.set(key, r.stderr || '(empty)');
+    if (typeof key === 'number') _clFullLogs.set(String(key), r.stderr || '(empty)');
   }
 
   let html = '<div class="section-title">🐳 Container Logs</div>';

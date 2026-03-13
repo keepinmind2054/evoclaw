@@ -1144,7 +1144,7 @@ def log_container_finish(
         db.execute(
             "UPDATE container_logs SET finished_at=?, status=?, stderr=?, stdout_preview=?, response_ms=?"
             " WHERE run_id=?",
-            (finished_at, status, stderr[:8192] if stderr else "", stdout_preview[:2048] if stdout_preview else "", response_ms, run_id),
+            (finished_at, status, stderr[:32768] if stderr else "", stdout_preview[:2048] if stdout_preview else "", response_ms, run_id),
         )
         db.commit()
 

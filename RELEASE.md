@@ -1,3 +1,26 @@
+# v1.11.7 — Container Log 內容完整記錄
+
+**Released**: 2026-03-13
+
+## 新增功能
+
+- `💬 USER` log：從 XML prompt 提取純文字用戶訊息，最多 600 字，方便除錯
+- `📤 REPLY` log：顯示 bot 回覆前 600 字（原本只顯示字數）
+- 工具 args/result 日誌截斷從 200 提升至 400 字
+
+## 修復
+
+- Dashboard Modal 顯示 undefined 問題：雙 key 查找（數字 + 字串）處理型別不符邊界情況
+- stderr 儲存上限從 8KB 提升至 32KB，避免長對話日誌遭截斷
+
+## 升級說明
+
+```bash
+git pull origin main
+```
+
+---
+
 # v1.11.6 — Container Logs 全文 Stderr 展開查看器
 
 **Released**: 2026-03-13

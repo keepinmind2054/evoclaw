@@ -5,6 +5,17 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.7] — 2026-03-13
+
+### Added
+- `container/agent-runner/agent.py`: 從 XML prompt 提取純文字 `💬 USER` log，顯示實際用戶訊息（最多 600 字）
+- `container/agent-runner/agent.py`: 新增 `📤 REPLY` log，顯示 bot 回覆前 600 字（原本只記字數）
+- `container/agent-runner/agent.py`: 工具 args/result 日誌截斷從 200 提升至 400 字
+
+### Fixed
+- `host/dashboard.py`: 修復 `showContainerLog()` 中 undefined 問題 — 雙 key（數字 + 字串）查找處理型別不符
+- `host/db.py`: stderr 儲存限制從 8KB 提升至 32KB，避免長對話日誌截斷
+
 ## [1.11.6] — 2026-03-13
 
 ### Added

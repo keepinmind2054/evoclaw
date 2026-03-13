@@ -923,9 +923,9 @@ def execute_tool(name: str, args: dict, chat_jid: str) -> str:
     根據 Gemini 回傳的 function call 名稱，分派到對應的 tool 實作。
     chat_jid 傳給需要知道發送目標的工具（如 send_message）。
     """
-    _log("🔧 TOOL", f"{name} args={str(args)[:200]}")
+    _log("🔧 TOOL", f"{name} args={str(args)[:400]}")
     result = _execute_tool_inner(name, args, chat_jid)
-    _log("🔧 RESULT", str(result)[:200])
+    _log("🔧 RESULT", str(result)[:400])
     return result
 
 
@@ -1140,6 +1140,8 @@ def emit(obj: dict):
     使用 flush=True 確保輸出立即寫入，不被 Python 的緩衝區滯留。
     """
     result_text = obj.get("result") or ""
+    if result_text:
+        _log("📤 REPLY", result_text[:600])
     _log("📤 OUTPUT", f"{len(result_text)} chars")
     success = obj.get("status") == "success"
     _log("🏁 DONE", f"success={success}")
@@ -1198,6 +1200,12 @@ def main():
     _log("📥 INPUT", f"jid={chat_jid} group={group_folder} msgs={len(messages)}")
     last_msg = {"role": "user", "content": prompt}
     _log("💬 MSG", str(last_msg)[:120])
+    # Extract human-readable user text from the XML prompt for better log visibility
+    import re as _re_log
+    _xml_msgs = _re_log.findall(r'<message[^>]*>([\s\S]*?)</message>', prompt)
+    _user_plain = _xml_msgs[-1].strip() if _xml_msgs else prompt.strip()
+    if _user_plain:
+        _log("💬 USER", _user_plain[:600])
 
     # 將 API 金鑰等敏感資料從 stdin JSON 設定到環境變數
     # 這樣 Gemini SDK 等依賴 os.environ 的函式庫就能自動取得
