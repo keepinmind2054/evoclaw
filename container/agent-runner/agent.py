@@ -923,9 +923,9 @@ def execute_tool(name: str, args: dict, chat_jid: str) -> str:
     根據 Gemini 回傳的 function call 名稱，分派到對應的 tool 實作。
     chat_jid 傳給需要知道發送目標的工具（如 send_message）。
     """
-    _log("🔧 TOOL", f"{name} args={str(args)[:400]}")
+    _log("🔧 TOOL", f"{name} args={str(args)[:1500]}")
     result = _execute_tool_inner(name, args, chat_jid)
-    _log("🔧 RESULT", str(result)[:400])
+    _log("🔧 RESULT", str(result)[:1500])
     return result
 
 

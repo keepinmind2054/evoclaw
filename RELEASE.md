@@ -1,3 +1,19 @@
+# v1.11.9 — Tool Log 截斷上限 400→1500 字
+
+**Released**: 2026-03-13
+
+## 變更
+
+- `🔧 TOOL args=` 和 `🔧 RESULT` 截斷上限從 400 提升至 1500 字，長 bash command 和執行結果現在可在 Container Logs 中完整顯示
+
+## 升級說明
+
+```bash
+git pull origin main
+```
+
+---
+
 # v1.11.8 — Container Log 記錄 System Prompt 和對話歷史
 
 **Released**: 2026-03-13
