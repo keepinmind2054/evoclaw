@@ -5,6 +5,12 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.14] — 2026-03-13
+
+### Fixed
+- `container/agent-runner/agent.py`: openai-compat loop 加入 bash code block 自動執行 fallback — Qwen/NIM 模型輸出 ` ```bash ` 代碼塊時自動偵測並執行，結果回饋 history 繼續迴圈
+- `container/agent-runner/agent.py`: 系統提示加入 CRITICAL tool usage 警告 — 明確禁止輸出 code blocks，要求 ALWAYS call Bash tool directly
+
 ## [1.11.13] — 2026-03-13
 
 ### Added

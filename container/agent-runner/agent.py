@@ -1022,7 +1022,29 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
         history.append(msg_dict)
 
         if not msg.tool_calls:
-            final_response = msg.content or ""
+            # ── Fallback: detect bash code blocks the model forgot to run ─────
+            # Some models (Qwen/NIM) output ```bash blocks as text instead of
+            # calling the Bash tool. Auto-execute them and feed results back.
+            import re as _re_cb
+            content = msg.content or ""
+            _code_blocks = _re_cb.findall(r'```(?:bash|sh|shell)?\n([\s\S]*?)```', content)
+            _runnable = [b.strip() for b in _code_blocks if b.strip()]
+            if _runnable and n < MAX_ITER - 1:
+                _log("⚠️ AUTO-EXEC", f"model output {len(_runnable)} code block(s) as text — auto-executing")
+                _exec_outputs = []
+                for _cmd in _runnable:
+                    _log("🔧 TOOL", f"Bash (fallback) args={_cmd[:300]}")
+                    _res = execute_tool("Bash", {"command": _cmd}, chat_jid)
+                    _log("🔧 RESULT", str(_res)[:1500])
+                    _exec_outputs.append(f"$ {_cmd[:200]}\n{_res}")
+                _combined = "\n\n".join(_exec_outputs)
+                history.append({
+                    "role": "user",
+                    "content": f"[系統自動執行了 {len(_runnable)} 個指令]\n{_combined}\n\n請根據以上輸出，繼續任務並回報最終結果。",
+                })
+                continue
+            # No code blocks either — model is done
+            final_response = content
             break
 
         # Execute all tool calls and add results
@@ -1332,6 +1354,11 @@ def main():
         "When given a task, execute it IMMEDIATELY and DIRECTLY. Do NOT ask 'Should I start?', 'Need me to begin?', or 'Want me to proceed?'.",
         "Complete the full task using your tools, then report the result.",
         "If you hit a blocker, try to solve it yourself first. Only ask the user if truly stuck.",
+        "",
+        "## CRITICAL: Tool Usage Rules",
+        "NEVER write bash/shell code blocks (```bash ... ```) in your response. This does NOTHING — the code will not be executed.",
+        "ALWAYS call the Bash tool directly to run any shell command. Every command you want to run MUST be a Bash tool call.",
+        "If you need to run 3 commands, make 3 separate Bash tool calls (or combine them in one). Do not describe what you would do — DO IT.",
         "",
         "## Available Tools",
         "- Bash: run shell commands (git, python, curl, etc.) — timeout 300s",
