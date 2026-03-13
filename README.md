@@ -17,6 +17,7 @@
 
 | 版本 | 摘要 |
 |------|------|
+| **v1.11.11** | `get_secrets()` 加入 `GITHUB_TOKEN` / `GH_TOKEN`，修復 container 永遠無法 gh auth 的根本原因 |
 | **v1.11.10** | Container 啟動後自動 `gh auth login --with-token`，修復 `gh repo create` / `git push` 因無憑證失敗問題 |
 | **v1.11.9** | `🔧 TOOL args=` 和 `🔧 RESULT` 截斷上限 400→1500 字，Container Logs 可見完整 bash command 和執行結果 |
 | **v1.11.8** | `📋 SYSTEM` log 顯示 system prompt 前 800 字；`📚 HISTORY` log 顯示最近 3 輪對話，Container Logs 可見完整 LLM context |

@@ -116,4 +116,6 @@ def get_secrets() -> dict:
         "SLACK_BOT_TOKEN",
         "DISCORD_BOT_TOKEN",
         "GMAIL_CREDENTIALS_FILE",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
     ])
