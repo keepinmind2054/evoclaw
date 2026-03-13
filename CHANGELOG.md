@@ -5,6 +5,14 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.6] — 2026-03-13
+
+### Added
+- `host/dashboard.py`: Container Logs 分頁新增「📋 展開」按鈕，點擊後彈出 Modal 顯示完整 stderr（含所有 print/log 輸出）
+- Stderr 摘要由最後 3 行改為最後 5 行
+- Modal 採 Monospace 字體、深色背景，可捲動瀏覽完整 container 執行日誌
+- 使用 JS Map 快取完整 stderr，展開無需額外 API 請求
+
 ## [1.11.5] — 2026-03-13
 
 ### Added

@@ -1,6 +1,6 @@
 [project]
 name = "evoclaw"
-version = "1.11.5"
+version = "1.11.6"
 description = "Gemini-powered personal AI assistant running in isolated Docker containers"
 readme = "README.md"
 requires-python = ">=3.11"

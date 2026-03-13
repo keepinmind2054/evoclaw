@@ -1277,8 +1277,20 @@ async function loadUsage() {
   document.getElementById('tab-usage').innerHTML = html;
 }
 
-// ── Tab: 🐳 Container Logs ─────────────────────────────────────────────────
+// ── 🐳 Container Logs ──────────────────────────────────────────────────────
 let _clJid = '', _clStatus = '';
+const _clFullLogs = new Map();  // id → full stderr text
+
+function showContainerLog(id) {
+  const text = _clFullLogs.get(id) || '(no log)';
+  document.getElementById('cl-modal-body').textContent = text;
+  document.getElementById('cl-modal').style.display = 'flex';
+}
+
+function hideContainerLog() {
+  document.getElementById('cl-modal').style.display = 'none';
+}
+
 async function loadContainerLogs() {
   let qs = '';
   if (_clJid) qs += '&jid=' + encodeURIComponent(_clJid);
@@ -1286,40 +1298,63 @@ async function loadContainerLogs() {
   const data = await api('/api/container-logs?limit=100' + qs);
   const logs = data?.logs || [];
   const groups = [...new Set(logs.map(r => r.jid).filter(Boolean))];
+  _clFullLogs.clear();
+  for (const r of logs) {
+    _clFullLogs.set(r.id, r.stderr || '(empty)');
+  }
 
   let html = '<div class="section-title">🐳 Container Logs</div>';
-  html += '<div class="card" style="margin-bottom:10px">';
-  html += '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">';
-  html += `<select onchange="_clJid=this.value;loadContainerLogs()" style="background:#1a1a2e;color:#e2e8f0;border:1px solid #374151;padding:6px;border-radius:4px">`;
+
+  // Modal (rendered once, reused)
+  if (!document.getElementById('cl-modal')) {
+    const modal = document.createElement('div');
+    modal.id = 'cl-modal';
+    modal.style.cssText = 'display:none;position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999;align-items:center;justify-content:center';
+    modal.innerHTML = `
+      <div style="background:#0d0d1f;border:1px solid #374151;border-radius:8px;width:90vw;max-width:900px;max-height:85vh;display:flex;flex-direction:column">
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid #1f2937">
+          <span style="color:#a78bfa;font-weight:bold">🐳 Container Log (Full Stderr)</span>
+          <button onclick="hideContainerLog()" style="background:#374151;color:#e2e8f0;border:none;padding:4px 12px;border-radius:4px;cursor:pointer">✕ 關閉</button>
+        </div>
+        <pre id="cl-modal-body" style="flex:1;overflow:auto;padding:16px;font-family:monospace;font-size:12px;color:#d1fae5;margin:0;white-space:pre-wrap;word-break:break-all"></pre>
+      </div>`;
+    document.body.appendChild(modal);
+  }
+
+  // Filter bar
+  html += '<div class="card" style="margin-bottom:10px"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">';
+  html += `<select onchange="_clJid=this.value;loadContainerLogs()" style="background:#111827;color:#e2e8f0;border:1px solid #374151;padding:6px;border-radius:4px">`;
   html += '<option value="">所有群組</option>';
   for (const g of groups) html += `<option value="${esc(g)}" ${g===_clJid?'selected':''}>${esc(g)}</option>`;
   html += '</select>';
-  html += `<select onchange="_clStatus=this.value;loadContainerLogs()" style="background:#1a1a2e;color:#e2e8f0;border:1px solid #374151;padding:6px;border-radius:4px">`;
+  html += `<select onchange="_clStatus=this.value;loadContainerLogs()" style="background:#111827;color:#e2e8f0;border:1px solid #374151;padding:6px;border-radius:4px">`;
   html += '<option value="">所有狀態</option>';
-  for (const s of ['success','error','timeout','running']) {
+  for (const s of ['success','error','timeout','running'])
     html += `<option value="${s}" ${s===_clStatus?'selected':''}>${s}</option>`;
-  }
   html += '</select>';
-  html += `<span style="color:#6b7280;font-size:12px">${logs.length} 筆記錄</span>`;
+  html += `<span style="color:#6b7280;font-size:12px">${logs.length} 筆</span>`;
   html += '</div></div>';
 
   if (!logs.length) {
     html += '<div class="card"><div class="empty">尚無 Container 執行記錄</div></div>';
   } else {
     html += '<div class="card" style="padding:0;overflow:hidden">';
-    html += '<table><thead><tr><th>時間</th><th>群組</th><th>Container</th><th>狀態</th><th>耗時</th><th>Stderr / 摘要</th></tr></thead><tbody>';
+    html += '<table><thead><tr><th>時間</th><th>群組</th><th>Container</th><th>狀態</th><th>耗時</th><th>Stderr 摘要</th><th></th></tr></thead><tbody>';
     for (const r of logs) {
       const ts = r.started_at ? new Date(r.started_at * 1000).toLocaleString('zh-TW') : '—';
-      const dur = r.response_ms ? r.response_ms + ' ms' : '—';
-      const stColor = r.status === 'success' ? '#22c55e' : r.status === 'running' ? '#60a5fa' : '#ef4444';
-      const stderrLines = (r.stderr || '').split('\n').filter(Boolean).slice(-3).join('\n');
+      const dur = r.response_ms != null ? r.response_ms + ' ms' : '—';
+      const stColor = r.status==='success'?'#22c55e':r.status==='running'?'#60a5fa':'#ef4444';
+      const lines = (r.stderr||'').split('\n').filter(Boolean);
+      const preview = lines.slice(-5).join('\n') || r.stdout_preview || '(no output)';
+      const hasLog = lines.length > 0;
       html += `<tr>
         <td style="font-size:11px;white-space:nowrap">${ts}</td>
-        <td style="font-size:10px;color:#9ca3af;max-width:140px;overflow:hidden;text-overflow:ellipsis">${esc(r.jid)}</td>
-        <td style="font-size:10px;color:#60a5fa">${esc(r.container_name || '—')}</td>
+        <td style="font-size:10px;color:#9ca3af;max-width:110px;overflow:hidden;text-overflow:ellipsis" title="${esc(r.jid)}">${esc(r.jid)}</td>
+        <td style="color:#60a5fa;font-size:12px">${esc(r.container_name||'—')}</td>
         <td><span style="color:${stColor};font-weight:bold">${r.status}</span></td>
         <td style="color:#a78bfa">${dur}</td>
-        <td style="font-size:10px;max-width:400px;white-space:pre-wrap;word-break:break-all;color:#9ca3af">${esc(stderrLines || r.stdout_preview || '—')}</td>
+        <td style="font-size:10px;max-width:340px;white-space:pre-wrap;word-break:break-all;color:#9ca3af;font-family:monospace">${esc(preview)}</td>
+        <td>${hasLog ? `<button onclick="showContainerLog(${r.id})" style="background:#4c1d95;color:#e9d5ff;border:none;padding:3px 8px;border-radius:3px;cursor:pointer;font-size:11px">📋 展開</button>` : ''}</td>
       </tr>`;
     }
     html += '</tbody></table></div>';
