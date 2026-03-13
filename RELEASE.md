@@ -1,3 +1,20 @@
+# v1.11.8 — Container Log 記錄 System Prompt 和對話歷史
+
+**Released**: 2026-03-13
+
+## 新增功能
+
+- `📋 SYSTEM` log：在 `system_instruction` 建立後立即記錄前 800 字，逐行分段顯示，讓 Container Logs 可見完整 LLM prompt
+- `📚 HISTORY` log：記錄最近 3 輪對話歷史（role + content 前 200 字），方便除錯多輪對話
+
+## 升級說明
+
+```bash
+git pull origin main
+```
+
+---
+
 # v1.11.7 — Container Log 內容完整記錄
 
 **Released**: 2026-03-13

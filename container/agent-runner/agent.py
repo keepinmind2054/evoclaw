@@ -1329,6 +1329,23 @@ def main():
 
     system_instruction = "\n".join(lines)
 
+    # Log system prompt for container log visibility
+    _log("📋 SYSTEM", f"{len(system_instruction)} chars | {len(lines)} lines")
+    # Log first 800 chars in chunks so each line is readable
+    _sys_preview = system_instruction[:800]
+    for _sys_line in _sys_preview.split('\n'):
+        if _sys_line.strip():
+            _log("📋", _sys_line[:120])
+
+    # Log conversation history summary
+    _hist_count = len(conversation_history) if conversation_history else 0
+    _log("📚 HISTORY", f"{_hist_count} turns")
+    if conversation_history:
+        for _hmsg in conversation_history[-3:]:  # last 3 turns
+            _hrole = str(_hmsg.get('role', '?')).upper()
+            _hcontent = str(_hmsg.get('content', ''))
+            _log(f"📚 [{_hrole}]", _hcontent[:200])
+
     try:
         if use_openai_compat:
             _model = os.environ.get("NIM_MODEL") or os.environ.get("OPENAI_MODEL") or os.environ.get("GEMINI_MODEL") or "meta/llama-3.3-70b-instruct"

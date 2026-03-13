@@ -5,6 +5,12 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.8] — 2026-03-13
+
+### Added
+- `container/agent-runner/agent.py`: 在 `system_instruction` 建立後立即 log 前 800 字（`📋 SYSTEM`，逐行分段顯示）
+- `container/agent-runner/agent.py`: log 最近 3 輪對話歷史（`📚 HISTORY`），方便在 Container Logs 看到完整 LLM context
+
 ## [1.11.7] — 2026-03-13
 
 ### Added

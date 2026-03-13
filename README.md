@@ -17,11 +17,11 @@
 
 | 版本 | 摘要 |
 |------|------|
+| **v1.11.8** | `📋 SYSTEM` log 顯示 system prompt 前 800 字；`📚 HISTORY` log 顯示最近 3 輪對話，Container Logs 可見完整 LLM context |
 | **v1.11.7** | `💬 USER` + `📤 REPLY` log 顯示實際訊息內容；修復 Dashboard Modal undefined；stderr 上限 8KB→32KB |
 | **v1.11.6** | Container Logs 分頁新增「📋 展開」按鈕，Modal 顯示完整 stderr；摘要由 3 行升至 5 行 |
 | **v1.11.5** | 新增 `container_logs` 表，持久化每次 container 的 stderr/stdout 摘要；Dashboard 新增「🐳 Container Logs」分頁和 `/api/container-logs` 端點 |
 | **v1.11.4** | Dashboard 新增「⚡ Skills 瀏覽器」（掃描 skills/ manifest.yaml）和「📈 使用統計」（訊息/任務/進化匯總）；新增 `/api/skills`、`/api/usage` 端點 |
-| **v1.11.3** | Dashboard 新增「🧠 記憶查看器」分頁：熱記憶、暖記憶日誌瀏覽、FTS5 混合搜尋；新增 `/api/memory` 端點 |
 
 ---
 
