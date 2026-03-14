@@ -5,6 +5,17 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.16] — 2026-03-14
+
+### Fixed
+- `host/container_runner.py`: `_stop_container` 改用 `docker kill`（即時 SIGKILL）替代 `docker stop --time 10`（10 秒 grace period），大幅縮短 shutdown 等待時間 (Fix #164)
+- `host/container_runner.py`: 新增 `kill_all_containers()` — shutdown 超時後強制 kill 所有追蹤中的 container (Fix #164)
+- `host/container_runner.py`: `CancelledError` handler 直接呼叫 `proc.kill()` 殺死 asyncio subprocess，再用 `asyncio.shield(_stop_container())` 確保 docker kill 完成 (Fix #164)
+- `host/main.py`: 第二次 Ctrl+C (SIGINT) → 同步 `docker kill` 所有 container + 立即 `os._exit(1)` — 不再無限卡住 (Fix #164)
+- `host/main.py`: `wait_for_active` timeout 從 30 秒縮短至 **10 秒** (Fix #164)
+- `host/main.py`: `wait_for_active` 超時後呼叫 `kill_all_containers()` 強制終止殘留 container (Fix #164)
+- `host/main.py`: final `asyncio.gather(*pending, ...)` 加 **5 秒 timeout** — task cleanup 本身卡住時不再永久阻塞 (Fix #164)
+
 ## [1.11.15] — 2026-03-14
 
 ### Fixed

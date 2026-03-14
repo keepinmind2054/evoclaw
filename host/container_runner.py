@@ -384,6 +384,7 @@ async def run_container_agent(
 
     input_bytes = input_json.encode("utf-8")
 
+    proc = None  # asyncio subprocess reference — used for direct kill on CancelledError
     try:
         if sys.platform == "win32":
             # On Windows, asyncio subprocess pipes can deadlock with Docker.
@@ -545,10 +546,17 @@ async def run_container_agent(
         _record_docker_failure()
         return {"status": "error", "result": None, "error": "Container timed out"}
     except asyncio.CancelledError:
-        # Outer timeout from main.py's asyncio.wait_for — stop the container
-        log.warning("Container %s cancelled (outer timeout), stopping...", container_name)
+        # task.cancel() 從 shutdown 觸發 — 立即 kill container，不等待 grace period
+        log.warning("Container %s cancelled, force-killing...", container_name)
         try:
-            await _stop_container(container_name)
+            # 直接 kill asyncio subprocess（比 docker kill 更快）
+            if proc is not None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            # 用 asyncio.shield 保護 docker kill 不被再次取消
+            await asyncio.shield(_stop_container(container_name))
         except Exception:
             pass
         raise  # Must re-raise CancelledError
@@ -565,16 +573,39 @@ async def run_container_agent(
             _active_containers.pop(container_name, None)
 
 async def _stop_container(name: str) -> None:
-    """發送 docker stop 指令強制停止指定 container（超時時呼叫）。"""
+    """發送 docker kill 指令立即停止指定 container（超時時呼叫）。
+    使用 docker kill（SIGKILL）而非 docker stop --time 10（先 SIGTERM 再等 10s），
+    以確保 shutdown 時不額外阻塞 10 秒。
+    """
     try:
         proc = await asyncio.create_subprocess_exec(
-            "docker", "stop", "--time", "10", name,
+            "docker", "kill", name,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        await proc.wait()
+        await asyncio.wait_for(proc.wait(), timeout=5.0)
     except Exception:
         pass
+
+
+async def kill_all_containers() -> None:
+    """強制 kill 所有正在追蹤的 container（shutdown 時呼叫）。
+    使用 docker kill（SIGKILL）確保即時終止，不等待 grace period。
+    """
+    async with _active_lock:
+        names = list(_active_containers.keys())
+    if not names:
+        return
+    log.warning("Force-killing %d container(s): %s", len(names), names)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "kill", *names,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(proc.wait(), timeout=10.0)
+    except Exception as e:
+        log.warning("kill_all_containers failed: %s", e)
 
 async def cleanup_orphans() -> None:
     """

@@ -621,9 +621,28 @@ async def main() -> None:
             log.error(f"Failed to load channel '{channel_name}': {e}")
 
     # ── 優雅關機：接到 SIGTERM/SIGINT 時設旗標讓各迴圈自然退出 ──────────────
+    _shutdown_count = 0
+
     def _shutdown(sig, frame):
+        nonlocal _shutdown_count
         global _running
-        log.info(f"Received {sig}, shutting down...")
+        _shutdown_count += 1
+
+        if _shutdown_count >= 2:
+            # 第二次 Ctrl+C：強制殺死所有 container 並立即退出
+            log.warning("Force exit (second signal). Killing all containers...")
+            from .container_runner import _active_containers as _ac
+            names = list(_ac.keys())
+            if names:
+                import subprocess as _sp
+                try:
+                    _sp.run(["docker", "kill"] + names, capture_output=True, timeout=5)
+                except Exception:
+                    pass
+            import os as _os
+            _os._exit(1)
+
+        log.info(f"Received {sig}, shutting down... (press Ctrl+C again to force exit)")
         _running = False
         _group_queue.shutdown_sync()  # signal: no new tasks accepted
         if _stop_event is not None:
@@ -656,15 +675,31 @@ async def main() -> None:
             except Exception:
                 pass
 
-        # 等待所有進行中的 container 完成（最多 30 秒），避免截斷回覆或損毀 IPC 狀態
-        await _group_queue.wait_for_active(timeout=30.0)
+        # 等待所有進行中的 container 完成（最多 10 秒，從 30s 縮短），避免截斷回覆或損毀 IPC 狀態
+        await _group_queue.wait_for_active(timeout=10.0)
+
+        # 若 10 秒後仍有 container 在跑，強制 kill 全部（Fix #164）
+        if _group_queue._active_count > 0:
+            log.warning("Containers still active after timeout, force-killing all...")
+            from .container_runner import kill_all_containers
+            try:
+                await asyncio.wait_for(kill_all_containers(), timeout=5.0)
+            except Exception:
+                pass
 
         # Fix #121: cancel any remaining sleeping tasks after channels are safely disconnected.
         pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         for task in pending:
             task.cancel()
         if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+            # 加 5 秒 timeout 防止 task cleanup 本身卡住（Fix #164）
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True),
+                    timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                log.warning("Task cleanup timed out — forcing exit")
 
     log.info("EvoClaw shut down cleanly.")
 
