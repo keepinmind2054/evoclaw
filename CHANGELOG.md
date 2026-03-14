@@ -5,6 +5,11 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.15] — 2026-03-14
+
+### Fixed
+- `host/container_runner.py`: `_read_secrets()` 加入 `GITHUB_TOKEN` / `GH_TOKEN` — 這才是真正傳進 container 的 secrets 函數（非 config.get_secrets()），之前一直修錯地方
+
 ## [1.11.14] — 2026-03-13
 
 ### Fixed

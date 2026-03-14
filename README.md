@@ -17,6 +17,7 @@
 
 | 版本 | 摘要 |
 |------|------|
+| **v1.11.15** | `container_runner._read_secrets()` 加入 `GITHUB_TOKEN`/`GH_TOKEN` — 修復真正的 secrets 傳遞路徑 |
 | **v1.11.14** | Agent bash code block 自動執行 fallback — Qwen/NIM 輸出文字代碼塊時自動偵測執行，不再只輸出說明而不動作 |
 | **v1.11.13** | `.env.example` 加入 `GITHUB_TOKEN` 設定說明，用戶必須在 `.env` 填入 token 才能讓 container 使用 gh CLI |
 | **v1.11.12** | Dockerfile 安裝 gh CLI + `gh auth setup-git` + git identity，徹底修復 container 內 git push 失敗問題 |
