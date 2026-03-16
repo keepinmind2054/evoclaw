@@ -324,8 +324,8 @@ async def _process_group_messages(group: dict, messages: list[dict],
         try:
             from .webportal import deliver_reply
             deliver_reply(jid, text)
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("deliver_reply failed for %s: %s", jid, e)
         # Store bot response in DB so dashboard can show full conversation
         try:
             ts = int(time.time() * 1000)
@@ -339,13 +339,13 @@ async def _process_group_messages(group: dict, messages: list[dict],
                 is_from_me=True,
                 is_bot_message=True,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            log.error("Failed to store bot response in DB for %s: %s", jid, e)
         # 三層記憶系統：暖記憶 — 每次對話後自動追加摘要到今日日誌
         try:
             append_warm_log(jid, _user_prompt_text, text)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("append_warm_log failed for %s: %s", jid, e)
 
     # Wrap on_success to reset the failure counter on a successful run
     _run_succeeded = False
@@ -463,8 +463,8 @@ async def _ipc_route_fn(jid: str, text: str, sender: str | None = None) -> None:
     try:
         from .webportal import deliver_reply
         deliver_reply(jid, text)
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("deliver_reply failed for %s: %s", jid, e)
     # Store bot response (from scheduled tasks / IPC) in DB
     try:
         ts = int(time.time() * 1000)
@@ -478,8 +478,8 @@ async def _ipc_route_fn(jid: str, text: str, sender: str | None = None) -> None:
             is_from_me=True,
             is_bot_message=True,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        log.error("Failed to store IPC bot response in DB for %s: %s", jid, e)
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
@@ -533,6 +533,26 @@ async def main() -> None:
     config.GROUPS_DIR.mkdir(parents=True, exist_ok=True)
     (config.GROUPS_DIR / "global").mkdir(exist_ok=True)
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    # ── Docker health check at startup (Fix #194) ─────────────────────────────
+    # Verify Docker is operational before accepting messages. If unreachable,
+    # log a CRITICAL warning so operators notice immediately.
+    try:
+        _docker_check = await asyncio.create_subprocess_exec(
+            "docker", "info",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        _docker_rc = await asyncio.wait_for(_docker_check.wait(), timeout=10.0)
+        if _docker_rc != 0:
+            log.critical(
+                "Docker daemon is not healthy (exit code %d). "
+                "Container runs will fail until Docker is fixed.", _docker_rc
+            )
+        else:
+            log.info("Docker daemon is healthy")
+    except Exception as e:
+        log.critical("Docker daemon is unreachable: %s. Container runs will fail.", e)
 
     # 清除上次程序崩潰後遺留的 evoclaw-* container，避免資源洩漏
     await cleanup_orphans()
