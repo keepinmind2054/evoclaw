@@ -430,10 +430,21 @@ async def _message_loop() -> None:
                 try:
                     refresh_flag.unlink(missing_ok=True)
                     _registered_groups = db.get_all_registered_groups()
+                    current_jids = {g["jid"] for g in _registered_groups}
                     # Initialise cursors for any newly added groups
                     for g in _registered_groups:
                         if g["jid"] not in _per_jid_cursors:
                             _per_jid_cursors[g["jid"]] = _last_timestamp
+                    # Fix #203: prune tracking dicts for deregistered groups to prevent memory leak
+                    stale_jids = set(_per_jid_cursors.keys()) - current_jids
+                    for jid in stale_jids:
+                        _per_jid_cursors.pop(jid, None)
+                        _group_msg_timestamps.pop(jid, None)
+                        async with _group_fail_lock:
+                            _group_fail_counts.pop(jid, None)
+                            _group_fail_timestamps.pop(jid, None)
+                    if stale_jids:
+                        log.info("Pruned tracking state for %d deregistered group(s)", len(stale_jids))
                     log.info(f"Groups reloaded: {len(_registered_groups)} group(s)")
                 except Exception as e:
                     log.error(f"Failed to reload groups: {e}")

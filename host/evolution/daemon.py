@@ -41,9 +41,10 @@ _MICRO_SYNC_INTERVAL_SECS = 3 * 3600
 # 三層記憶系統：Weekly Compound 間隔（7 天）
 _WEEKLY_COMPOUND_INTERVAL_SECS = 7 * 86400
 
-# 上次執行時間追蹤
+# 上次執行時間追蹤 (Fix #205: loaded from DB at first check to survive restarts)
 _last_micro_sync: float = 0.0
 _last_weekly_compound: float = 0.0
+_sync_timestamps_loaded: bool = False
 
 
 async def evolution_loop(stop_event: asyncio.Event) -> None:
@@ -90,8 +91,25 @@ async def evolution_loop(stop_event: asyncio.Event) -> None:
             log.warning("Periodic log pruning failed (non-fatal): %s", e)
 
         # 三層記憶系統：定期執行 Micro Sync（每 3 小時）
-        global _last_micro_sync, _last_weekly_compound
+        global _last_micro_sync, _last_weekly_compound, _sync_timestamps_loaded
         now = time.time()
+
+        # Fix #205: load persisted timestamps on first cycle to avoid running
+        # micro_sync/weekly_compound immediately after every process restart.
+        if not _sync_timestamps_loaded:
+            _sync_timestamps_loaded = True
+            try:
+                from host import db as _ts_db
+                _sync_rows = _ts_db.get_db().execute(
+                    "SELECT MAX(last_micro_sync), MAX(last_weekly_compound) FROM group_memory_sync"
+                ).fetchone()
+                if _sync_rows and _sync_rows[0]:
+                    _last_micro_sync = float(_sync_rows[0])
+                if _sync_rows and _sync_rows[1]:
+                    _last_weekly_compound = float(_sync_rows[1])
+                log.info("Loaded sync timestamps: micro=%.0f weekly=%.0f", _last_micro_sync, _last_weekly_compound)
+            except Exception as _ts_exc:
+                log.warning("Failed to load sync timestamps (non-fatal): %s", _ts_exc)
         if now - _last_micro_sync >= _MICRO_SYNC_INTERVAL_SECS:
             try:
                 await _run_memory_micro_sync()
