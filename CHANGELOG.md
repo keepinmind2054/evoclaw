@@ -5,6 +5,14 @@ All notable changes to EvoClaw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.18] — 2026-03-16
+
+### Fixed
+- `container/agent-runner/agent.py`: 追蹤 `_no_tool_turns` 計數器，連續未呼叫工具時將 `tool_choice` 從 `"auto"` 升級為 `"required"` — API 層面強制模型必須呼叫工具 (Fix #169)
+- `container/agent-runner/agent.py`: 連續 3 次無 tool call → break loop，防止無限循環 (Fix #169)
+- `container/agent-runner/agent.py`: `tool_choice="required"` 不支援時自動降級為 `"auto"` (Fix #169)
+- `container/agent-runner/agent.py`: fake-status re-prompt 訊息改為說明「下一輪強制 tool_choice=required」(Fix #167+#169)
+
 ## [1.11.17] — 2026-03-16
 
 ### Fixed
