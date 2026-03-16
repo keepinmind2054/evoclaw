@@ -998,6 +998,12 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
     final_response = ""
     _no_tool_turns = 0  # consecutive turns without any tool call (Fix #169)
     _turns_since_notify = 0  # turns since last mcp__evoclaw__send_message call (milestone enforcer)
+    _only_notify_turns = 0   # consecutive turns with ONLY send_message (no substantive tools)
+    # Tools that represent actual work (not just reporting)
+    _SUBSTANTIVE_TOOLS = frozenset([
+        "Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch",
+        "mcp__evoclaw__run_agent",
+    ])
 
     for n in range(MAX_ITER):
         # Escalate to "required" when model has been avoiding tools (Fix #169).
@@ -1102,24 +1108,45 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
         # Model made tool calls — reset the no-tool counter (Fix #169)
         _no_tool_turns = 0
 
-        # ── 里程碑強制器：追蹤距上次 send_message 的輪數 ────────────────────
-        # 若超過 4 輪沒有向用戶發送進度更新，自動注入里程碑提醒。
-        # 這是代碼層面的強制，不依賴模型自律。
-        _sent_message_this_turn = any(
-            tc.function.name == "mcp__evoclaw__send_message"
-            for tc in msg.tool_calls
-        )
-        if _sent_message_this_turn:
+        # ── 里程碑強制器 v2：區分「假報告」和「真工作」────────────────────────
+        # 問題：舊版允許模型只呼叫 send_message 來通過里程碑檢查，
+        # 導致模型用假進度報告（完全虛構內容）冒充在工作。
+        # 修正：只有「實質工具 + send_message」的組合才算真里程碑。
+        #       連續多輪「只有 send_message」→ 強硬警告：停止假報告，立即做事。
+        _tool_names_this_turn = {tc.function.name for tc in msg.tool_calls}
+        _sent_message_this_turn = "mcp__evoclaw__send_message" in _tool_names_this_turn
+        _did_real_work = bool(_tool_names_this_turn & _SUBSTANTIVE_TOOLS)
+
+        if _sent_message_this_turn and _did_real_work:
+            # Genuine progress report: real work + notification
             _turns_since_notify = 0
+            _only_notify_turns = 0
+        elif _sent_message_this_turn and not _did_real_work:
+            # Only send_message, no actual work done — track fabrication pattern
+            _only_notify_turns += 1
+            _log("⚠️ FAKE-PROGRESS", f"Model called only send_message (no real work) — streak={_only_notify_turns}")
+            if _only_notify_turns >= 2 and n < MAX_ITER - 2:
+                _log("🚨 FAKE-PROGRESS", f"Injecting anti-fabrication warning after {_only_notify_turns} fake-report turns")
+                history.append({
+                    "role": "user",
+                    "content": (
+                        "【系統警告】你已連續多輪只呼叫 send_message，沒有呼叫任何實質工具（Bash、Read、Write、run_agent 等）。"
+                        "這代表你在發送虛構的進度報告而不是真正執行任務。"
+                        "立刻停止假報告。你的下一步必須是：呼叫 Bash tool 執行指令、Read 讀取檔案、或 mcp__evoclaw__run_agent 委派任務。"
+                        "如果不知道怎麼繼續，使用 mcp__evoclaw__run_agent 把任務委派給子代理。"
+                    ),
+                })
         else:
+            # No send_message — working silently
             _turns_since_notify += 1
-            if _turns_since_notify >= 4 and n < MAX_ITER - 2:
+            if _turns_since_notify >= 5 and n < MAX_ITER - 2:
                 _log("⏰ MILESTONE", f"No send_message for {_turns_since_notify} turns — injecting reminder")
                 history.append({
                     "role": "user",
                     "content": (
                         f"⏰ 你已執行 {_turns_since_notify} 輪未向用戶回報進度。"
-                        "請立即使用 mcp__evoclaw__send_message 發送里程碑更新，告知目前執行狀態（2-3 句話即可）。"
+                        "請在繼續工作的同時，用 mcp__evoclaw__send_message 發送一條簡短的進度更新（1-2 句話）。"
+                        "注意：只有在呼叫了 Bash/Read/Write 等實質工具之後才需要回報，不要虛報進度。"
                     ),
                 })
                 _turns_since_notify = 0
@@ -1438,6 +1465,8 @@ def main():
         "NEVER narrate or describe what you plan to do. Just DO it immediately by calling the appropriate tool.",
         "ALWAYS call the Bash tool directly to run any shell command. Every command you want to run MUST be a Bash tool call.",
         "If you need to run 3 commands, make 3 separate Bash tool calls (or combine them in one). Do not describe what you would do — DO IT.",
+        "NEVER send a fake progress report via mcp__evoclaw__send_message unless you have ACTUALLY run tools (Bash/Read/Write/etc.) in that same turn. Fabricating progress ('I am processing...', '3 minutes remaining...') is strictly forbidden.",
+        "If you are stuck or do not know how to proceed, call mcp__evoclaw__run_agent to delegate the task to a subagent instead of faking progress.",
         "",
         "## Available Tools",
         "- Bash: run shell commands (git, python, curl, etc.) — timeout 300s",

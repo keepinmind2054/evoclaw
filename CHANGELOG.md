@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.4.16] - 2026-03-16
+### Fixed
+- 里程碑強制器 v2：區分「實質工具」vs「報告工具」— 只有 Bash/Read/Write/run_agent + send_message 組合才算真里程碑 (#169)
+- 新增 _only_notify_turns 計數器：連續 >=2 輪只呼叫 send_message 無實質工具 → 注入強硬反假報告警告 (#169)
+- CRITICAL 規則加入「禁止虛報進度」和「卡住請用 run_agent 委派」(#169)
+
+## [1.11.21] - 2026-03-16
+### Fixed
+- 里程碑強制器 v2：區分「實質工具」vs「報告工具」— 只有 Bash/Read/Write/run_agent + send_message 組合才算真里程碑 (#175)
+- 新增 _only_notify_turns 計數器：連續 >=2 輪只呼叫 send_message 無實質工具 → 注入強硬反假報告警告 (#175)
+- CRITICAL 規則加入「禁止虛報進度」和「卡住請用 run_agent 委派」(#175)
+
 ## [1.11.20] - 2026-03-16
 ### Added
 - MEMORY.md 啟動注入：session 啟動時讀取 {group_folder}/MEMORY.md，注入為「長期記憶」section — 讓知識歸檔真正有效 (#173)
