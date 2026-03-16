@@ -567,6 +567,26 @@ async def run_container_agent(
         db.log_container_finish(run_id, time.time(), "success", safe_stderr, stdout_preview, response_ms)
         _record_docker_success()
 
+        # ── Host Auto-Write Fallback：確保 MEMORY.md 每次 session 都有記錄 ────
+        # 若 agent 在本次執行中沒有更新 MEMORY.md（mtime < t0），
+        # host 自動補寫最小記錄，確保長期記憶的連續性。
+        # 這是最後防線，不替代 agent 的深度記錄，只保證時間軸不中斷。
+        try:
+            import datetime as _dt
+            _host_memory_path = config.GROUPS_DIR / folder / "MEMORY.md"
+            _mem_mtime = _host_memory_path.stat().st_mtime if _host_memory_path.exists() else 0.0
+            if _mem_mtime < t0:
+                _date_str = _dt.datetime.now().strftime("%Y-%m-%d")
+                _prompt_preview = (prompt or "")[:80].replace("\n", " ") if prompt else "(no prompt)"
+                _auto_entry = f"\n[{_date_str}] [auto] Task: {_prompt_preview}. Result: success.\n"
+                with open(_host_memory_path, "a", encoding="utf-8") as _mf:
+                    _mf.write(_auto_entry)
+                log.info("host auto-wrote MEMORY.md fallback entry for %s", folder)
+            else:
+                log.debug("MEMORY.md already updated by agent for %s", folder)
+        except Exception as _auto_mem_exc:
+            log.warning("host auto-write MEMORY.md failed for %s: %s", folder, _auto_mem_exc)
+
         if on_success:
             await on_success()
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.26] - 2026-03-16
+### Added
+- 意志系統：MEMORY.md 智慧注入（身份永遠保留 + task log 後 3000 字元，防截斷）
+- 身份引導 Bootstrap：首次或缺少身份區段時注入模板 + 填寫指令
+- Milestone Enforcer v3：偵測 Write/Edit/Bash 寫入 MEMORY.md，turn-28 未寫入注入 CRITICAL 提醒
+- Host Auto-Write Fallback：成功 run 後若 mtime < t0，host 自動補寫最小記錄
+- soul.md 新增 `### 自我認知` 區段與 MEMORY.md 結構說明
+
 ## [1.11.25] - 2026-03-16
 ### Fixed
 - circuit breaker 誤分類：container 有 stderr（確實跑了）時呼叫 _record_docker_success() 而非 _record_docker_failure()，防止 agent crash 錯誤開路
