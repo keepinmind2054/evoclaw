@@ -1043,7 +1043,26 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                     "content": f"[系統自動執行了 {len(_runnable)} 個指令]\n{_combined}\n\n請根據以上輸出，繼續任務並回報最終結果。",
                 })
                 continue
-            # No code blocks either — model is done
+
+            # ── Fallback 2: detect fake status lines *(正在...)* etc. ──────────
+            # Some models write *(正在執行...)* / *(running...)* as pure text instead
+            # of calling tools. Re-prompt them to actually use tools. (Fix #167)
+            _FAKE_STATUS_RE = _re_cb.compile(r'\*\([^)]*\)\*|\*\[[^\]]*\]\*', _re_cb.DOTALL)
+            _fake_hits = _FAKE_STATUS_RE.findall(content)
+            if _fake_hits and n < MAX_ITER - 1:
+                _log("⚠️ FAKE-STATUS", f"model wrote {len(_fake_hits)} fake status line(s) — re-prompting")
+                history.append({
+                    "role": "user",
+                    "content": (
+                        "【系統警告】你剛才的回覆包含假狀態行（例如 *(正在執行...)* ），"
+                        "這些純文字根本沒有執行任何命令。\n"
+                        "請停止用文字描述或模擬動作，立即直接呼叫 Bash tool（或其他工具）實際執行所需命令。\n"
+                        "記住：只有呼叫工具才能執行任何操作，文字描述對系統沒有任何作用。"
+                    ),
+                })
+                continue
+
+            # No code blocks, no fake status — model is done
             final_response = content
             break
 
@@ -1357,6 +1376,8 @@ def main():
         "",
         "## CRITICAL: Tool Usage Rules",
         "NEVER write bash/shell code blocks (```bash ... ```) in your response. This does NOTHING — the code will not be executed.",
+        "NEVER write fake status lines like *(正在執行...)*, *(running...)*, *(executing...)*, [正在處理...] etc. — these are pure text and DO NOTHING.",
+        "NEVER narrate or describe what you plan to do. Just DO it immediately by calling the appropriate tool.",
         "ALWAYS call the Bash tool directly to run any shell command. Every command you want to run MUST be a Bash tool call.",
         "If you need to run 3 commands, make 3 separate Bash tool calls (or combine them in one). Do not describe what you would do — DO IT.",
         "",
