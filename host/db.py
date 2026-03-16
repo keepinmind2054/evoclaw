@@ -950,6 +950,12 @@ def get_warm_logs_recent(jid: str, days: int = 1) -> list[dict]:
 def delete_warm_logs_before(jid: str, cutoff_ts: float) -> int:
     with _db_lock:
         db = get_db()
+        # Delete matching FTS rows first (before the source rows disappear)
+        db.execute(
+            "DELETE FROM group_warm_logs_fts WHERE rowid IN "
+            "(SELECT id FROM group_warm_logs WHERE jid=? AND created_at<?)",
+            (jid, cutoff_ts),
+        )
         cur = db.execute(
             "DELETE FROM group_warm_logs WHERE jid=? AND created_at<?", (jid, cutoff_ts)
         )
@@ -1107,10 +1113,12 @@ def prune_old_logs(days: int = 30) -> None:
         # dev_sessions: created_at is stored as REAL (Unix seconds)
         cutoff_secs = time.time() - days * 86400
         db.execute("DELETE FROM dev_sessions WHERE created_at < ?", (cutoff_secs,))
+        # container_logs: started_at is stored as REAL (Unix seconds)
+        db.execute("DELETE FROM container_logs WHERE started_at < ?", (cutoff_secs,))
         db.commit()
     log.info(
         "Pruned logs older than %d days "
-        "(task_run_logs, evolution_runs, evolution_log, messages, dev_events, dev_sessions) "
+        "(task_run_logs, evolution_runs, evolution_log, messages, dev_events, dev_sessions, container_logs) "
         "+ immune_threats noise > 90d",
         days,
     )
