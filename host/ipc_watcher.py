@@ -234,6 +234,9 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
         jid = payload.get("jid", "")
         name = payload.get("name", "")
         folder = payload.get("folder", "")
+        # Fix #202: validate folder name to prevent path traversal via IPC
+        if folder and not is_valid_group_folder(folder):
+            raise ValueError(f"Invalid group folder name: {folder!r} — must be alphanumeric with hyphens/underscores only")
         trigger = payload.get("trigger", f"@{config.ASSISTANT_NAME}")
         if jid and name and folder:
             db.set_registered_group(
@@ -732,9 +735,11 @@ def _resolve_container_path(container_path: str, group_folder: str) -> str | Non
         return None
 
     # Guard against path traversal: resolved path must stay within the expected root.
+    # Fix #201: use is_relative_to() instead of str.startswith() to prevent prefix bypass.
+    # str.startswith("/data/groups/foo") would wrongly allow "/data/groups/foobar/evil".
     try:
         resolved = host.resolve()
-        if expected_root and not str(resolved).startswith(str(expected_root.resolve())):
+        if expected_root and not resolved.is_relative_to(expected_root.resolve()):
             log.warning(
                 "_resolve_container_path: path traversal attempt detected — "
                 "container_path=%r resolved to %r which is outside %r",
