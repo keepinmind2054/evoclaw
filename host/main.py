@@ -651,6 +651,14 @@ async def main() -> None:
     signal.signal(signal.SIGINT, _shutdown)
     if hasattr(signal, 'SIGTERM'):
         signal.signal(signal.SIGTERM, _shutdown)
+    # SIGUSR1: 線上重置 Docker circuit breaker（不需重啟進程）
+    # 用法：kill -USR1 $(pgrep -f "python.*evoclaw")
+    if hasattr(signal, 'SIGUSR1'):
+        from .container_runner import _record_docker_success
+        def _reset_circuit(sig, frame):
+            log.warning("SIGUSR1 received — resetting Docker circuit breaker (failures → 0)")
+            _record_docker_success()
+        signal.signal(signal.SIGUSR1, _reset_circuit)
 
     try:
         # 同時啟動四個長期運行的背景迴圈：

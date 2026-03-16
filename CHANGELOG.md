@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.11.25] - 2026-03-16
+### Fixed
+- circuit breaker 誤分類：container 有 stderr（確實跑了）時呼叫 _record_docker_success() 而非 _record_docker_failure()，防止 agent crash 錯誤開路
+- 新增 SIGUSR1 信號處理器：kill -USR1 <pid> 可線上重置 circuit breaker，不需重啟進程
+
 ## [1.11.24] - 2026-03-16
 ### Refactored
 - 靈魂規則獨立為 container/agent-runner/soul.md，runner 啟動時讀取注入 — 更新規則無需改 Python code
