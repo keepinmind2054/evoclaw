@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.11.23] - 2026-03-16
+### Fixed
+- health_monitor: 加入 ERROR_RATE_MIN_SAMPLES=5 門檻，避免樣本數不足時誤報高錯誤率（如 1/1=100%）
+
 ## [1.11.22] - 2026-03-16
 ### Fixed
 - Docker circuit breaker 半開放狀態（half-open）：60秒後允許一次試探請求，避免永久死鎖 (#177)

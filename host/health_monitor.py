@@ -24,6 +24,7 @@ log = logging.getLogger(__name__)
 CONTAINER_QUEUE_WARNING = 10  # 排隊數量警告閾值
 CONTAINER_QUEUE_CRITICAL = 50  # 排隊數量嚴重閾值
 ERROR_RATE_WARNING = 0.3  # 錯誤率警告閾值（30%）
+ERROR_RATE_MIN_SAMPLES = 5  # 最小樣本數，避免小樣本誤報（e.g. 1/1 = 100%）
 MEMORY_USAGE_WARNING_MB = 500  # 記憶體使用量警告閾值（MB）
 DB_SIZE_WARNING_MB = 100  # 資料庫大小警告閾值（MB）
 GROUP_INACTIVE_DAYS = 7  # 群組不活躍天數閾值
@@ -116,9 +117,9 @@ async def _check_error_rate() -> None:
             total = error_stats.get('total', 0)
             errors = error_stats.get('errors', 0)
             
-            if total > 0:
+            if total >= ERROR_RATE_MIN_SAMPLES:
                 error_rate = errors / total
-                
+
                 if error_rate >= ERROR_RATE_WARNING:
                     await _send_warning(
                         "warning",
