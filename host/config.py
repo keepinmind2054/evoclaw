@@ -76,6 +76,13 @@ WHATSAPP_WEBHOOK_PORT = _env_int("WHATSAPP_WEBHOOK_PORT", 8080)
 DASHBOARD_HOST: str = os.getenv("DASHBOARD_HOST", "127.0.0.1")
 DASHBOARD_PORT = _env_int("DASHBOARD_PORT", 8765)
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")  # If set, enables HTTP Basic Auth
+# Warn at import time if dashboard has no password (Fix #191)
+if not DASHBOARD_PASSWORD:
+    import logging as _log_cfg
+    _log_cfg.getLogger(__name__).warning(
+        "DASHBOARD_PASSWORD is not set — dashboard has NO authentication. "
+        "Set DASHBOARD_PASSWORD to enable HTTP Basic Auth."
+    )
 DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "admin")
 WEBPORTAL_ENABLED = os.environ.get("WEBPORTAL_ENABLED", "false").lower() == "true"
 WEBPORTAL_PORT = _env_int("WEBPORTAL_PORT", 8766)
@@ -95,7 +102,7 @@ EDITABLE_ENV_KEYS: frozenset = frozenset({
     "GMAIL_CLIENT_ID",
     "GMAIL_CLIENT_SECRET",
     "GMAIL_REFRESH_TOKEN",
-    "DASHBOARD_PASSWORD",
+    # DASHBOARD_PASSWORD intentionally excluded — password changes require env restart (Fix #191)
     "DASHBOARD_HOST",
     "DASHBOARD_PORT",
     "WEBPORTAL_PORT",

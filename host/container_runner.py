@@ -165,8 +165,20 @@ OUTPUT_START = "---EVOCLAW_OUTPUT_START---"
 OUTPUT_END = "---EVOCLAW_OUTPUT_END---"
 
 def _read_secrets() -> dict:
-    """從 .env 檔案讀取敏感金鑰（API key 等），以字典形式回傳給 container。"""
-    return read_env_file(["GOOGLE_API_KEY", "TELEGRAM_BOT_TOKEN", "GEMINI_MODEL", "ASSISTANT_NAME", "NIM_API_KEY", "NIM_MODEL", "NIM_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL", "CLAUDE_API_KEY", "CLAUDE_MODEL", "GITHUB_TOKEN", "GH_TOKEN"])
+    """從 .env 檔案讀取敏感金鑰（API key 等），以字典形式回傳給 container。
+
+    Only LLM-related keys are passed to the container. Channel tokens
+    (TELEGRAM_BOT_TOKEN, etc.) and SCM tokens (GITHUB_TOKEN, GH_TOKEN)
+    are intentionally excluded to limit blast radius if a container is
+    compromised (Fix #187).
+    """
+    return read_env_file([
+        "GOOGLE_API_KEY", "GEMINI_MODEL",
+        "NIM_API_KEY", "NIM_MODEL", "NIM_BASE_URL",
+        "OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL",
+        "CLAUDE_API_KEY", "CLAUDE_MODEL",
+        "ASSISTANT_NAME",
+    ])
 
 def _validate_secrets(secrets: dict) -> None:
     """Validate that at least one LLM API key is present; warn on startup for missing keys."""
