@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.11.27] - 2026-03-17
+### Fixed
+- Security hardening: reduce container secret exposure — only LLM keys passed, channel/SCM tokens excluded (PR #198)
+- Reliability: proper error logging with traceback, Docker health check at startup (PR #199)
+- Code quality: DRY _store_bot_reply() helper, named constants, startup-only secret validation (PR #200)
+- container_logs table never pruned — added to prune_old_logs() to prevent unbounded disk growth
+- warm_logs FTS index not synced on delete — stale search results after pruning
+- stderr_lines list unbounded in container_runner — capped at 5000 lines to prevent OOM
+
+### Added
+- Dashboard auth warning at startup when DASHBOARD_PASSWORD is unset
+- ENABLED_CHANNELS validation at startup — warns on unrecognised channel names
+
 ## [1.11.26] - 2026-03-16
 ### Added
 - 意志系統：MEMORY.md 智慧注入（身份永遠保留 + task log 後 3000 字元，防截斷）

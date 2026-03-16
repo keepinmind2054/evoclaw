@@ -17,16 +17,11 @@
 
 | 版本 | 摘要 |
 |------|------|
-| **v1.11.15** | `container_runner._read_secrets()` 加入 `GITHUB_TOKEN`/`GH_TOKEN` — 修復真正的 secrets 傳遞路徑 |
-| **v1.11.14** | Agent bash code block 自動執行 fallback — Qwen/NIM 輸出文字代碼塊時自動偵測執行，不再只輸出說明而不動作 |
-| **v1.11.13** | `.env.example` 加入 `GITHUB_TOKEN` 設定說明，用戶必須在 `.env` 填入 token 才能讓 container 使用 gh CLI |
-| **v1.11.12** | Dockerfile 安裝 gh CLI + `gh auth setup-git` + git identity，徹底修復 container 內 git push 失敗問題 |
-| **v1.11.11** | `get_secrets()` 加入 `GITHUB_TOKEN` / `GH_TOKEN`，修復 container 永遠無法 gh auth 的根本原因 |
-| **v1.11.10** | Container 啟動後自動 `gh auth login --with-token`，修復 `gh repo create` / `git push` 因無憑證失敗問題 |
-| **v1.11.9** | `🔧 TOOL args=` 和 `🔧 RESULT` 截斷上限 400→1500 字，Container Logs 可見完整 bash command 和執行結果 |
-| **v1.11.8** | `📋 SYSTEM` log 顯示 system prompt 前 800 字；`📚 HISTORY` log 顯示最近 3 輪對話，Container Logs 可見完整 LLM context |
-| **v1.11.7** | `💬 USER` + `📤 REPLY` log 顯示實際訊息內容；修復 Dashboard Modal undefined；stderr 上限 8KB→32KB |
-| **v1.11.6** | Container Logs 分頁新增「📋 展開」按鈕，Modal 顯示完整 stderr；摘要由 3 行升至 5 行 |
+| **v1.11.27** | 安全加固 + 可靠性提升 + 代碼品質改善 + 深度分析修復（container_logs 剪裁、FTS 同步、stderr OOM 防護） |
+| **v1.11.26** | 意志系統：MEMORY.md 智慧注入、身份引導 Bootstrap、Milestone Enforcer v3、Host Auto-Write Fallback |
+| **v1.11.25** | circuit breaker 誤分類修復 + SIGUSR1 線上重置 |
+| **v1.11.24** | 靈魂規則獨立為 soul.md — 更新規則無需改 Python code |
+| **v1.11.23** | health_monitor 最小樣本數門檻，避免小樣本誤報 |
 
 ---
 

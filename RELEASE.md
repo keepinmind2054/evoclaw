@@ -1,3 +1,24 @@
+# v1.11.27 — 安全加固 + 可靠性 + 深度分析修復
+
+**Released**: 2026-03-17
+
+## 修復
+
+- **安全加固（PR #198）**：container 只接收 LLM API keys，不再傳遞 channel tokens (TELEGRAM_BOT_TOKEN 等) 和 SCM tokens (GITHUB_TOKEN)，縮小洩漏影響範圍
+- **可靠性提升（PR #199）**：啟動時 Docker health check，error logging 加入完整 traceback
+- **代碼品質（PR #200）**：_store_bot_reply() DRY helper 消除重複、命名常數取代 magic number、secret 驗證移至啟動時
+- **container_logs 剪裁**：prune_old_logs() 遺漏 container_logs 表，長時間運行磁碟無限增長
+- **FTS 同步**：delete_warm_logs_before() 未同步刪除 FTS 索引，搜尋結果指向已刪除資料
+- **stderr OOM 防護**：container 產生大量 stderr 時 host 記憶體無限增長，加入 5000 行上限
+
+## 升級說明
+
+```bash
+git pull origin main
+```
+
+---
+
 # v1.11.10 — Container 啟動時自動執行 gh auth login
 
 **Released**: 2026-03-13
