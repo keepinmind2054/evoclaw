@@ -467,6 +467,7 @@ async def run_container_agent(
             proc.stdin.close()
 
             stderr_lines: list[str] = []
+            _MAX_STDERR_LINES = 5000  # Cap to prevent unbounded memory growth
 
             async def _stream_stderr() -> None:
                 """逐行讀取 stderr 並更新 current_activity + log_buffer。"""
@@ -482,7 +483,10 @@ async def run_container_agent(
                         break
                     line = line_bytes.decode(errors="replace").rstrip()
                     if line:
-                        stderr_lines.append(line)
+                        if len(stderr_lines) < _MAX_STDERR_LINES:
+                            stderr_lines.append(line)
+                        elif len(stderr_lines) == _MAX_STDERR_LINES:
+                            stderr_lines.append(f"... (truncated, >{_MAX_STDERR_LINES} lines)")
                         # Redact secrets before logging (Fix #110)
                         safe_line = _redact_secrets(line)
                         # Elevate structured agent log lines to INFO
