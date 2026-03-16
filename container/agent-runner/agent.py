@@ -996,18 +996,40 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
     history.append({"role": "user", "content": user_message})
     MAX_ITER = 30
     final_response = ""
+    _no_tool_turns = 0  # consecutive turns without any tool call (Fix #169)
 
     for n in range(MAX_ITER):
-        _log("🧠 LLM →", f"turn={n} provider=openai-compat")
+        # Escalate to "required" when model has been avoiding tools (Fix #169).
+        # tool_choice="required" is enforced at the API level — the model CANNOT
+        # return a text-only response, it MUST make a tool call.
+        _tool_choice = "required" if _no_tool_turns > 0 else "auto"
+        if _no_tool_turns > 0:
+            _log("⚠️ FORCE-TOOL", f"no_tool_turns={_no_tool_turns} — escalating tool_choice to 'required'")
+        _log("🧠 LLM →", f"turn={n} provider=openai-compat tool_choice={_tool_choice}")
         _oai_history = history  # capture current snapshot for lambda
-        response = _llm_call_with_retry(lambda: client_holder[0].chat.completions.create(
-            model=model,
-            messages=_oai_history,
-            tools=OPENAI_TOOL_DECLARATIONS,
-            tool_choice="auto",
-            temperature=0.7,
-            max_tokens=4096,
-        ), pool=pool, apply_key_fn=apply_key_fn)
+        try:
+            response = _llm_call_with_retry(lambda: client_holder[0].chat.completions.create(
+                model=model,
+                messages=_oai_history,
+                tools=OPENAI_TOOL_DECLARATIONS,
+                tool_choice=_tool_choice,
+                temperature=0.7,
+                max_tokens=4096,
+            ), pool=pool, apply_key_fn=apply_key_fn)
+        except Exception as _tc_err:
+            if _tool_choice == "required":
+                # Some providers don't support tool_choice="required" — fall back to "auto"
+                _log("⚠️ FORCE-TOOL", f"tool_choice='required' rejected ({_tc_err}) — retrying with 'auto'")
+                response = _llm_call_with_retry(lambda: client_holder[0].chat.completions.create(
+                    model=model,
+                    messages=_oai_history,
+                    tools=OPENAI_TOOL_DECLARATIONS,
+                    tool_choice="auto",
+                    temperature=0.7,
+                    max_tokens=4096,
+                ), pool=pool, apply_key_fn=apply_key_fn)
+            else:
+                raise
         msg = response.choices[0].message
         stop_reason = response.choices[0].finish_reason
         _log("🧠 LLM ←", f"stop={stop_reason}")
@@ -1022,6 +1044,16 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
         history.append(msg_dict)
 
         if not msg.tool_calls:
+            _no_tool_turns += 1  # track consecutive no-tool turns (Fix #169)
+
+            # Hard cap: after 3 consecutive turns without tool calls, give up (Fix #169).
+            # At this point tool_choice="required" has already been active for 2 turns,
+            # yet the model still produced no tool calls — something is fundamentally wrong.
+            if _no_tool_turns >= 3:
+                _log("❌ NO-TOOL", f"Model made no tool call for {_no_tool_turns} consecutive turns — breaking")
+                final_response = msg.content or ""
+                break
+
             # ── Fallback: detect bash code blocks the model forgot to run ─────
             # Some models (Qwen/NIM) output ```bash blocks as text instead of
             # calling the Bash tool. Auto-execute them and feed results back.
@@ -1031,6 +1063,7 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
             _runnable = [b.strip() for b in _code_blocks if b.strip()]
             if _runnable and n < MAX_ITER - 1:
                 _log("⚠️ AUTO-EXEC", f"model output {len(_runnable)} code block(s) as text — auto-executing")
+                _no_tool_turns = 0  # reset: code blocks count as attempted tool use
                 _exec_outputs = []
                 for _cmd in _runnable:
                     _log("🔧 TOOL", f"Bash (fallback) args={_cmd[:300]}")
@@ -1045,26 +1078,28 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                 continue
 
             # ── Fallback 2: detect fake status lines *(正在...)* etc. ──────────
-            # Some models write *(正在執行...)* / *(running...)* as pure text instead
-            # of calling tools. Re-prompt them to actually use tools. (Fix #167)
+            # Log the detection; the real enforcement happens via tool_choice="required"
+            # on the NEXT iteration (Fix #167 + #169: API-level enforcement is primary,
+            # text re-prompt is secondary fallback for providers that don't support "required").
             _FAKE_STATUS_RE = _re_cb.compile(r'\*\([^)]*\)\*|\*\[[^\]]*\]\*', _re_cb.DOTALL)
             _fake_hits = _FAKE_STATUS_RE.findall(content)
             if _fake_hits and n < MAX_ITER - 1:
-                _log("⚠️ FAKE-STATUS", f"model wrote {len(_fake_hits)} fake status line(s) — re-prompting")
+                _log("⚠️ FAKE-STATUS", f"model wrote {len(_fake_hits)} fake status line(s) — tool_choice='required' on next turn")
                 history.append({
                     "role": "user",
                     "content": (
-                        "【系統警告】你剛才的回覆包含假狀態行（例如 *(正在執行...)* ），"
-                        "這些純文字根本沒有執行任何命令。\n"
-                        "請停止用文字描述或模擬動作，立即直接呼叫 Bash tool（或其他工具）實際執行所需命令。\n"
-                        "記住：只有呼叫工具才能執行任何操作，文字描述對系統沒有任何作用。"
+                        "【系統警告】你剛才的回覆包含假狀態行（例如 *(正在執行...)* ），沒有呼叫任何工具。"
+                        "下一輪系統將強制要求你必須呼叫工具，請立刻使用 Bash tool 或其他工具執行所需命令。"
                     ),
                 })
                 continue
 
-            # No code blocks, no fake status — model is done
+            # No code blocks, no fake status — model is genuinely done
             final_response = content
             break
+
+        # Model made tool calls — reset the no-tool counter (Fix #169)
+        _no_tool_turns = 0
 
         # Execute all tool calls and add results
         for tc in msg.tool_calls:
