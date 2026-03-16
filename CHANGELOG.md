@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.19] - 2026-03-16
+### Added
+- Agent soul: `## 任務協調與智慧委派` section added to system prompt
+- Pre-flight analysis: Level A (simple, handle directly) vs Level B (complex, delegate) task classification
+- Smart delegation: Level B tasks use `mcp__evoclaw__run_agent` with `/reasoning on` injected
+- Knowledge archiving: significant tasks append a summary to `MEMORY.md`
+- Transparency: Level B announces working dir, creates `progress.log`, sends milestone updates (#171)
+
 All notable changes to EvoClaw will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
