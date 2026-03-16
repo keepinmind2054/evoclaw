@@ -999,6 +999,8 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
     _no_tool_turns = 0  # consecutive turns without any tool call (Fix #169)
     _turns_since_notify = 0  # turns since last mcp__evoclaw__send_message call (milestone enforcer)
     _only_notify_turns = 0   # consecutive turns with ONLY send_message (no substantive tools)
+    _memory_written = False  # True once agent writes to MEMORY.md this session (Enforcer v3)
+    _memory_path_str = str(Path(group_folder) / "MEMORY.md")
     # Tools that represent actual work (not just reporting)
     _SUBSTANTIVE_TOOLS = frozenset([
         "Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch",
@@ -1150,6 +1152,33 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                     ),
                 })
                 _turns_since_notify = 0
+
+        # ── Milestone Enforcer v3: MEMORY.md 寫入偵測 ───────────────────────
+        # 偵測本輪是否有工具呼叫了 MEMORY.md（Write/Edit/Bash 寫入）。
+        # 確保 session 結束前 agent 確實更新了長期記憶與身份認知。
+        if not _memory_written:
+            for _tc in msg.tool_calls:
+                if _tc.function.name in {"Write", "Edit", "Bash"}:
+                    _tc_args = _tc.function.arguments or ""
+                    if "MEMORY.md" in _tc_args or _memory_path_str in _tc_args:
+                        _memory_written = True
+                        _log("🧠 MEMORY-WRITE", f"Agent updated MEMORY.md via {_tc.function.name} on turn {n}")
+                        break
+
+        # 倒數第二輪若 MEMORY.md 仍未寫入 → CRITICAL 提醒
+        if not _memory_written and n == MAX_ITER - 2:
+            _log("⚠️ MEMORY-REMIND", f"MEMORY.md not updated by turn {n} — injecting CRITICAL reminder")
+            history.append({
+                "role": "user",
+                "content": (
+                    f"【CRITICAL 系統警告】你在本 session 中尚未更新 MEMORY.md（{_memory_path_str}）。\n"
+                    "這是倒數第二輪。你必須在結束前執行以下操作：\n"
+                    "1. 使用 Write/Edit 工具更新 MEMORY.md\n"
+                    "2. 在 `## 任務記錄 (Task Log)` 區段追加今日任務摘要\n"
+                    "3. 若 `## 身份 (Identity)` 有新發現（弱點、原則），同步更新\n"
+                    "格式：`[YYYY-MM-DD] <做了什麼、關鍵決策、解決方法>`"
+                ),
+            })
 
         # Execute all tool calls and add results
         for tc in msg.tool_calls:
@@ -1494,17 +1523,39 @@ def main():
         except Exception as _soul_err:
             _log("⚠️ SOUL", f"Failed to read soul.md: {_soul_err}")
 
-    # ── MEMORY.md 啟動注入（長期記憶）──────────────────────────────────────────
+    # ── MEMORY.md 啟動注入（長期記憶 + 身份）────────────────────────────────────
     # 每次 session 啟動時讀取 MEMORY.md，注入為「長期記憶」section。
-    # 這讓靈魂規則中的「知識歸檔」真正有效：寫進去的記憶下次會被讀回來。
+    # 智慧分割：身份區段永遠完整保留，任務記錄取最後 3000 字元（防止截斷身份）。
+    # 若缺少身份區段 → 注入模板 + 填寫指令（身份引導 Bootstrap）。
     _memory_path = Path(group_folder) / "MEMORY.md"
+    _IDENTITY_MARKER = "## 身份 (Identity)"
+    _TASK_MARKER = "## 任務記錄 (Task Log)"
     if _memory_path.exists():
         _memory_content = _memory_path.read_text(encoding="utf-8").strip()
         if _memory_content:
-            _memory_snippet = _memory_content[-4000:]  # 最多注入最近 4000 字元
+            # 智慧分割：保留完整身份 + task log 最後 3000 字元
+            if _IDENTITY_MARKER in _memory_content and _TASK_MARKER in _memory_content:
+                _id_end = _memory_content.index(_TASK_MARKER)
+                _identity_part = _memory_content[:_id_end].strip()
+                _task_part = _memory_content[_id_end:][-3000:]
+                _memory_snippet = _identity_part + "\n\n" + _task_part
+            else:
+                _memory_snippet = _memory_content[-4000:]
             lines.append("")
-            lines.append(f"## 長期記憶 (MEMORY.md)\n以下是你在先前 session 中記錄的重要決策與技術解決方案：\n\n{_memory_snippet}")
+            lines.append(f"## 長期記憶 (MEMORY.md)\n以下是你在先前 session 中記錄的知識與自我認知：\n\n{_memory_snippet}")
             _log("🧠 MEMORY", f"Injected {len(_memory_snippet)} chars from MEMORY.md")
+            # 身份引導：若缺少身份區段，提示建立
+            if _IDENTITY_MARKER not in _memory_content:
+                lines.append(
+                    f"⚠️ 身份引導：你的 MEMORY.md 尚未建立 `{_IDENTITY_MARKER}` 區段。"
+                    f"請在本 session 完成主要任務後，在 {_memory_path} 開頭建立身份區段（格式見 soul.md 的 ### 自我認知）。"
+                )
+    else:
+        # 第一次 session：提示建立 MEMORY.md 與身份區段
+        lines.append(
+            f"⚠️ 身份引導：這是你的第一次 session，尚無長期記憶。"
+            f"請在完成主要任務後，建立 {_memory_path} 並填寫身份資料（格式見 soul.md 的 ### 自我認知）。"
+        )
 
     # ── Level B 啟發式偵測（代碼層面輔助分類）────────────────────────────────
     # 根據 prompt 長度 + 關鍵字分析，code 層面判斷是否為 Level B 任務，
