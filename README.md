@@ -17,6 +17,7 @@
 
 | 版本 | 摘要 |
 |------|------|
+| **v1.11.28** | 深度架構審計：路徑遍歷安全修復、群組追蹤記憶體洩漏修復、演化 daemon 時間戳重啟問題修復 |
 | **v1.11.27** | 安全加固 + 可靠性提升 + 代碼品質改善 + 深度分析修復（container_logs 剪裁、FTS 同步、stderr OOM 防護） |
 | **v1.11.26** | 意志系統：MEMORY.md 智慧注入、身份引導 Bootstrap、Milestone Enforcer v3、Host Auto-Write Fallback |
 | **v1.11.25** | circuit breaker 誤分類修復 + SIGUSR1 線上重置 |

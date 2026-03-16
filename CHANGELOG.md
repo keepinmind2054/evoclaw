@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.28] - 2026-03-17
+### Fixed
+- Security: path traversal via `str.startswith` prefix bypass in `_resolve_container_path` — now uses `pathlib.is_relative_to()` (#201)
+- Security: `register_group` IPC handler now validates folder name against path traversal (#202)
+- Memory leak: per-group tracking dicts (`_per_jid_cursors`, `_group_msg_timestamps`, failure counters) now pruned on group reload (#203)
+- Evolution daemon `_last_micro_sync`/`_last_weekly_compound` now loaded from DB on startup — prevents running immediately after every restart (#205)
+
 ## [1.11.27] - 2026-03-17
 ### Fixed
 - Security hardening: reduce container secret exposure — only LLM keys passed, channel/SCM tokens excluded (PR #198)
