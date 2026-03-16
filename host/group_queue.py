@@ -127,6 +127,14 @@ class GroupQueue:
             log.debug(f"[{group_jid}] Container active — message queued")
             return
 
+        if state.retry_count > 0:
+            # 有重試已排程中（指數退避等待中），不要立即再啟動新 container。
+            # 只標記 pending_messages，讓排程重試到期後自然觸發處理。
+            # 這防止 Docker circuit breaker 開路時形成緊密無限重試迴圈。
+            state.pending_messages = True
+            log.debug(f"[{group_jid}] Retry pending (count={state.retry_count}) — message queued, not starting new run")
+            return
+
         if self._active_count >= config.MAX_CONCURRENT_CONTAINERS:
             # 全域並發已滿，加入等待佇列（FIFO，避免飢餓）
             state.pending_messages = True
@@ -323,6 +331,11 @@ class GroupQueue:
 
         # 再處理待辦訊息
         if state.pending_messages:
+            if state.retry_count > 0:
+                # 重試已排程中，不在 drain 時立即啟動 — 讓重試到期後自然處理。
+                # 這防止 Docker circuit breaker 開路時 _drain_group 形成緊密迴圈。
+                log.debug(f"[{group_jid}] Retry pending in drain — deferring message processing")
+                return
             state.active = True
             self._active_count += 1
             t = asyncio.create_task(

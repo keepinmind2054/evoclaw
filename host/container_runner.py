@@ -68,8 +68,10 @@ _active_lock = asyncio.Lock()  # asyncio.Lock for use in async coroutines
 
 # ── Docker circuit breaker ─────────────────────────────────────────────────────
 _docker_failures = 0
+_docker_failure_time: float = 0.0   # time.time() of last recorded failure (for half-open)
 _docker_failure_lock = _threading.Lock()
-_DOCKER_CIRCUIT_THRESHOLD = 3  # open circuit after this many consecutive failures
+_DOCKER_CIRCUIT_THRESHOLD = 3   # open circuit after this many consecutive failures
+_DOCKER_HALF_OPEN_SECS = 60     # try ONE request after 60s of open circuit (half-open state)
 
 # ── Portable empty file for .env shadow mount ──────────────────────────────────
 _EMPTY_ENV_FILE: str | None = None
@@ -103,20 +105,45 @@ def _get_empty_env_file() -> str | None:
 
 
 def _record_docker_success() -> None:
-    global _docker_failures
+    global _docker_failures, _docker_failure_time
     with _docker_failure_lock:
         _docker_failures = 0
+        _docker_failure_time = 0.0
 
 
 def _record_docker_failure() -> None:
-    global _docker_failures
+    global _docker_failures, _docker_failure_time
     with _docker_failure_lock:
         _docker_failures += 1
+        _docker_failure_time = time.time()
 
 
 def _docker_circuit_open() -> bool:
+    """Returns True if the Docker circuit breaker is open (too many consecutive failures).
+
+    Implements a half-open state: after _DOCKER_HALF_OPEN_SECS seconds have passed
+    since the last failure, we reset the counter to THRESHOLD-1 and allow ONE trial
+    request through. If that request succeeds, _record_docker_success() resets to 0.
+    If it fails, _record_docker_failure() pushes it back to THRESHOLD and the circuit
+    re-opens for another _DOCKER_HALF_OPEN_SECS seconds.
+
+    Without this, a permanently-open circuit can never self-heal without a process restart.
+    """
+    global _docker_failures, _docker_failure_time
     with _docker_failure_lock:
-        return _docker_failures >= _DOCKER_CIRCUIT_THRESHOLD
+        if _docker_failures < _DOCKER_CIRCUIT_THRESHOLD:
+            return False
+        # Circuit is open — check if it's time to enter half-open state
+        elapsed = time.time() - _docker_failure_time
+        if elapsed >= _DOCKER_HALF_OPEN_SECS:
+            # Half-open: allow ONE trial request by stepping back to THRESHOLD-1
+            _docker_failures = _DOCKER_CIRCUIT_THRESHOLD - 1
+            log.info(
+                "Docker circuit breaker half-open after %.0fs — allowing one trial request",
+                elapsed,
+            )
+            return False
+        return True
 
 
 def get_active_containers() -> list[dict]:
