@@ -997,6 +997,7 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
     MAX_ITER = 30
     final_response = ""
     _no_tool_turns = 0  # consecutive turns without any tool call (Fix #169)
+    _turns_since_notify = 0  # turns since last mcp__evoclaw__send_message call (milestone enforcer)
 
     for n in range(MAX_ITER):
         # Escalate to "required" when model has been avoiding tools (Fix #169).
@@ -1100,6 +1101,28 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
 
         # Model made tool calls — reset the no-tool counter (Fix #169)
         _no_tool_turns = 0
+
+        # ── 里程碑強制器：追蹤距上次 send_message 的輪數 ────────────────────
+        # 若超過 4 輪沒有向用戶發送進度更新，自動注入里程碑提醒。
+        # 這是代碼層面的強制，不依賴模型自律。
+        _sent_message_this_turn = any(
+            tc.function.name == "mcp__evoclaw__send_message"
+            for tc in msg.tool_calls
+        )
+        if _sent_message_this_turn:
+            _turns_since_notify = 0
+        else:
+            _turns_since_notify += 1
+            if _turns_since_notify >= 4 and n < MAX_ITER - 2:
+                _log("⏰ MILESTONE", f"No send_message for {_turns_since_notify} turns — injecting reminder")
+                history.append({
+                    "role": "user",
+                    "content": (
+                        f"⏰ 你已執行 {_turns_since_notify} 輪未向用戶回報進度。"
+                        "請立即使用 mcp__evoclaw__send_message 發送里程碑更新，告知目前執行狀態（2-3 句話即可）。"
+                    ),
+                })
+                _turns_since_notify = 0
 
         # Execute all tool calls and add results
         for tc in msg.tool_calls:
@@ -1455,6 +1478,40 @@ def main():
         f"2. 進度日誌: Create {group_folder}/progress.log and write each key step with timestamp.",
         "3. 里程碑回報: If estimated total time > 2 minutes, send mcp__evoclaw__send_message at each major milestone — never go silent for more than 2 minutes.",
     ]
+
+    # ── MEMORY.md 啟動注入（長期記憶）──────────────────────────────────────────
+    # 每次 session 啟動時讀取 MEMORY.md，注入為「長期記憶」section。
+    # 這讓靈魂規則中的「知識歸檔」真正有效：寫進去的記憶下次會被讀回來。
+    _memory_path = Path(group_folder) / "MEMORY.md"
+    if _memory_path.exists():
+        _memory_content = _memory_path.read_text(encoding="utf-8").strip()
+        if _memory_content:
+            _memory_snippet = _memory_content[-4000:]  # 最多注入最近 4000 字元
+            lines.append("")
+            lines.append(f"## 長期記憶 (MEMORY.md)\n以下是你在先前 session 中記錄的重要決策與技術解決方案：\n\n{_memory_snippet}")
+            _log("🧠 MEMORY", f"Injected {len(_memory_snippet)} chars from MEMORY.md")
+
+    # ── Level B 啟發式偵測（代碼層面輔助分類）────────────────────────────────
+    # 根據 prompt 長度 + 關鍵字分析，code 層面判斷是否為 Level B 任務，
+    # 並在 system prompt 中標記，輔助模型做出正確的委派決策。
+    _LEVEL_B_KEYWORDS = [
+        "debug", "修復", "fix", "配置", "configure", "install", "安裝",
+        "optimize", "優化", "implement", "實作", "refactor", "重構",
+        "analyze", "分析", "deploy", "部署", "multi-step", "step by step",
+        "system", "系統", "migrate", "migration", "architecture", "架構",
+    ]
+    _prompt_lower = prompt.lower() if prompt else ""
+    _is_level_b = (
+        len(prompt or "") > 200 or
+        any(kw in _prompt_lower for kw in _LEVEL_B_KEYWORDS)
+    )
+    if _is_level_b:
+        lines.append("")
+        lines.append(
+            "⚠️ 系統預分析：本任務可能屬於 Level B（複雜任務）。"
+            "請在開始前評估是否需要使用 mcp__evoclaw__run_agent 委派給子代理。"
+        )
+        _log("🧠 LEVEL-B", f"Heuristic detected Level B task (len={len(prompt or '')}, keywords match={_is_level_b})")
 
     # 讀取全域和群組專屬的 CLAUDE.md 設定（若存在），附加到系統提示詞末尾
     # 全域 CLAUDE.md 提供所有群組共用的指令；群組 CLAUDE.md 提供群組專屬設定

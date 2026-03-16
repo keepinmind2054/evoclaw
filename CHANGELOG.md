@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.11.20] - 2026-03-16
+### Added
+- MEMORY.md 啟動注入：session 啟動時讀取 {group_folder}/MEMORY.md，注入為「長期記憶」section — 讓知識歸檔真正有效 (#173)
+- 里程碑強制器：run_agent_openai loop 追蹤 _turns_since_notify，超過 4 輪無 mcp__evoclaw__send_message 自動注入提醒 (#173)
+- Level B 啟發式偵測：prompt 長度 > 200 或含關鍵字時代碼層面標記 Level B，輔助模型委派決策 (#173)
+
 ## [1.11.19] - 2026-03-16
 ### Added
 - Agent soul: `## 任務協調與智慧委派` section added to system prompt
