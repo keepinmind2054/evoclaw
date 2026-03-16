@@ -1478,35 +1478,21 @@ def main():
         "- mcp__evoclaw__schedule_task / list_tasks / cancel_task / pause_task / resume_task: manage scheduled tasks",
         "- mcp__evoclaw__run_agent: spawn a subagent to handle a subtask and return its result",
         "",
-        "## 任務協調與智慧委派",
-        "",
-        "### 預飛行分析 (Pre-flight)",
-        "Before executing any task, perform a brief internal pre-flight analysis:",
-        "1. 需求解構 — Identify core requirements, sub-steps, and technical risks (e.g. permission limits, environment dependencies).",
-        "2. 難度分級 — Classify the task:",
-        "   - Level A (Simple): Single-step, pure info query, file read/write → execute DIRECTLY and IMMEDIATELY.",
-        "   - Level B (Complex): System config, cross-tool-chain calls, multi-step logic, debugging → delegate via mcp__evoclaw__run_agent.",
-        "3. For Level A: skip announcing the analysis — just do it.",
-        "4. For Level B: announce before starting, then delegate.",
-        "",
-        "### 智慧委派 (Delegation) — Level B tasks only",
-        "When a task is Level B:",
-        "- Announce working directory to user via mcp__evoclaw__send_message: '📁 工作目錄: [path]'",
-        "- Call mcp__evoclaw__run_agent with a self-contained, detailed prompt.",
-        "- Start that prompt with '/reasoning on' to enable deeper reasoning in the subagent.",
-        "- After receiving subagent output: review, fix any gaps, then deliver the complete result.",
-        "",
-        "### 整合與進化 (Synthesis)",
-        "After completing any significant task:",
-        f"- Append a brief summary to {group_folder}/MEMORY.md (create if it doesn't exist).",
-        "- Format: `[DATE] <task summary: what was done, key decisions, solutions>`",
-        "- This builds long-term institutional memory across sessions.",
-        "",
-        "### 任務透明度 (Transparency) — Level B tasks only",
-        f"1. 目錄宣告: Before starting, send '📁 工作目錄: [absolute path]' to user.",
-        f"2. 進度日誌: Create {group_folder}/progress.log and write each key step with timestamp.",
-        "3. 里程碑回報: If estimated total time > 2 minutes, send mcp__evoclaw__send_message at each major milestone — never go silent for more than 2 minutes.",
     ]
+
+    # ── 靈魂規則 (Soul Rules) — 從 soul.md 讀取 ──────────────────────────────
+    # soul.md 與 agent.py 同目錄，更新靈魂規則只需編輯該檔案，無需動 Python code。
+    # {{GROUP_FOLDER}} 為執行時替換的佔位符，指向此群組的資料目錄。
+    _soul_path = Path(__file__).parent / "soul.md"
+    if _soul_path.exists():
+        try:
+            _soul_text = _soul_path.read_text(encoding="utf-8").strip()
+            _soul_text = _soul_text.replace("{{GROUP_FOLDER}}", str(group_folder))
+            lines.append("")
+            lines.append(_soul_text)
+            _log("🧠 SOUL", f"Injected soul.md ({len(_soul_text)} chars)")
+        except Exception as _soul_err:
+            _log("⚠️ SOUL", f"Failed to read soul.md: {_soul_err}")
 
     # ── MEMORY.md 啟動注入（長期記憶）──────────────────────────────────────────
     # 每次 session 啟動時讀取 MEMORY.md，注入為「長期記憶」section。
