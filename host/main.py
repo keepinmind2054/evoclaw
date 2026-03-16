@@ -23,7 +23,7 @@ _GROUP_FAIL_COOLDOWN = 60.0  # seconds
 from . import config, db
 from .allowlist import load_sender_allowlist, is_sender_allowed
 from .dashboard import start_dashboard
-from .container_runner import run_container_agent, cleanup_orphans
+from .container_runner import run_container_agent, cleanup_orphans, _read_secrets, _validate_secrets
 from .group_queue import GroupQueue
 from .ipc_watcher import start_ipc_watcher
 from .task_scheduler import start_scheduler_loop
@@ -31,6 +31,35 @@ from .router import register_channel, route_outbound, format_messages, find_chan
 from .evolution import check_message as immune_check, evolution_loop
 from .health_monitor import health_monitor_loop
 from .memory import append_warm_log
+
+
+async def _store_bot_reply(jid: str, text: str) -> None:
+    """Store a bot reply in DB and push to webportal (Fix #189).
+
+    Extracted from on_output and _ipc_route_fn to eliminate duplication.
+    Errors are logged but never propagated — bot reply delivery must not
+    crash the caller.
+    """
+    try:
+        from .webportal import deliver_reply
+        deliver_reply(jid, text)
+    except Exception as e:
+        log.debug("deliver_reply failed for %s: %s", jid, e)
+    try:
+        ts = int(time.time() * 1000)
+        msg_id = str(uuid.uuid4())
+        db.store_message(
+            msg_id, jid,
+            sender="bot",
+            sender_name=config.ASSISTANT_NAME,
+            content=text,
+            timestamp=ts,
+            is_from_me=True,
+            is_bot_message=True,
+        )
+    except Exception as e:
+        log.error("Failed to store bot response in DB for %s: %s", jid, e)
+
 
 def _configure_logging() -> None:
     """Configure logging format based on LOG_FORMAT env var.
@@ -320,32 +349,13 @@ async def _process_group_messages(group: dict, messages: list[dict],
     async def on_output(text: str):
         # 將 container 的回覆透過 router 發送回對應的聊天室
         await route_outbound(jid, text)
-        # Push reply to Web Portal sessions watching this JID
-        try:
-            from .webportal import deliver_reply
-            deliver_reply(jid, text)
-        except Exception:
-            pass
-        # Store bot response in DB so dashboard can show full conversation
-        try:
-            ts = int(time.time() * 1000)
-            msg_id = str(uuid.uuid4())
-            db.store_message(
-                msg_id, jid,
-                sender="bot",
-                sender_name=config.ASSISTANT_NAME,
-                content=text,
-                timestamp=ts,
-                is_from_me=True,
-                is_bot_message=True,
-            )
-        except Exception:
-            pass
+        # Store + push reply via shared helper (Fix #189)
+        await _store_bot_reply(jid, text)
         # 三層記憶系統：暖記憶 — 每次對話後自動追加摘要到今日日誌
         try:
             append_warm_log(jid, _user_prompt_text, text)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("append_warm_log failed for %s: %s", jid, e)
 
     # Wrap on_success to reset the failure counter on a successful run
     _run_succeeded = False
@@ -460,26 +470,8 @@ async def _orphan_cleanup_loop(stop_event: asyncio.Event) -> None:
 async def _ipc_route_fn(jid: str, text: str, sender: str | None = None) -> None:
     """IPC watcher 的路由回呼：將 container 發出的訊息轉發到對應聊天室。"""
     await route_outbound(jid, text)
-    try:
-        from .webportal import deliver_reply
-        deliver_reply(jid, text)
-    except Exception:
-        pass
-    # Store bot response (from scheduled tasks / IPC) in DB
-    try:
-        ts = int(time.time() * 1000)
-        msg_id = str(uuid.uuid4())
-        db.store_message(
-            msg_id, jid,
-            sender="bot",
-            sender_name=config.ASSISTANT_NAME,
-            content=text,
-            timestamp=ts,
-            is_from_me=True,
-            is_bot_message=True,
-        )
-    except Exception:
-        pass
+    # Store + push reply via shared helper (Fix #189)
+    await _store_bot_reply(jid, text)
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
@@ -528,6 +520,9 @@ async def main() -> None:
     # 從 DB 載入已登記的群組（包含 JID、folder、trigger 等設定）
     _registered_groups = db.get_all_registered_groups()
     log.info(f"Loaded {len(_registered_groups)} registered group(s)")
+
+    # Validate LLM secrets once at startup instead of per-container-run (Fix #190)
+    _validate_secrets(_read_secrets())
 
     # 確保群組資料夾與全域共享資料夾存在
     config.GROUPS_DIR.mkdir(parents=True, exist_ok=True)

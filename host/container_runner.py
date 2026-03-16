@@ -62,6 +62,17 @@ def _warn_if_latest_image() -> None:
 
 _warn_if_latest_image()
 
+# ── Named constants for thresholds (Fix #193) ─────────────────────────────────
+# Stderr length threshold: above this, we assume the container ran (Docker OK)
+# but the agent process crashed before emitting output markers.
+_STDERR_DOCKER_OK_THRESHOLD = 200
+# Maximum size of container output JSON before we reject it (2 MB)
+_MAX_OUTPUT_SIZE = 2 * 1024 * 1024
+# Stderr readline timeout in seconds (per-line, not total)
+_STDERR_READLINE_TIMEOUT = 30.0
+# Default history lookback window in hours (can be overridden per-group)
+_DEFAULT_HISTORY_LOOKBACK_HOURS = 4
+
 # ── Active container tracking (for dashboard) ─────────────────────────────────
 _active_containers: dict[str, dict] = {}  # container_name → info dict
 _active_lock = asyncio.Lock()  # asyncio.Lock for use in async coroutines
@@ -328,10 +339,9 @@ async def run_container_agent(
 
     # 將 API 金鑰等敏感資料包進 input_data，透過 stdin 傳給 container
     secrets = _read_secrets()
-    _validate_secrets(secrets)
     # 取得最近對話歷史（最多 50 則），提供給 agent 作為上下文記憶
     # history_lookback_hours 可在 group config 中設定（預設 4 小時）
-    history_lookback = group.get("history_lookback_hours", 4) * 3600  # configurable, default 4h
+    history_lookback = group.get("history_lookback_hours", _DEFAULT_HISTORY_LOOKBACK_HOURS) * 3600
     history_cutoff = int((time.time() - history_lookback) * 1000)
     history_msgs = db.get_messages_since(jid, history_cutoff, limit=50)
     conv_history = []
@@ -452,7 +462,7 @@ async def run_container_agent(
                 _EMOJI_TAGS = ("🚀","📥","💬","🤖","🧠","🔧","📨","📎","📤","❌","🏁","⚠️")
                 while True:
                     try:
-                        line_bytes = await asyncio.wait_for(proc.stderr.readline(), timeout=30.0)
+                        line_bytes = await asyncio.wait_for(proc.stderr.readline(), timeout=_STDERR_READLINE_TIMEOUT)
                     except asyncio.TimeoutError:
                         log.warning("Stderr readline timed out, stopping stream")
                         break
@@ -513,7 +523,7 @@ async def run_container_agent(
             # 只是 agent process 在 emit() 前崩潰（OOM、unhandled exception 等）。
             # 這種情況 Docker 本身是正常的 → 呼叫 _record_docker_success() 歸零 circuit。
             # 若 stderr 幾乎為空，才代表 Docker daemon 層面的失敗 → 計入 circuit breaker。
-            _container_ran = bool(stderr and len(stderr.strip()) > 200)
+            _container_ran = bool(stderr and len(stderr.strip()) > _STDERR_DOCKER_OK_THRESHOLD)
             if _container_ran:
                 log.info("Container %s crashed before emit() but Docker is healthy — resetting circuit breaker", container_name)
                 _record_docker_success()
@@ -524,8 +534,7 @@ async def run_container_agent(
 
         # 截取兩個標記之間的內容並解析為 JSON
         raw = stdout[start_idx + len(OUTPUT_START):end_idx].strip()
-        MAX_OUTPUT_SIZE = 2 * 1024 * 1024  # 2MB
-        if len(raw) > MAX_OUTPUT_SIZE:
+        if len(raw) > _MAX_OUTPUT_SIZE:
             log.error("Container output too large (%d bytes), truncating", len(raw))
             return {"status": "error", "result": "Output too large"}
         try:
