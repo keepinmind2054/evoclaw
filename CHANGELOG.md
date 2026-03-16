@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.11.24] - 2026-03-16
+### Refactored
+- 靈魂規則獨立為 container/agent-runner/soul.md，runner 啟動時讀取注入 — 更新規則無需改 Python code
+
 ## [1.11.23] - 2026-03-16
 ### Fixed
 - health_monitor: 加入 ERROR_RATE_MIN_SAMPLES=5 門檻，避免樣本數不足時誤報高錯誤率（如 1/1=100%）
