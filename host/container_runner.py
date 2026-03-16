@@ -496,7 +496,7 @@ async def run_container_agent(
         end_idx = stdout.find(OUTPUT_END)
 
         if start_idx == -1 or end_idx == -1 or end_idx <= start_idx:
-            # 找不到標記代表 container 可能在輸出結果前就崩潰了
+            # 找不到標記代表 container 在輸出結果前就結束了
             stderr_lines = stderr.splitlines() if stderr else []
             if stderr_lines:
                 log.warning(
@@ -505,11 +505,21 @@ async def run_container_agent(
                     "\n".join(_redact_secrets(l) for l in stderr_lines[-5:])
                 )
             log.warning("No valid output markers in container stdout")
-            # 記錄失敗執行到演化引擎，確保適應度計算有完整樣本（含錯誤案例）
             response_ms = int((time.time() - t0) * 1000)
             record_run(jid, run_id, response_ms, retry_count=0, success=False)
             db.log_container_finish(run_id, time.time(), "error", _redact_secrets(stderr) if stderr else "", stdout[:200] if stdout else "", response_ms)
-            _record_docker_failure()
+            # ── 區分「Docker daemon 失敗」vs「container agent 崩潰」────────────
+            # 若 stderr 有實質內容（> 200 chars），代表 Docker 成功啟動了 container，
+            # 只是 agent process 在 emit() 前崩潰（OOM、unhandled exception 等）。
+            # 這種情況 Docker 本身是正常的 → 呼叫 _record_docker_success() 歸零 circuit。
+            # 若 stderr 幾乎為空，才代表 Docker daemon 層面的失敗 → 計入 circuit breaker。
+            _container_ran = bool(stderr and len(stderr.strip()) > 200)
+            if _container_ran:
+                log.info("Container %s crashed before emit() but Docker is healthy — resetting circuit breaker", container_name)
+                _record_docker_success()
+            else:
+                log.warning("Container %s produced no stderr — possible Docker daemon issue — incrementing circuit breaker", container_name)
+                _record_docker_failure()
             return {"status": "error", "error": "no output markers", "messages": []}
 
         # 截取兩個標記之間的內容並解析為 JSON
