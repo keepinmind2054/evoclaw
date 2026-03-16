@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.11.22] - 2026-03-16
+### Fixed
+- Docker circuit breaker 半開放狀態（half-open）：60秒後允許一次試探請求，避免永久死鎖 (#177)
+- group_queue.py: enqueue_message_check 和 _drain_group 加入 retry_count > 0 檢查，防止 circuit breaker 開路時形成緊密無限重試迴圈（「無法中斷」問題）(#177)
+
 ## [2.4.16] - 2026-03-16
 ### Fixed
 - 里程碑強制器 v2：區分「實質工具」vs「報告工具」— 只有 Bash/Read/Write/run_agent + send_message 組合才算真里程碑 (#169)
