@@ -56,6 +56,11 @@ from .evolution import check_message as immune_check, evolution_loop
 from .health_monitor import health_monitor_loop
 from .memory import append_warm_log
 
+# Phase 1 (UnifiedClaw): New components
+from .memory.memory_bus import MemoryBus
+from .ws_bridge import WSBridge
+from .identity.agent_identity import AgentIdentityStore
+
 
 async def _discord_notify(content: str) -> None:
     """POST a message to the Discord webhook (if configured).
@@ -415,6 +420,18 @@ async def _process_group_messages(group: dict, messages: list[dict],
     folder = group["folder"]
     jid = group["jid"]
 
+    # Phase 1 (UnifiedClaw): Track agent identity per group
+    try:
+        _channel_name = group.get("channel", "unknown")
+        _identity = _identity_store.get_or_create(
+            name=folder,
+            project="evoclaw",
+            channel=_channel_name,
+        )
+        _identity_store.increment_message_count(_identity.agent_id)
+    except Exception as _id_exc:
+        log.debug("Phase 1: identity tracking failed (non-fatal): %s", _id_exc)
+
     # ── Consecutive failure guard: prevent infinite retry loops ───────────────
     async with _group_fail_lock:
         fail_count = _group_fail_counts.get(jid, 0)
@@ -740,6 +757,15 @@ async def main() -> None:
     except Exception as _prune_exc:
         log.warning("Log pruning failed (non-fatal): %s", _prune_exc)
 
+    # Phase 1 (UnifiedClaw): Initialize MemoryBus, AgentIdentityStore, WSBridge
+    _groups_dir = Path(os.environ.get("GROUPS_DIR", str(config.GROUPS_DIR)))
+    _db_conn = db.get_connection()
+    _memory_bus = MemoryBus(conn=_db_conn, groups_dir=_groups_dir)
+    _identity_store = AgentIdentityStore(conn=_db_conn)
+    _ws_bridge = WSBridge(memory_bus=_memory_bus)
+    log.info("Phase 1: MemoryBus initialized | %s", _memory_bus.status())
+    log.info("Phase 1: WSBridge ready on port %s", _ws_bridge.port)
+
     # 啟動 Web dashboard（背景 daemon thread，port DASHBOARD_PORT）
     start_dashboard(_stop_event)
     from .webportal import start_webportal, deliver_reply as _portal_deliver
@@ -968,6 +994,8 @@ async def main() -> None:
             evolution_loop(_stop_event),
             health_monitor_loop(_stop_event),
             _orphan_cleanup_loop(_stop_event),
+            # Phase 1 (UnifiedClaw): WebSocket bridge — coexists with file IPC
+            _ws_bridge.start(),
         )
     finally:
         # Fix #135: disconnect channels FIRST so Telegram's update_fetcher_task can stop cleanly
