@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.32] - 2026-03-17
+### Added
+- Monitor group support via `MONITOR_JID` env var: error alerts forwarded to a dedicated watchdog Telegram group automatically (#213)
+- `reset_group` IPC command: monitor agent can unfreeze stuck groups without human intervention
+- `mcp__evoclaw__reset_group` tool available to agents in Gemini, OpenAI-compat, and Claude modes
+- `groups/telegram_monitor/MEMORY.md` template: watchdog agent persona pre-configured
+- Nanoclaw independent watchdog scheduled task: checks EvoClaw DB every 5 minutes as backup
+
 ## [1.11.31] - 2026-03-17
 ### Added
 - Inline error notifications: container crash / timeout / exception now sends a user-facing message directly in the conversation — no backend log watching required (#211)
