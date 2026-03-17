@@ -31,6 +31,13 @@ _ERROR_NOTIFY_COOLDOWN = 300.0  # 5 minutes
 # The monitor group is auto-registered at startup so EvoClaw can route to it.
 _MONITOR_JID: str = ""  # populated in main() from env
 
+# ── Heartbeat ─────────────────────────────────────────────────────────────────
+# Periodic "I'm alive" ping to MONITOR_JID. If the pings stop, EvoClaw is down.
+# Interval is configurable via HEARTBEAT_INTERVAL env var (default 30 min).
+_last_heartbeat: float = 0.0
+_HEARTBEAT_INTERVAL: float = 1800.0  # 30 minutes; overridden in main() from env
+_startup_time: float = 0.0
+
 from . import config, db
 from .allowlist import load_sender_allowlist, is_sender_allowed
 from .dashboard import start_dashboard
@@ -575,6 +582,23 @@ async def _message_loop() -> None:
                 except Exception as _rfe:
                     log.warning("reset_group flag processing failed: %s", _rfe)
 
+            # ── Heartbeat: periodic ping to monitor group ────────────────────
+            global _last_heartbeat
+            if _MONITOR_JID and (time.time() - _last_heartbeat) >= _HEARTBEAT_INTERVAL:
+                _last_heartbeat = time.time()
+                try:
+                    import datetime as _hb_dt
+                    _uptime_s = int(time.time() - _startup_time)
+                    _uptime_str = f"{_uptime_s // 3600}h {(_uptime_s % 3600) // 60}m"
+                    _n_groups = len([g for g in _registered_groups if not g.get("folder") == "telegram_monitor"])
+                    _recent = db.get_error_stats(minutes=30)
+                    _stats = f" | 過去30分鐘：✅{_recent['successes']} ❌{_recent['errors']}" if _recent and _recent.get("total", 0) > 0 else ""
+                    _hb_msg = f"💓 EvoClaw 運行中 | 上線時間：{_uptime_str} | 群組：{_n_groups}{_stats}"
+                    await route_outbound(_MONITOR_JID, _hb_msg)
+                    log.debug("Heartbeat sent to monitor group")
+                except Exception as _hbe:
+                    log.warning("Heartbeat send failed: %s", _hbe)
+
             for group in _registered_groups:
                 jid = group["jid"]
                 cursor = _per_jid_cursors.get(jid, _last_timestamp)
@@ -625,9 +649,17 @@ async def main() -> None:
     7. 同時啟動訊息輪詢、IPC watcher 及排程器三個背景迴圈
     """
     global _registered_groups, _sender_allowlist, _stop_event, _group_fail_lock, _dedup_lock
+    global _startup_time, _HEARTBEAT_INTERVAL
     _stop_event = asyncio.Event()
     _group_fail_lock = asyncio.Lock()
     _dedup_lock = asyncio.Lock()
+    _startup_time = time.time()
+
+    # Heartbeat interval: configurable via env (default 30 min)
+    try:
+        _HEARTBEAT_INTERVAL = float(os.environ.get("HEARTBEAT_INTERVAL", "1800"))
+    except ValueError:
+        _HEARTBEAT_INTERVAL = 1800.0
 
     log.info("EvoClaw starting up...")
 
