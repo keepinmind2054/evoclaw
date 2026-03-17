@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.11.29] - 2026-03-17
+### Added
+- `TELEGRAM_PROXY` env var: route Telegram API calls through HTTP or SOCKS5 proxy — resolves TimedOut errors on networks where `api.telegram.org` is blocked (#207)
+- Increased `MAX_RETRIES` 3 → 5 with capped exponential backoff (2s, 4s, 8s, 16s, 30s max) for transient network blips
+- Documented `TELEGRAM_PROXY` in `.env.example` with HTTP and SOCKS5 examples
+
 ## [1.11.28] - 2026-03-17
 ### Fixed
 - Security: path traversal via `str.startswith` prefix bypass in `_resolve_container_path` — now uses `pathlib.is_relative_to()` (#201)
