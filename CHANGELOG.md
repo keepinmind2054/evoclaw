@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.11.33] - 2026-03-17
+### Added
+- `/monitor` Telegram command: send in any group to instantly register it as the monitor group — no `.env` editing or restart required (#215)
+- `_write_monitor_jid_to_env()`: persists `MONITOR_JID` to `.env` automatically so the setting survives restarts
+
 ## [1.11.32] - 2026-03-17
 ### Added
 - Monitor group support via `MONITOR_JID` env var: error alerts forwarded to a dedicated watchdog Telegram group automatically (#213)
