@@ -479,6 +479,12 @@ async def _process_group_messages(group: dict, messages: list[dict],
     # Sends error messages inline in the conversation so the user sees them
     # immediately without checking backend logs. Capped at once per 5 minutes
     # per group to prevent flooding during a failure storm.
+    # Separator used by container_runner to bundle monitor context into error messages.
+    # Format: "<user-friendly msg>|||MONITOR_CONTEXT|||<detailed context>"
+    # on_error shows only the user part to the originating group;
+    # the monitor group receives the full context so Eve can diagnose the issue.
+    _MONITOR_CTX_SEP = "|||MONITOR_CONTEXT|||"
+
     async def on_error(msg: str):
         now = time.time()
         last = _error_notify_times.get(jid, 0.0)
@@ -486,22 +492,34 @@ async def _process_group_messages(group: dict, messages: list[dict],
             log.debug("on_error rate-limited for %s (%.0fs remaining)", jid, _ERROR_NOTIFY_COOLDOWN - (now - last))
             return
         _error_notify_times[jid] = now
-        log.info("Sending error notification to %s: %s", jid, msg)
-        # Send to originating group
+
+        # Split user-facing message from optional monitor context
+        if _MONITOR_CTX_SEP in msg:
+            user_msg, error_context = msg.split(_MONITOR_CTX_SEP, 1)
+            user_msg = user_msg.strip()
+            error_context = error_context.strip()
+        else:
+            user_msg, error_context = msg, ""
+
+        log.info("Sending error notification to %s: %s", jid, user_msg)
+        # Send short friendly message to originating group
         try:
-            await route_outbound(jid, msg)
+            await route_outbound(jid, user_msg)
         except Exception as _e:
             log.warning("on_error route_outbound failed for %s: %s", jid, _e)
-        # Forward to monitor group (if configured and different from originating group)
+        # Forward to monitor group with full context so Eve can diagnose
         if _MONITOR_JID and _MONITOR_JID != jid:
             try:
-                monitor_msg = f"🔔 [{folder}] {msg}"
+                monitor_msg = f"🔔 [{folder}] {user_msg}"
+                if error_context:
+                    monitor_msg += f"\n\n```\n{error_context[:2000]}\n```"
                 await route_outbound(_MONITOR_JID, monitor_msg)
                 log.debug("on_error forwarded to monitor group %s", _MONITOR_JID)
             except Exception as _me:
                 log.warning("on_error monitor forward failed: %s", _me)
         # Forward to Discord webhook (if configured)
-        await _discord_notify(f"⚠️ **EvoClaw Error** `[{folder}]`\n{msg}")
+        await _discord_notify(f"⚠️ **EvoClaw Error** `[{folder}]`\n{user_msg}" +
+                              (f"\n```\n{error_context[:1000]}\n```" if error_context else ""))
 
     # Wrap on_success to reset the failure counter on a successful run
     _run_succeeded = False

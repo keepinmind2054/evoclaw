@@ -561,7 +561,15 @@ async def run_container_agent(
             else:
                 log.warning("Container %s produced no stderr — possible Docker daemon issue — incrementing circuit breaker", container_name)
                 _record_docker_failure()
-            await _notify_error("⚠️ 系統暫時發生問題，請稍後再傳訊息，會自動重試。")
+            # Bundle stderr context for monitor channel (separator parsed by on_error in main.py)
+            _stderr_ctx_lines = [_redact_secrets(l) for l in (stderr_lines or [])[-15:]]
+            _stderr_ctx = (
+                f"container: {container_name}\n"
+                f"exit_code: {proc.returncode if proc else '?'}\n"
+                f"stderr (last {len(_stderr_ctx_lines)} lines):\n" +
+                ("\n".join(_stderr_ctx_lines) if _stderr_ctx_lines else "(empty)")
+            )
+            await _notify_error("⚠️ 系統暫時發生問題，請稍後再傳訊息，會自動重試。|||MONITOR_CONTEXT|||" + _stderr_ctx)
             return {"status": "error", "error": "no output markers", "messages": []}
 
         # 截取兩個標記之間的內容並解析為 JSON
@@ -579,7 +587,14 @@ async def run_container_agent(
             record_run(jid, run_id, response_ms, retry_count=0, success=False)
             db.log_container_finish(run_id, time.time(), "error", _redact_secrets(stderr) if stderr else "", stdout[:200] if stdout else "", response_ms)
             _record_docker_failure()
-            await _notify_error("⚠️ 系統暫時發生問題，請稍後再傳訊息，會自動重試。")
+            _json_ctx = (
+                f"container: {container_name}\n"
+                f"json_error: {e}\n"
+                f"stdout_raw (first 500):\n{_redact_secrets(raw[:500]) if raw else '(empty)'}\n"
+                f"stderr (last 10 lines):\n" +
+                ("\n".join(_redact_secrets(l) for l in (stderr.splitlines() if stderr else [])[-10:]) or "(empty)")
+            )
+            await _notify_error("⚠️ 系統暫時發生問題，請稍後再傳訊息，會自動重試。|||MONITOR_CONTEXT|||" + _json_ctx)
             return {"status": "error", "error": f"JSON parse error: {e}", "messages": []}
 
         # 若 container 有產生回覆文字，透過 on_output callback 發送到聊天室
@@ -668,7 +683,11 @@ async def run_container_agent(
         record_run(jid, run_id, response_ms, retry_count=0, success=False)
         db.log_container_finish(run_id, time.time(), "error", str(e), "", response_ms)
         _record_docker_failure()
-        await _notify_error(f"⚠️ 執行時發生錯誤（{type(e).__name__}），請稍後再試。")
+        _exc_ctx = (
+            f"container: {container_name}\n"
+            f"exception: {type(e).__name__}: {e}"
+        )
+        await _notify_error(f"⚠️ 執行時發生錯誤（{type(e).__name__}），請稍後再試。|||MONITOR_CONTEXT|||{_exc_ctx}")
         return {"status": "error", "result": None, "error": str(e)}
     finally:
         async with _active_lock:
