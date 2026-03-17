@@ -288,7 +288,7 @@ async def _handle_setup_command(jid: str, command: str) -> str:
     global _MONITOR_JID, _registered_groups
 
     if command == "monitor":
-        _monitor_folder = "telegram_monitor"
+        _monitor_folder = "discord_monitor"
         try:
             # Register in DB
             db.set_registered_group(
@@ -618,7 +618,7 @@ async def _message_loop() -> None:
                     import datetime as _hb_dt
                     _uptime_s = int(time.time() - _startup_time)
                     _uptime_str = f"{_uptime_s // 3600}h {(_uptime_s % 3600) // 60}m"
-                    _n_groups = len([g for g in _registered_groups if not g.get("folder") == "telegram_monitor"])
+                    _n_groups = len([g for g in _registered_groups if not g.get("folder") == "discord_monitor"])
                     _recent = db.get_error_stats(minutes=30)
                     _stats = f" | 過去30分鐘：✅{_recent['successes']} ❌{_recent['errors']}" if _recent and _recent.get("total", 0) > 0 else ""
                     _hb_msg = f"💓 EvoClaw 運行中 | 上線時間：{_uptime_str} | 群組：{_n_groups}{_stats}"
@@ -734,7 +734,7 @@ async def main() -> None:
         except Exception:
             pass
     if _MONITOR_JID:
-        _monitor_folder = "telegram_monitor"
+        _monitor_folder = "discord_monitor"
         try:
             db.set_registered_group(
                 jid=_MONITOR_JID,
