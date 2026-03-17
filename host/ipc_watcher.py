@@ -403,6 +403,15 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
         else:
             log.warning("start_remote_control IPC: could not resolve JID for group %s", group_folder)
 
+    elif msg_type == "self_update":
+        _su_jid = payload.get("jid", "")
+        if not _su_jid:
+            _su_groups = db.get_all_registered_groups()
+            _su_match = next((g for g in _su_groups if g.get("folder") == group_folder), None)
+            _su_jid = _su_match["jid"] if _su_match else ""
+        t = _asyncio.ensure_future(_run_self_update(_su_jid, route_fn))
+        t.add_done_callback(_ipc_task_done_callback)
+
     else:
         # Unknown IPC message type — log a warning instead of silently ignoring.
         # This aids debugging when a stale container image sends an unrecognised type.
@@ -720,6 +729,80 @@ async def _run_start_remote_control(jid: str, sender: str, route_fn: Callable) -
             await route_fn(jid, "⏱️ Remote control 等待 URL 逾時，請再試一次。")
             return
         await asyncio.sleep(0.2)
+
+
+async def _run_self_update(jid: str, route_fn: Callable) -> None:
+    """Run git pull + pip install on the host, then write self_update.flag so
+    main._message_loop() can call os.execv() for an in-place restart."""
+    cwd = str(config.BASE_DIR)
+    try:
+        if jid:
+            await route_fn(jid, "🔄 EvoClaw 更新中：執行 git pull...")
+
+        # ── git pull ──────────────────────────────────────────────────────────
+        proc = await asyncio.create_subprocess_exec(
+            "git", "pull",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=cwd,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60.0)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            if jid:
+                await route_fn(jid, "⏱️ git pull 逾時（>60s），取消更新。")
+            log.error("self_update: git pull timed out")
+            return
+
+        git_output = stdout.decode("utf-8", errors="replace").strip()
+        log.info("self_update: git pull rc=%d output: %s", proc.returncode, git_output[:200])
+
+        if proc.returncode != 0:
+            msg = f"❌ git pull 失敗 (exit {proc.returncode}):\n```\n{git_output[:500]}\n```"
+            if jid:
+                await route_fn(jid, msg)
+            return
+
+        # ── pip install -e . (optional, only if project has setup files) ──────
+        _pip_marker = _pathlib.Path(cwd) / "pyproject.toml"
+        _setup_marker = _pathlib.Path(cwd) / "setup.py"
+        if _pip_marker.exists() or _setup_marker.exists():
+            pip_proc = await asyncio.create_subprocess_exec(
+                "pip", "install", "-e", ".", "--quiet",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=cwd,
+            )
+            try:
+                pip_out, _ = await asyncio.wait_for(pip_proc.communicate(), timeout=120.0)
+            except asyncio.TimeoutError:
+                log.warning("self_update: pip install timed out — continuing with restart anyway")
+            else:
+                if pip_proc.returncode != 0:
+                    pip_output = pip_out.decode("utf-8", errors="replace").strip()
+                    log.warning("self_update: pip install non-zero exit: %s", pip_output[:300])
+
+        # ── write flag for main loop to pick up and os.execv() ───────────────
+        flag = config.DATA_DIR / "self_update.flag"
+        flag.write_text(git_output[:1000], encoding="utf-8")
+        log.info("self_update: flag written at %s — restart pending", flag)
+
+        if jid:
+            changed = "Already up to date." not in git_output
+            if changed:
+                status = f"✅ 更新完成！\n```\n{git_output[:300]}\n```\nEvoClaw 即將重啟..."
+            else:
+                status = "✅ 已是最新版本，EvoClaw 即將重啟..."
+            await route_fn(jid, status)
+
+    except Exception as exc:
+        log.error("self_update: unexpected error: %s", exc)
+        if jid:
+            await route_fn(jid, f"❌ 更新失敗：{exc}")
 
 
 async def _run_memory_search(

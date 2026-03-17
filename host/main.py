@@ -149,6 +149,9 @@ _per_jid_cursors: dict[str, int] = {}  # per-JID cursors (authoritative)
 # 全域開關：設為 False 時，所有背景 loop 都會停止
 _running = True
 
+# Set by _message_loop when self_update.flag is detected; triggers os.execv() after shutdown
+_self_update_requested: bool = False
+
 # 共用的停止事件：shutdown 時 set()，讓所有等待中的 sleep 立即醒來
 _stop_event: asyncio.Event | None = None
 
@@ -610,6 +613,18 @@ async def _message_loop() -> None:
                 except Exception as _rfe:
                     log.warning("reset_group flag processing failed: %s", _rfe)
 
+            # ── Self-update flag: restart via os.execv() ────────────────────
+            self_update_flag = config.DATA_DIR / "self_update.flag"
+            if self_update_flag.exists():
+                global _self_update_requested
+                _self_update_requested = True
+                self_update_flag.unlink(missing_ok=True)
+                log.info("self_update flag detected — initiating graceful restart")
+                _running = False
+                if _stop_event is not None:
+                    _stop_event.set()
+                break
+
             # ── Heartbeat: periodic ping to monitor group ────────────────────
             global _last_heartbeat
             if _MONITOR_JID and (time.time() - _last_heartbeat) >= _HEARTBEAT_INTERVAL:
@@ -972,6 +987,13 @@ async def main() -> None:
                 log.warning("Task cleanup timed out — forcing exit")
 
     log.info("EvoClaw shut down cleanly.")
+
+    # Self-update: replace current process with a fresh one so updated code is loaded.
+    # os.execv() replaces the running process in-place (Unix) or spawns a replacement (Windows).
+    if _self_update_requested:
+        import sys as _sys_restart
+        log.info("Restarting EvoClaw for self-update via os.execv()...")
+        os.execv(_sys_restart.executable, [_sys_restart.executable] + _sys_restart.argv)
 
 
 if __name__ == "__main__":

@@ -454,6 +454,25 @@ def tool_start_remote_control(chat_jid: str = "", sender: str = "") -> str:
         return f"Error: {exc}"
 
 
+def tool_self_update(chat_jid: str = "") -> str:
+    """Request the host to pull the latest EvoClaw code from git and restart.
+    The host will run `git pull` + `pip install -e .` then restart via os.execv()."""
+    global _input_chat_jid
+    effective_jid = chat_jid or _input_chat_jid or ""
+    try:
+        Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
+        uid = str(uuid.uuid4())[:8]
+        fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-self-update-{uid}.json"
+        fname.write_text(json.dumps({
+            "type": "self_update",
+            "jid": effective_jid,
+        }), encoding="utf-8")
+        _log("📨 IPC", f"type=self_update jid={effective_jid} → {fname.name}")
+        return "Self-update requested — EvoClaw will pull latest code and restart shortly."
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
 def tool_glob(pattern: str, path: str = WORKSPACE) -> str:
     """
     在指定目錄下尋找符合 glob 模式的檔案（支援 ** 遞迴搜尋）。
@@ -850,6 +869,19 @@ TOOL_DECLARATIONS = [
             ),
         )]
     ),
+    types.Tool(
+        function_declarations=[types.FunctionDeclaration(
+            name="mcp__evoclaw__self_update",
+            description="Pull the latest EvoClaw code from git and restart the host process. Use when the user asks to update, upgrade, or restart EvoClaw.",
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "chat_jid": types.Schema(type=types.Type.STRING, description="The chat JID to notify when update is done (auto-detected if omitted)"),
+                },
+                required=[],
+            ),
+        )]
+    ),
 ]
 
 
@@ -874,6 +906,7 @@ OPENAI_TOOL_DECLARATIONS = [
     {"type": "function", "function": {"name": "mcp__evoclaw__send_file", "description": "Send a file to the user. Write the file to /workspace/group/output/ first, then call this tool.", "parameters": {"type": "object", "properties": {"chat_jid": {"type": "string", "description": "The chat JID to send the file to"}, "file_path": {"type": "string", "description": "Absolute container path to the file"}, "caption": {"type": "string", "description": "Optional caption"}}, "required": ["file_path"]}}},
     {"type": "function", "function": {"name": "mcp__evoclaw__reset_group", "description": "Clear the failure counter for a group, unfreezing it if it was locked in cooldown. Use when a group is stuck and not responding.", "parameters": {"type": "object", "properties": {"jid": {"type": "string", "description": "The JID of the group to reset, e.g. tg:8259652816"}}, "required": ["jid"]}}},
     {"type": "function", "function": {"name": "mcp__evoclaw__start_remote_control", "description": "Start a Claude Code remote-control session. The host spawns `claude remote-control` and sends the URL back to this chat. Use when the user wants to update code or restart EvoClaw.", "parameters": {"type": "object", "properties": {"chat_jid": {"type": "string"}, "sender": {"type": "string"}}, "required": []}}},
+    {"type": "function", "function": {"name": "mcp__evoclaw__self_update", "description": "Pull the latest EvoClaw code from git and restart the host process. Use when the user asks to update, upgrade, or restart EvoClaw.", "parameters": {"type": "object", "properties": {"chat_jid": {"type": "string"}}, "required": []}}},
 ]
 
 
@@ -905,6 +938,7 @@ CLAUDE_TOOL_DECLARATIONS = [
     {"name": "mcp__evoclaw__send_file", "description": "Send a file to the user. Write the file to /workspace/group/output/ first, then call this tool.", "input_schema": {"type": "object", "properties": {"chat_jid": {"type": "string", "description": "The chat JID to send the file to"}, "file_path": {"type": "string", "description": "Absolute container path to the file"}, "caption": {"type": "string", "description": "Optional caption"}}, "required": ["file_path"]}},
     {"name": "mcp__evoclaw__reset_group", "description": "Clear the failure counter for a group, unfreezing it if it was locked in cooldown. Use when a group is stuck and not responding.", "input_schema": {"type": "object", "properties": {"jid": {"type": "string", "description": "The JID of the group to reset, e.g. tg:8259652816"}}, "required": ["jid"]}},
     {"name": "mcp__evoclaw__start_remote_control", "description": "Start a Claude Code remote-control session. The host spawns `claude remote-control` and sends the URL back to this chat. Use when the user wants to update code or restart EvoClaw.", "input_schema": {"type": "object", "properties": {"chat_jid": {"type": "string"}, "sender": {"type": "string"}}, "required": []}},
+    {"name": "mcp__evoclaw__self_update", "description": "Pull the latest EvoClaw code from git and restart the host process. Use when the user asks to update, upgrade, or restart EvoClaw.", "input_schema": {"type": "object", "properties": {"chat_jid": {"type": "string"}}, "required": []}},
 ]
 
 
@@ -1034,6 +1068,8 @@ def _execute_tool_inner(name: str, args: dict, chat_jid: str) -> str:
             return f"reset_group IPC write failed: {exc}"
     elif name == "mcp__evoclaw__start_remote_control":
         return tool_start_remote_control(args.get("chat_jid", chat_jid), args.get("sender", ""))
+    elif name == "mcp__evoclaw__self_update":
+        return tool_self_update(args.get("chat_jid", chat_jid))
     # ── Dynamic tools (installed via Skills container_tools:) ─────────────────
     if name in _dynamic_tools:
         try:
