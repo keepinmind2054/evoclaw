@@ -976,7 +976,7 @@ def _execute_tool_inner(name: str, args: dict, chat_jid: str) -> str:
 
 # ── Agentic loop ──────────────────────────────────────────────────────────────
 
-def run_agent_openai(client_holder, system_instruction: str, user_message: str, chat_jid: str, model: str, conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None) -> str:
+def run_agent_openai(client_holder, system_instruction: str, user_message: str, chat_jid: str, model: str, conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None, group_folder: str = "") -> str:
     """
     OpenAI-compatible agentic loop (NVIDIA NIM / OpenAI / Groq / etc.)
     Works the same as run_agent but uses OpenAI chat completions API.
@@ -1615,7 +1615,7 @@ def main():
         if use_openai_compat:
             _model = os.environ.get("NIM_MODEL") or os.environ.get("OPENAI_MODEL") or os.environ.get("GEMINI_MODEL") or "meta/llama-3.3-70b-instruct"
             _log("🤖 MODEL", f"openai-compat/{_model}")
-            result = run_agent_openai(_openai_client_holder, system_instruction, prompt, chat_jid, _model, conversation_history, pool=_active_pool, apply_key_fn=_apply_openai_key)
+            result = run_agent_openai(_openai_client_holder, system_instruction, prompt, chat_jid, _model, conversation_history, pool=_active_pool, apply_key_fn=_apply_openai_key, group_folder=group_folder)
         elif use_claude:
             _log("🤖 MODEL", f"claude/{claude_model}")
             result = run_agent_claude(_claude_client_holder, claude_model, system_instruction, prompt, chat_jid, conversation_history, pool=claude_pool, apply_key_fn=_apply_claude_key)
