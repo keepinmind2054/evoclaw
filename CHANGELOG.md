@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.11.31] - 2026-03-17
+### Added
+- Inline error notifications: container crash / timeout / exception now sends a user-facing message directly in the conversation — no backend log watching required (#211)
+- Rate-limited to 1 notification per group per 5 minutes to prevent flooding during failure storms
+- Works out of the box with zero configuration
+
 ## [1.11.30] - 2026-03-17
 ### Fixed
 - `run_agent_openai()` crashed with `NameError: name 'group_folder' is not defined` on every NIM / OpenAI-compatible session — MEMORY.md path was computed from an unpassed local variable (#209)
