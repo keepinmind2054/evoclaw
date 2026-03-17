@@ -67,7 +67,16 @@ class DiscordChannel:
             if message.author.bot:
                 return
 
-            text = message.content
+            text = message.content or ""
+
+            # Append attachment descriptions so the agent can see uploaded files
+            if message.attachments:
+                attachment_lines = [
+                    f"[Attachment: {a.filename} | {a.content_type or 'unknown'} | {a.size}B | {a.url}]"
+                    for a in message.attachments
+                ]
+                text = (text + "\n" + "\n".join(attachment_lines)).strip()
+
             if not text:
                 return
 
@@ -180,6 +189,29 @@ class DiscordChannel:
             await self._run_in_discord_loop(_send())
         except Exception as exc:
             log.error("Discord send_message exception: %s", exc)
+
+    async def send_file(self, jid: str, file_path: str, caption: str = "") -> None:
+        """Upload a file to a Discord channel, with an optional caption."""
+        if not self.is_connected():
+            log.warning("Discord send_file called but channel not connected")
+            return
+        try:
+            import os as _os
+            filename = _os.path.basename(file_path)
+
+            async def _upload():
+                channel = await self._get_channel(jid)
+                if channel is None:
+                    return
+                with open(file_path, "rb") as fp:
+                    await channel.send(
+                        content=caption or None,
+                        file=discord.File(fp, filename=filename),
+                    )
+            await self._run_in_discord_loop(_upload())
+            log.info("Discord file sent: jid=%s file=%s", jid, filename)
+        except Exception as exc:
+            log.error("Discord send_file exception: %s", exc)
 
     async def send_typing(self, jid: str) -> None:
         if not self.is_connected():
