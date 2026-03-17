@@ -17,7 +17,7 @@ class TelegramChannel:
         self._on_chat_metadata = on_chat_metadata
         self._registered_groups = registered_groups
         self._app: Optional[Application] = None
-        env = read_env_file(["TELEGRAM_BOT_TOKEN"])
+        env = read_env_file(["TELEGRAM_BOT_TOKEN", "TELEGRAM_UPLOAD_TIMEOUT", "TELEGRAM_PROXY"])
         token = env.get("TELEGRAM_BOT_TOKEN", "")
         self._token = token
 
@@ -29,6 +29,11 @@ class TelegramChannel:
             self._upload_timeout = int(timeout_str)
         except (ValueError, TypeError):
             self._upload_timeout = 300
+
+        # Fixes #207: support HTTP/SOCKS5 proxy for networks where api.telegram.org
+        # is unreachable directly (e.g. certain VPS regions, firewalled corporate nets).
+        # Set TELEGRAM_PROXY=http://host:port  or  socks5://user:pass@host:port
+        self._proxy = env.get("TELEGRAM_PROXY") or os.environ.get("TELEGRAM_PROXY") or ""
 
     def _jid(self, chat_id: int) -> str:
         return f"tg:{chat_id}"
@@ -45,10 +50,22 @@ class TelegramChannel:
             return
 
         import asyncio
-        MAX_RETRIES = 3
+        MAX_RETRIES = 5  # increased from 3 — transient network blips need more attempts
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                self._app = Application.builder().token(self._token).build()
+                builder = Application.builder().token(self._token)
+                if self._proxy:
+                    # Route all Telegram API calls through the configured proxy.
+                    # Supports HTTP (http://host:port) and SOCKS5 (socks5://user:pass@host:port).
+                    from telegram.request import HTTPXRequest
+                    req = HTTPXRequest(
+                        proxy=self._proxy,
+                        connect_timeout=30.0,
+                        read_timeout=30.0,
+                    )
+                    builder = builder.request(req)
+                    log.info("Telegram using proxy: %s", self._proxy)
+                self._app = builder.build()
 
                 async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     if not update.message or not update.message.text:
@@ -111,7 +128,7 @@ class TelegramChannel:
                     raise  # Conflict is unrecoverable, re-raise immediately
 
                 if attempt < MAX_RETRIES:
-                    wait = 2 ** attempt  # 2s, 4s
+                    wait = min(2 ** attempt, 30)  # 2s, 4s, 8s, 16s (capped at 30s)
                     log.warning(
                         f"Telegram connect attempt {attempt}/{MAX_RETRIES} failed "
                         f"({type(e).__name__}: {e}) — retrying in {wait}s"
