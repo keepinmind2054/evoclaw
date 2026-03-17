@@ -39,3 +39,10 @@ groups/discord_monitor/*
 .evoclaw/
 
 agents-sdk-docs
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
