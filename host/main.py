@@ -678,11 +678,12 @@ async def main() -> None:
     7. 同時啟動訊息輪詢、IPC watcher 及排程器三個背景迴圈
     """
     global _registered_groups, _sender_allowlist, _stop_event, _group_fail_lock, _dedup_lock
-    global _startup_time, _HEARTBEAT_INTERVAL
+    global _startup_time, _HEARTBEAT_INTERVAL, _last_heartbeat
     _stop_event = asyncio.Event()
     _group_fail_lock = asyncio.Lock()
     _dedup_lock = asyncio.Lock()
     _startup_time = time.time()
+    _last_heartbeat = _startup_time  # Don't fire heartbeat immediately; wait one full interval
 
     # Heartbeat interval: configurable via env (default 30 min)
     try:
