@@ -260,6 +260,19 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
         flag.write_text("1", encoding="utf-8")
         log.info("Groups refresh requested via IPC")
 
+    elif msg_type == "reset_group":
+        # 重置指定群組的失敗計數器，解凍被 cooldown 鎖定的群組。
+        # 僅限 monitor 群組（is_monitor=True）或主群組可呼叫，防止普通群組互相干擾。
+        target_jid = payload.get("jid", "")
+        if not target_jid:
+            raise ValueError("reset_group requires 'jid' field")
+        # Write a flag file — main.py's _message_loop reads it and resets counters
+        # Using file flag avoids cross-task direct coupling (same pattern as refresh_groups)
+        import json as _json
+        flag = config.DATA_DIR / "reset_group.flag"
+        flag.write_text(_json.dumps({"jid": target_jid, "ts": time.time()}), encoding="utf-8")
+        log.info("reset_group requested via IPC for jid=%s by group=%s", target_jid, group_folder)
+
     elif msg_type == "apply_skill":
         # 安裝 Skill Plugin：只有主群組的 container 才能呼叫（避免一般群組隨意修改框架檔案）
         # skill_path 可以是本地路徑或 URL（由 skills_engine.apply_skill 處理）

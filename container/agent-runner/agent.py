@@ -800,6 +800,19 @@ TOOL_DECLARATIONS = [
             required=["file_path"],
         ),
     ),
+    types.Tool(
+        function_declarations=[types.FunctionDeclaration(
+            name="mcp__evoclaw__reset_group",
+            description="Clear the failure counter for a group, unfreezing it if it was locked in cooldown. Use this when a group is stuck and not responding. Only callable from monitor group.",
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "jid": types.Schema(type=types.Type.STRING, description="The JID of the group to reset, e.g. tg:8259652816"),
+                },
+                required=["jid"],
+            ),
+        )]
+    ),
 ]
 
 
@@ -822,6 +835,7 @@ OPENAI_TOOL_DECLARATIONS = [
     {"type": "function", "function": {"name": "WebFetch", "description": "Fetch a URL and return its content as plain text.", "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}}},
     {"type": "function", "function": {"name": "mcp__evoclaw__run_agent", "description": "Spawn a subagent in an isolated Docker container to handle a subtask. Blocks until complete (up to 300s) and returns its output.", "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "The task for the subagent"}, "context_mode": {"type": "string", "description": "isolated or group"}}, "required": ["prompt"]}}},
     {"type": "function", "function": {"name": "mcp__evoclaw__send_file", "description": "Send a file to the user. Write the file to /workspace/group/output/ first, then call this tool.", "parameters": {"type": "object", "properties": {"chat_jid": {"type": "string", "description": "The chat JID to send the file to"}, "file_path": {"type": "string", "description": "Absolute container path to the file"}, "caption": {"type": "string", "description": "Optional caption"}}, "required": ["file_path"]}}},
+    {"type": "function", "function": {"name": "mcp__evoclaw__reset_group", "description": "Clear the failure counter for a group, unfreezing it if it was locked in cooldown. Use when a group is stuck and not responding.", "parameters": {"type": "object", "properties": {"jid": {"type": "string", "description": "The JID of the group to reset, e.g. tg:8259652816"}}, "required": ["jid"]}}},
 ]
 
 
@@ -851,6 +865,7 @@ CLAUDE_TOOL_DECLARATIONS = [
     {"name": "WebFetch", "description": "Fetch a URL and return its content as plain text.", "input_schema": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}},
     {"name": "mcp__evoclaw__run_agent", "description": "Spawn a subagent in an isolated Docker container to handle a subtask. Blocks until complete (up to 300s) and returns its output.", "input_schema": {"type": "object", "properties": {"prompt": {"type": "string", "description": "The task for the subagent"}, "context_mode": {"type": "string", "description": "isolated or group"}}, "required": ["prompt"]}},
     {"name": "mcp__evoclaw__send_file", "description": "Send a file to the user. Write the file to /workspace/group/output/ first, then call this tool.", "input_schema": {"type": "object", "properties": {"chat_jid": {"type": "string", "description": "The chat JID to send the file to"}, "file_path": {"type": "string", "description": "Absolute container path to the file"}, "caption": {"type": "string", "description": "Optional caption"}}, "required": ["file_path"]}},
+    {"name": "mcp__evoclaw__reset_group", "description": "Clear the failure counter for a group, unfreezing it if it was locked in cooldown. Use when a group is stuck and not responding.", "input_schema": {"type": "object", "properties": {"jid": {"type": "string", "description": "The JID of the group to reset, e.g. tg:8259652816"}}, "required": ["jid"]}},
 ]
 
 
@@ -965,6 +980,19 @@ def _execute_tool_inner(name: str, args: dict, chat_jid: str) -> str:
         return tool_run_agent(args["prompt"], args.get("context_mode", "isolated"))
     elif name == "mcp__evoclaw__send_file":
         return tool_send_file(args.get("chat_jid", chat_jid), args["file_path"], args.get("caption", ""))
+    elif name == "mcp__evoclaw__reset_group":
+        target_jid = args.get("jid", "")
+        if not target_jid:
+            return "Error: jid is required"
+        try:
+            Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
+            uid = str(uuid.uuid4())[:8]
+            fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-reset-{uid}.json"
+            fname.write_text(json.dumps({"type": "reset_group", "jid": target_jid}), encoding="utf-8")
+            _log("📨 IPC", f"type=reset_group jid={target_jid} → {fname.name}")
+            return f"reset_group IPC sent for {target_jid} — fail counters will be cleared on next host poll cycle"
+        except Exception as exc:
+            return f"reset_group IPC write failed: {exc}"
     # ── Dynamic tools (installed via Skills container_tools:) ─────────────────
     if name in _dynamic_tools:
         try:
