@@ -20,6 +20,12 @@ _group_fail_lock: asyncio.Lock | None = None  # initialized in main() after even
 _GROUP_MAX_FAILS = 5
 _GROUP_FAIL_COOLDOWN = 60.0  # seconds
 
+# ── Per-group error notification rate limiter ──────────────────────────────────
+# Prevents flooding the user with repeated error messages during a failure storm.
+# One error notification per group per _ERROR_NOTIFY_COOLDOWN seconds.
+_error_notify_times: dict[str, float] = {}
+_ERROR_NOTIFY_COOLDOWN = 300.0  # 5 minutes
+
 from . import config, db
 from .allowlist import load_sender_allowlist, is_sender_allowed
 from .dashboard import start_dashboard
@@ -357,6 +363,23 @@ async def _process_group_messages(group: dict, messages: list[dict],
         except Exception as e:
             log.warning("append_warm_log failed for %s: %s", jid, e)
 
+    # ── Error notification callback (rate-limited, no config needed) ─────────────
+    # Sends error messages inline in the conversation so the user sees them
+    # immediately without checking backend logs. Capped at once per 5 minutes
+    # per group to prevent flooding during a failure storm.
+    async def on_error(msg: str):
+        now = time.time()
+        last = _error_notify_times.get(jid, 0.0)
+        if now - last < _ERROR_NOTIFY_COOLDOWN:
+            log.debug("on_error rate-limited for %s (%.0fs remaining)", jid, _ERROR_NOTIFY_COOLDOWN - (now - last))
+            return
+        _error_notify_times[jid] = now
+        log.info("Sending error notification to %s: %s", jid, msg)
+        try:
+            await route_outbound(jid, msg)
+        except Exception as _e:
+            log.warning("on_error route_outbound failed for %s: %s", jid, _e)
+
     # Wrap on_success to reset the failure counter on a successful run
     _run_succeeded = False
 
@@ -378,6 +401,7 @@ async def _process_group_messages(group: dict, messages: list[dict],
                 on_output=on_output,
                 session_id=session_id,
                 on_success=_on_success_tracked,
+                on_error=on_error,
             ),
             timeout=config.CONTAINER_TIMEOUT,  # use central config value
         )
