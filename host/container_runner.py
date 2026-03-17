@@ -305,6 +305,7 @@ async def run_container_agent(
     on_success: Optional[Callable[[], Awaitable[None]]] = None,
     conversation_history: list | None = None,
     parent_container: Optional[str] = None,
+    on_error: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> dict:
     """
     在獨立的 Docker container 中執行 agent，並等待結果。
@@ -319,8 +320,22 @@ async def run_container_agent(
     on_success callback 的時機：只有在 container 正常結束且輸出有效時才呼叫，
     讓呼叫方（通常是 _message_loop）安全地推進游標。
     若 container 逾時或解析失敗，不呼叫 on_success，保留 rollback 安全性。
+
+    on_error callback：當 container 執行失敗（crash / timeout / exception）時呼叫，
+    讓呼叫方可以即時在對話中通知用戶，無需主動查看後台 log。
+    傳入的字串是已格式化的用戶通知訊息（繁體中文）。
     """
+
+    async def _notify_error(msg: str) -> None:
+        """Safe wrapper — silently ignore errors in the notification itself."""
+        if on_error:
+            try:
+                await on_error(msg)
+            except Exception as _ne:
+                log.debug("on_error callback raised: %s", _ne)
+
     if _docker_circuit_open():
+        await _notify_error("🔌 Docker 服務暫時無法連線，請確認 Docker Desktop 是否正在執行。")
         raise RuntimeError(
             f"Docker circuit breaker open: {_docker_failures} consecutive failures. "
             "Check Docker daemon status."
@@ -546,12 +561,14 @@ async def run_container_agent(
             else:
                 log.warning("Container %s produced no stderr — possible Docker daemon issue — incrementing circuit breaker", container_name)
                 _record_docker_failure()
+            await _notify_error("⚠️ 系統暫時發生問題，請稍後再傳訊息，會自動重試。")
             return {"status": "error", "error": "no output markers", "messages": []}
 
         # 截取兩個標記之間的內容並解析為 JSON
         raw = stdout[start_idx + len(OUTPUT_START):end_idx].strip()
         if len(raw) > _MAX_OUTPUT_SIZE:
             log.error("Container output too large (%d bytes), truncating", len(raw))
+            await _notify_error("⚠️ 系統回應內容過大，請嘗試縮短請求。")
             return {"status": "error", "result": "Output too large"}
         try:
             result = json.loads(raw)
@@ -562,6 +579,7 @@ async def run_container_agent(
             record_run(jid, run_id, response_ms, retry_count=0, success=False)
             db.log_container_finish(run_id, time.time(), "error", _redact_secrets(stderr) if stderr else "", stdout[:200] if stdout else "", response_ms)
             _record_docker_failure()
+            await _notify_error("⚠️ 系統暫時發生問題，請稍後再傳訊息，會自動重試。")
             return {"status": "error", "error": f"JSON parse error: {e}", "messages": []}
 
         # 若 container 有產生回覆文字，透過 on_output callback 發送到聊天室
@@ -626,6 +644,7 @@ async def run_container_agent(
         record_run(jid, run_id, _timeout_ms, retry_count=0, success=False)
         db.log_container_finish(run_id, time.time(), "timeout", "Container timed out", "", _timeout_ms)
         _record_docker_failure()
+        await _notify_error(f"⏱️ 這個請求超過 {config.CONTAINER_TIMEOUT}s 未完成，會在下次自動重試。")
         return {"status": "error", "result": None, "error": "Container timed out"}
     except asyncio.CancelledError:
         # task.cancel() 從 shutdown 觸發 — 立即 kill container，不等待 grace period
@@ -649,6 +668,7 @@ async def run_container_agent(
         record_run(jid, run_id, response_ms, retry_count=0, success=False)
         db.log_container_finish(run_id, time.time(), "error", str(e), "", response_ms)
         _record_docker_failure()
+        await _notify_error(f"⚠️ 執行時發生錯誤（{type(e).__name__}），請稍後再試。")
         return {"status": "error", "result": None, "error": str(e)}
     finally:
         async with _active_lock:
