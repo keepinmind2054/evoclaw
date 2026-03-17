@@ -26,6 +26,11 @@ _GROUP_FAIL_COOLDOWN = 60.0  # seconds
 _error_notify_times: dict[str, float] = {}
 _ERROR_NOTIFY_COOLDOWN = 300.0  # 5 minutes
 
+# ── Monitor group (watchdog destination) ──────────────────────────────────────
+# If MONITOR_JID is set in .env, error notifications are also forwarded there.
+# The monitor group is auto-registered at startup so EvoClaw can route to it.
+_MONITOR_JID: str = ""  # populated in main() from env
+
 from . import config, db
 from .allowlist import load_sender_allowlist, is_sender_allowed
 from .dashboard import start_dashboard
@@ -375,10 +380,19 @@ async def _process_group_messages(group: dict, messages: list[dict],
             return
         _error_notify_times[jid] = now
         log.info("Sending error notification to %s: %s", jid, msg)
+        # Send to originating group
         try:
             await route_outbound(jid, msg)
         except Exception as _e:
             log.warning("on_error route_outbound failed for %s: %s", jid, _e)
+        # Forward to monitor group (if configured and different from originating group)
+        if _MONITOR_JID and _MONITOR_JID != jid:
+            try:
+                monitor_msg = f"🔔 [{folder}] {msg}"
+                await route_outbound(_MONITOR_JID, monitor_msg)
+                log.debug("on_error forwarded to monitor group %s", _MONITOR_JID)
+            except Exception as _me:
+                log.warning("on_error monitor forward failed: %s", _me)
 
     # Wrap on_success to reset the failure counter on a successful run
     _run_succeeded = False
@@ -473,6 +487,23 @@ async def _message_loop() -> None:
                 except Exception as e:
                     log.error(f"Failed to reload groups: {e}")
 
+            # ── reset_group flag: clear fail counters for a specific group ───
+            reset_flag = config.DATA_DIR / "reset_group.flag"
+            if reset_flag.exists():
+                try:
+                    import json as _rjson
+                    _rflag_data = _rjson.loads(reset_flag.read_text(encoding="utf-8"))
+                    reset_flag.unlink(missing_ok=True)
+                    _target_jid = _rflag_data.get("jid", "")
+                    if _target_jid:
+                        async with _group_fail_lock:
+                            _group_fail_counts.pop(_target_jid, None)
+                            _group_fail_timestamps.pop(_target_jid, None)
+                        _error_notify_times.pop(_target_jid, None)
+                        log.info("reset_group: cleared fail counters for jid=%s", _target_jid)
+                except Exception as _rfe:
+                    log.warning("reset_group flag processing failed: %s", _rfe)
+
             for group in _registered_groups:
                 jid = group["jid"]
                 cursor = _per_jid_cursors.get(jid, _last_timestamp)
@@ -555,6 +586,37 @@ async def main() -> None:
     # 從 DB 載入已登記的群組（包含 JID、folder、trigger 等設定）
     _registered_groups = db.get_all_registered_groups()
     log.info(f"Loaded {len(_registered_groups)} registered group(s)")
+
+    # ── Monitor group auto-registration ────────────────────────────────────────
+    # If MONITOR_JID is set, ensure it's registered in DB so the router can
+    # deliver messages to it.  Safe to call every startup — INSERT OR REPLACE
+    # is idempotent.
+    global _MONITOR_JID
+    _MONITOR_JID = os.environ.get("MONITOR_JID", "")
+    if not _MONITOR_JID:
+        # Also check .env file
+        try:
+            from .env import read_env_file as _ref
+            _MONITOR_JID = _ref(["MONITOR_JID"]).get("MONITOR_JID", "")
+        except Exception:
+            pass
+    if _MONITOR_JID:
+        _monitor_folder = "telegram_monitor"
+        try:
+            db.set_registered_group(
+                jid=_MONITOR_JID,
+                name="EvoClaw Monitor",
+                folder=_monitor_folder,
+                trigger_pattern=None,
+                container_config=None,
+                requires_trigger=False,
+                is_main=False,
+            )
+            (config.GROUPS_DIR / _monitor_folder).mkdir(parents=True, exist_ok=True)
+            _registered_groups = db.get_all_registered_groups()
+            log.info("Monitor group registered: jid=%s folder=%s", _MONITOR_JID, _monitor_folder)
+        except Exception as _me:
+            log.warning("Failed to register monitor group: %s", _me)
 
     # Validate LLM secrets once at startup instead of per-container-run (Fix #190)
     _validate_secrets(_read_secrets())
