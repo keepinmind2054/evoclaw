@@ -243,6 +243,77 @@ def get_main_group(groups: list[dict]) -> dict | None:
     return mains[0] if mains else None
 
 
+# ── Setup command handler (/monitor) ──────────────────────────────────────────
+
+async def _handle_setup_command(jid: str, command: str) -> str:
+    """Handle one-step setup commands from channels (e.g. Telegram /monitor).
+
+    /monitor — registers the calling group as the monitor group, writes
+    MONITOR_JID to .env, and reloads the registered group list so no restart
+    is needed.
+    """
+    global _MONITOR_JID, _registered_groups
+
+    if command == "monitor":
+        _monitor_folder = "telegram_monitor"
+        try:
+            # Register in DB
+            db.set_registered_group(
+                jid=jid,
+                name="EvoClaw Monitor",
+                folder=_monitor_folder,
+                trigger_pattern=None,
+                container_config=None,
+                requires_trigger=False,
+                is_main=False,
+            )
+            (config.GROUPS_DIR / _monitor_folder).mkdir(parents=True, exist_ok=True)
+            # Persist to .env so it survives restart
+            _write_monitor_jid_to_env(jid)
+            # Update in-memory state immediately (no restart needed)
+            _MONITOR_JID = jid
+            _registered_groups = db.get_all_registered_groups()
+            log.info("Monitor group set via /monitor command: jid=%s", jid)
+            return (
+                f"✅ *監控群組設定完成*\n\n"
+                f"JID: `{jid}`\n"
+                f"EvoClaw 的錯誤通知（container crash、timeout、Docker 異常）將自動發送到這裡。\n\n"
+                f"指令：\n"
+                f"• 傳 `/reset tg:XXXX` 解凍卡住的群組\n"
+                f"• 傳 `/status` 查看最近的執行記錄"
+            )
+        except Exception as exc:
+            log.error("_handle_setup_command monitor failed: %s", exc)
+            return f"❌ 設定失敗：{exc}"
+
+    return f"⚠️ 未知指令：{command}"
+
+
+def _write_monitor_jid_to_env(jid: str) -> None:
+    """Write or update MONITOR_JID in the .env file next to the project root."""
+    env_path = config.BASE_DIR / ".env"
+    if not env_path.exists():
+        log.warning(".env not found at %s — cannot persist MONITOR_JID", env_path)
+        return
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        found = False
+        new_lines = []
+        for line in lines:
+            if line.strip().startswith("MONITOR_JID=") or line.strip().startswith("# MONITOR_JID="):
+                new_lines.append(f"MONITOR_JID={jid}\n")
+                found = True
+            else:
+                new_lines.append(line)
+        if not found:
+            # Append at end
+            new_lines.append(f"\nMONITOR_JID={jid}\n")
+        env_path.write_text("".join(new_lines), encoding="utf-8")
+        log.info("MONITOR_JID=%s written to %s", jid, env_path)
+    except Exception as exc:
+        log.warning("Failed to write MONITOR_JID to .env: %s", exc)
+
+
 # ── Message handling ──────────────────────────────────────────────────────────
 
 async def _on_message(jid: str, sender: str, sender_name: str, content: str,
@@ -720,11 +791,16 @@ async def main() -> None:
             import importlib
             mod = importlib.import_module(f".{module_path}", package=__package__)
             cls = getattr(mod, class_name)
-            ch = cls(
-                on_message=_on_message,
-                on_chat_metadata=lambda **kw: None,
-                registered_groups=_registered_groups,
-            )
+            kwargs: dict = {
+                "on_message": _on_message,
+                "on_chat_metadata": lambda **kw: None,
+                "registered_groups": _registered_groups,
+            }
+            # Inject on_setup_command for channels that support it (e.g. Telegram /monitor)
+            import inspect as _inspect
+            if "on_setup_command" in _inspect.signature(cls.__init__).parameters:
+                kwargs["on_setup_command"] = _handle_setup_command
+            ch = cls(**kwargs)
             await ch.connect()
             register_channel(ch)
             _loaded_channels.append(ch)
