@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.11.34] - 2026-03-17
+### Added
+- Heartbeat: EvoClaw sends `💓 EvoClaw 運行中 | 上線時間 | 群組數 | 成功/失敗數` to monitor group every 30 minutes — if pings stop, host is down (#217)
+- `HEARTBEAT_INTERVAL` env var to configure interval (default 1800s, set 0 to disable)
+
 ## [1.11.33] - 2026-03-17
 ### Added
 - `/monitor` Telegram command: send in any group to instantly register it as the monitor group — no `.env` editing or restart required (#215)
