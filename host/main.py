@@ -39,6 +39,11 @@ _last_heartbeat: float = 0.0
 _HEARTBEAT_INTERVAL: float = 1800.0  # 30 minutes; overridden in main() from env
 _startup_time: float = 0.0
 
+# ── Discord Webhook ────────────────────────────────────────────────────────────
+# Optional second notification channel. POST errors + heartbeat to Discord.
+# Set DISCORD_WEBHOOK_URL in .env to enable. No Discord bot token needed.
+_DISCORD_WEBHOOK_URL: str = ""  # populated in main() from env
+
 from . import config, db
 from .allowlist import load_sender_allowlist, is_sender_allowed
 from .dashboard import start_dashboard
@@ -50,6 +55,26 @@ from .router import register_channel, route_outbound, format_messages, find_chan
 from .evolution import check_message as immune_check, evolution_loop
 from .health_monitor import health_monitor_loop
 from .memory import append_warm_log
+
+
+async def _discord_notify(content: str) -> None:
+    """POST a message to the Discord webhook (if configured).
+
+    Uses aiohttp for non-blocking HTTP. Silently ignores errors so a
+    Discord outage never affects the main EvoClaw flow.
+    Content is truncated to Discord's 2000-char limit.
+    """
+    if not _DISCORD_WEBHOOK_URL:
+        return
+    try:
+        import aiohttp as _aiohttp
+        payload = {"content": content[:2000]}
+        async with _aiohttp.ClientSession() as session:
+            async with session.post(_DISCORD_WEBHOOK_URL, json=payload, timeout=_aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status not in (200, 204):
+                    log.warning("Discord webhook returned HTTP %s", resp.status)
+    except Exception as _de:
+        log.debug("Discord webhook error (non-fatal): %s", _de)
 
 
 async def _store_bot_reply(jid: str, text: str) -> None:
@@ -472,6 +497,8 @@ async def _process_group_messages(group: dict, messages: list[dict],
                 log.debug("on_error forwarded to monitor group %s", _MONITOR_JID)
             except Exception as _me:
                 log.warning("on_error monitor forward failed: %s", _me)
+        # Forward to Discord webhook (if configured)
+        await _discord_notify(f"⚠️ **EvoClaw Error** `[{folder}]`\n{msg}")
 
     # Wrap on_success to reset the failure counter on a successful run
     _run_succeeded = False
@@ -596,7 +623,8 @@ async def _message_loop() -> None:
                     _stats = f" | 過去30分鐘：✅{_recent['successes']} ❌{_recent['errors']}" if _recent and _recent.get("total", 0) > 0 else ""
                     _hb_msg = f"💓 EvoClaw 運行中 | 上線時間：{_uptime_str} | 群組：{_n_groups}{_stats}"
                     await route_outbound(_MONITOR_JID, _hb_msg)
-                    log.debug("Heartbeat sent to monitor group")
+                    await _discord_notify(f"💓 **EvoClaw Heartbeat** | uptime: {_uptime_str} | groups: {_n_groups}{_stats}")
+                    log.debug("Heartbeat sent to monitor group and Discord")
                 except Exception as _hbe:
                     log.warning("Heartbeat send failed: %s", _hbe)
 
@@ -721,6 +749,18 @@ async def main() -> None:
             log.info("Monitor group registered: jid=%s folder=%s", _MONITOR_JID, _monitor_folder)
         except Exception as _me:
             log.warning("Failed to register monitor group: %s", _me)
+
+    # ── Discord webhook ─────────────────────────────────────────────────────────
+    global _DISCORD_WEBHOOK_URL
+    _DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
+    if not _DISCORD_WEBHOOK_URL:
+        try:
+            from .env import read_env_file as _ref2
+            _DISCORD_WEBHOOK_URL = _ref2(["DISCORD_WEBHOOK_URL"]).get("DISCORD_WEBHOOK_URL", "")
+        except Exception:
+            pass
+    if _DISCORD_WEBHOOK_URL:
+        log.info("Discord webhook configured")
 
     # Validate LLM secrets once at startup instead of per-container-run (Fix #190)
     _validate_secrets(_read_secrets())
