@@ -13,13 +13,13 @@ logs/
 groups/*
 !groups/main/
 !groups/global/
-!groups/telegram_monitor/
+!groups/discord_monitor/
 groups/main/*
 groups/global/*
-groups/telegram_monitor/*
+groups/discord_monitor/*
 !groups/main/CLAUDE.md
 !groups/global/CLAUDE.md
-!groups/telegram_monitor/MEMORY.md
+!groups/discord_monitor/MEMORY.md
 
 # Secrets
 *.keys.json
