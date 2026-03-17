@@ -3,7 +3,7 @@ import logging
 import os
 from typing import Callable, Awaitable, Optional
 from telegram import Update, Bot
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 from .. import config
 from ..env import read_env_file
 
@@ -12,10 +12,11 @@ log = logging.getLogger(__name__)
 class TelegramChannel:
     name = "telegram"
 
-    def __init__(self, on_message: Callable, on_chat_metadata: Callable, registered_groups: list):
+    def __init__(self, on_message: Callable, on_chat_metadata: Callable, registered_groups: list, on_setup_command: Optional[Callable] = None):
         self._on_message = on_message
         self._on_chat_metadata = on_chat_metadata
         self._registered_groups = registered_groups
+        self._on_setup_command = on_setup_command
         self._app: Optional[Application] = None
         env = read_env_file(["TELEGRAM_BOT_TOKEN", "TELEGRAM_UPLOAD_TIMEOUT", "TELEGRAM_PROXY"])
         token = env.get("TELEGRAM_BOT_TOKEN", "")
@@ -91,6 +92,33 @@ class TelegramChannel:
                     )
 
                 self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
+
+                # ── /monitor command: one-step monitor group setup ──────────
+                # Sending /monitor in any group adds it as the monitor group
+                # without needing to edit .env manually.
+                _on_setup = self._on_setup_command
+
+                async def handle_monitor_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+                    if not update.effective_chat or not update.effective_user:
+                        return
+                    chat_id = update.effective_chat.id
+                    jid = self._jid(chat_id)
+                    sender_name = update.effective_user.full_name or "unknown"
+                    log.info("/monitor command received from jid=%s by %s", jid, sender_name)
+                    if _on_setup:
+                        try:
+                            result = await _on_setup(jid, "monitor")
+                            reply = result or f"✅ 監控群組已設定完成！\n\nJID: {jid}\n\nEvoClaw 的錯誤通知將自動發送到這個群組。"
+                        except Exception as exc:
+                            reply = f"❌ 設定失敗：{exc}"
+                    else:
+                        reply = "⚠️ 設定功能尚未啟用，請在 .env 中手動設定 MONITOR_JID。"
+                    try:
+                        await self._app.bot.send_message(chat_id=chat_id, text=reply)
+                    except Exception:
+                        pass
+
+                self._app.add_handler(CommandHandler("monitor", handle_monitor_cmd))
 
                 async def handle_non_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     """Notify users who send non-text messages (Issue #70)."""
