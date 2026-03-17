@@ -390,6 +390,19 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
             t = _asyncio.ensure_future(_run_memory_search(query, request_id, _ms_jid, group_folder))
             t.add_done_callback(_ipc_task_done_callback)
 
+    elif msg_type == "start_remote_control":
+        rc_jid = payload.get("jid", "")
+        rc_sender = payload.get("sender", "")
+        if not rc_jid:
+            _rc_groups = db.get_all_registered_groups()
+            _rc_match = next((g for g in _rc_groups if g.get("folder") == group_folder), None)
+            rc_jid = _rc_match["jid"] if _rc_match else ""
+        if rc_jid:
+            t = _asyncio.ensure_future(_run_start_remote_control(rc_jid, rc_sender, route_fn))
+            t.add_done_callback(_ipc_task_done_callback)
+        else:
+            log.warning("start_remote_control IPC: could not resolve JID for group %s", group_folder)
+
     else:
         # Unknown IPC message type — log a warning instead of silently ignoring.
         # This aids debugging when a stale container image sends an unrecognised type.
@@ -595,6 +608,118 @@ async def _run_list_skills(
             )
     except Exception as e:
         log.error(f"list_skills IPC error: {e}")
+
+
+_RC_URL_RE = __import__('re').compile(r"https://claude\.ai/code\S+")
+_rc_active_pid: "int | None" = None
+_rc_active_url: "str | None" = None
+
+
+def _rc_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _rc_state_file() -> Path:
+    return config.DATA_DIR / "remote-control.json"
+
+
+def _rc_save(pid: int, url: str, sender: str, jid: str) -> None:
+    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _rc_state_file().write_text(
+        json.dumps({"pid": pid, "url": url, "sender": sender, "jid": jid,
+                    "startedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}),
+        encoding="utf-8",
+    )
+
+
+def restore_remote_control() -> None:
+    """Re-adopt a still-alive remote-control process from a previous run."""
+    global _rc_active_pid, _rc_active_url
+    try:
+        data = json.loads(_rc_state_file().read_text(encoding="utf-8"))
+        pid, url = data.get("pid"), data.get("url", "")
+        if pid and _rc_is_alive(pid):
+            _rc_active_pid, _rc_active_url = pid, url
+            log.info("Restored remote-control session pid=%s url=%s", pid, url)
+        else:
+            _rc_state_file().unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+async def _run_start_remote_control(jid: str, sender: str, route_fn: Callable) -> None:
+    """Spawn `claude remote-control` in the EvoClaw directory, poll for the URL,
+    and deliver it to the originating group. Mirrors nanoclaw's startRemoteControl()."""
+    global _rc_active_pid, _rc_active_url
+
+    if _rc_active_pid is not None:
+        if _rc_is_alive(_rc_active_pid):
+            log.info("remote_control: reusing existing session pid=%s", _rc_active_pid)
+            await route_fn(jid, f"✅ Remote control 已啟動：{_rc_active_url}")
+            return
+        _rc_active_pid = _rc_active_url = None
+        _rc_state_file().unlink(missing_ok=True)
+
+    cwd = str(config.BASE_DIR)
+    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    stdout_path = config.DATA_DIR / "remote-control.stdout"
+    stderr_path = config.DATA_DIR / "remote-control.stderr"
+    stdout_path.write_text("", encoding="utf-8")
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "claude", "remote-control", "--name", "EvoClaw Remote",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=open(stdout_path, "w"),
+            stderr=open(stderr_path, "w"),
+            cwd=cwd,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        log.error("remote_control: spawn failed: %s", exc)
+        await route_fn(jid, f"❌ Remote control 啟動失敗：{exc}")
+        return
+
+    if proc.stdin:
+        try:
+            proc.stdin.write(b"y\n")
+            await proc.stdin.drain()
+            proc.stdin.close()
+        except Exception:
+            pass
+
+    pid = proc.pid
+    log.info("remote_control: spawned pid=%s cwd=%s", pid, cwd)
+
+    deadline = time.monotonic() + 30.0
+    while True:
+        if not _rc_is_alive(pid):
+            await route_fn(jid, "❌ Remote control 程序意外結束，請再試一次。")
+            return
+        try:
+            content = stdout_path.read_text(encoding="utf-8")
+        except Exception:
+            content = ""
+        m = _RC_URL_RE.search(content)
+        if m:
+            url = m.group(0)
+            _rc_active_pid, _rc_active_url = pid, url
+            _rc_save(pid, url, sender, jid)
+            log.info("remote_control: URL ready: %s", url)
+            await route_fn(jid, f"🖥️ Remote control 已就緒！\n點此連線：{url}")
+            return
+        if time.monotonic() >= deadline:
+            try:
+                os.kill(pid, 15)
+            except Exception:
+                pass
+            await route_fn(jid, "⏱️ Remote control 等待 URL 逾時，請再試一次。")
+            return
+        await asyncio.sleep(0.2)
 
 
 async def _run_memory_search(
@@ -863,6 +988,7 @@ async def start_ipc_watcher(get_groups_fn: Callable, route_fn: Callable, stop_ev
     是為了保持跨平台相容性，並簡化 container volume mount 的互動邏輯。
     """
     global _result_cleanup_cycle
+    restore_remote_control()  # Re-adopt any surviving remote-control session from previous run
     log.info("IPC watcher started")
     while True:
         try:

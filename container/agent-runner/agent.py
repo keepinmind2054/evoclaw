@@ -431,6 +431,29 @@ def tool_send_file(chat_jid: str = "", file_path: str = "", caption: str = "") -
     return f"✅ File queued: {os.path.basename(file_path)}"
 
 
+def tool_start_remote_control(chat_jid: str = "", sender: str = "") -> str:
+    """Request the host to start a Claude Code remote-control session.
+    The host will spawn `claude remote-control` in the EvoClaw directory and
+    send the resulting https://claude.ai/code... URL back to this chat."""
+    global _input_chat_jid
+    effective_jid = chat_jid or _input_chat_jid or ""
+    if not effective_jid:
+        return "Error: chat_jid not provided and not available from input"
+    try:
+        Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
+        uid = str(uuid.uuid4())[:8]
+        fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-remote-control-{uid}.json"
+        fname.write_text(json.dumps({
+            "type": "start_remote_control",
+            "jid": effective_jid,
+            "sender": sender,
+        }), encoding="utf-8")
+        _log("📨 IPC", f"type=start_remote_control jid={effective_jid} → {fname.name}")
+        return "Remote control session requested — URL will be sent to this chat shortly (up to 30s)."
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
 def tool_glob(pattern: str, path: str = WORKSPACE) -> str:
     """
     在指定目錄下尋找符合 glob 模式的檔案（支援 ** 遞迴搜尋）。
@@ -813,6 +836,20 @@ TOOL_DECLARATIONS = [
             ),
         )]
     ),
+    types.Tool(
+        function_declarations=[types.FunctionDeclaration(
+            name="mcp__evoclaw__start_remote_control",
+            description="Start a Claude Code remote-control session on the host. The host spawns `claude remote-control` in the EvoClaw directory and sends the resulting URL back to this chat. Use when the user wants to update code, restart EvoClaw, or open a live coding session.",
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "chat_jid": types.Schema(type=types.Type.STRING, description="The chat JID to send the URL to (auto-detected if omitted)"),
+                    "sender": types.Schema(type=types.Type.STRING, description="Optional sender name for logging"),
+                },
+                required=[],
+            ),
+        )]
+    ),
 ]
 
 
@@ -836,6 +873,7 @@ OPENAI_TOOL_DECLARATIONS = [
     {"type": "function", "function": {"name": "mcp__evoclaw__run_agent", "description": "Spawn a subagent in an isolated Docker container to handle a subtask. Blocks until complete (up to 300s) and returns its output.", "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "The task for the subagent"}, "context_mode": {"type": "string", "description": "isolated or group"}}, "required": ["prompt"]}}},
     {"type": "function", "function": {"name": "mcp__evoclaw__send_file", "description": "Send a file to the user. Write the file to /workspace/group/output/ first, then call this tool.", "parameters": {"type": "object", "properties": {"chat_jid": {"type": "string", "description": "The chat JID to send the file to"}, "file_path": {"type": "string", "description": "Absolute container path to the file"}, "caption": {"type": "string", "description": "Optional caption"}}, "required": ["file_path"]}}},
     {"type": "function", "function": {"name": "mcp__evoclaw__reset_group", "description": "Clear the failure counter for a group, unfreezing it if it was locked in cooldown. Use when a group is stuck and not responding.", "parameters": {"type": "object", "properties": {"jid": {"type": "string", "description": "The JID of the group to reset, e.g. tg:8259652816"}}, "required": ["jid"]}}},
+    {"type": "function", "function": {"name": "mcp__evoclaw__start_remote_control", "description": "Start a Claude Code remote-control session. The host spawns `claude remote-control` and sends the URL back to this chat. Use when the user wants to update code or restart EvoClaw.", "parameters": {"type": "object", "properties": {"chat_jid": {"type": "string"}, "sender": {"type": "string"}}, "required": []}}},
 ]
 
 
@@ -866,6 +904,7 @@ CLAUDE_TOOL_DECLARATIONS = [
     {"name": "mcp__evoclaw__run_agent", "description": "Spawn a subagent in an isolated Docker container to handle a subtask. Blocks until complete (up to 300s) and returns its output.", "input_schema": {"type": "object", "properties": {"prompt": {"type": "string", "description": "The task for the subagent"}, "context_mode": {"type": "string", "description": "isolated or group"}}, "required": ["prompt"]}},
     {"name": "mcp__evoclaw__send_file", "description": "Send a file to the user. Write the file to /workspace/group/output/ first, then call this tool.", "input_schema": {"type": "object", "properties": {"chat_jid": {"type": "string", "description": "The chat JID to send the file to"}, "file_path": {"type": "string", "description": "Absolute container path to the file"}, "caption": {"type": "string", "description": "Optional caption"}}, "required": ["file_path"]}},
     {"name": "mcp__evoclaw__reset_group", "description": "Clear the failure counter for a group, unfreezing it if it was locked in cooldown. Use when a group is stuck and not responding.", "input_schema": {"type": "object", "properties": {"jid": {"type": "string", "description": "The JID of the group to reset, e.g. tg:8259652816"}}, "required": ["jid"]}},
+    {"name": "mcp__evoclaw__start_remote_control", "description": "Start a Claude Code remote-control session. The host spawns `claude remote-control` and sends the URL back to this chat. Use when the user wants to update code or restart EvoClaw.", "input_schema": {"type": "object", "properties": {"chat_jid": {"type": "string"}, "sender": {"type": "string"}}, "required": []}},
 ]
 
 
@@ -993,6 +1032,8 @@ def _execute_tool_inner(name: str, args: dict, chat_jid: str) -> str:
             return f"reset_group IPC sent for {target_jid} — fail counters will be cleared on next host poll cycle"
         except Exception as exc:
             return f"reset_group IPC write failed: {exc}"
+    elif name == "mcp__evoclaw__start_remote_control":
+        return tool_start_remote_control(args.get("chat_jid", chat_jid), args.get("sender", ""))
     # ── Dynamic tools (installed via Skills container_tools:) ─────────────────
     if name in _dynamic_tools:
         try:
