@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.11.30] - 2026-03-17
+### Fixed
+- `run_agent_openai()` crashed with `NameError: name 'group_folder' is not defined` on every NIM / OpenAI-compatible session — MEMORY.md path was computed from an unpassed local variable (#209)
+
 ## [1.11.29] - 2026-03-17
 ### Added
 - `TELEGRAM_PROXY` env var: route Telegram API calls through HTTP or SOCKS5 proxy — resolves TimedOut errors on networks where `api.telegram.org` is blocked (#207)
