@@ -1,5 +1,40 @@
 # Changelog
 
+## [Unreleased] — UnifiedClaw Roadmap
+
+### Architecture (Planned)
+- [ ] Universal Memory Bus (sqlite-vec + shared memory scope)
+- [ ] Agent Identity Layer (persistent profiles across restarts)
+- [ ] WebSocket IPC replacing file-based polling
+- [ ] Cross-agent genome collaboration (Phase 4)
+- [ ] MinionDesk enterprise tools port (Phase 3)
+- [ ] Matrix/Signal channel support (Phase 3)
+
+### Phase 1 In Progress
+- [ ] sqlite-vec semantic search integration
+- [ ] MemoryBus abstract interface class
+- [ ] Agent fitness feedback via WebSocket
+
+---
+
+## [1.11.42] — 2026-03-17
+
+### Added
+- SECURITY.md — vulnerability reporting policy
+- ARCHITECTURE.md — UnifiedClaw architecture design and roadmap
+- Updated .gitignore to exclude __pycache__ and .pyc files
+
+### Fixed
+- Path traversal vulnerability in dev_engine _deploy_files()
+- Memory leak in long-running container sessions
+- Evolution daemon timestamp handling error
+
+### Security
+- 22 architecture and security issues tracked (see GitHub Issues)
+- 3 CRITICAL issues identified for immediate remediation
+
+---
+
 ## [1.11.34] - 2026-03-17
 ### Added
 - Heartbeat: EvoClaw sends `💓 EvoClaw 運行中 | 上線時間 | 群組數 | 成功/失敗數` to monitor group every 30 minutes — if pings stop, host is down (#217)
