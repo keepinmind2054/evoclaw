@@ -90,7 +90,13 @@ WEBPORTAL_HOST = os.environ.get("WEBPORTAL_HOST", "127.0.0.1")
 HEALTH_PORT = _env_int("HEALTH_PORT", 8767)
 
 # Channels to load (comma-separated, default: telegram)
-ENABLED_CHANNELS = [c.strip() for c in os.environ.get("ENABLED_CHANNELS", "telegram").split(",")]
+# env var takes priority; fall back to .env file so operators can set it there
+_env_file_channels = read_env_file(["ENABLED_CHANNELS"]).get("ENABLED_CHANNELS", "")
+ENABLED_CHANNELS = [
+    c.strip()
+    for c in (os.environ.get("ENABLED_CHANNELS") or _env_file_channels or "telegram").split(",")
+    if c.strip()
+]
 
 # Keys that can be modified via the dashboard /api/env endpoint
 EDITABLE_ENV_KEYS: frozenset = frozenset({
