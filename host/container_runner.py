@@ -296,6 +296,18 @@ async def update_container_activity(container_name: str, activity: str) -> None:
             _active_containers[container_name]["current_activity"] = activity
 
 
+
+def _get_agent_id(group_name: str, project: str = "", channel: str = "") -> str:
+    """Phase 2 (UnifiedClaw): Generate stable agent_id for a group.
+    
+    Produces a deterministic 16-char hex ID from group name + project + channel.
+    This is the same algorithm used by AgentIdentityStore.get_or_create().
+    Passed as AGENT_ID env var to containers so FitnessReporter can self-identify.
+    """
+    import hashlib
+    raw = f"{group_name.lower()}:{project.lower()}:{channel.lower()}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
 async def run_container_agent(
     group: dict,
     prompt: str,
