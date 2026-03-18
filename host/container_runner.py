@@ -397,6 +397,12 @@ async def run_container_agent(
     # 取得此群組的熱記憶（per-group MEMORY.md，8KB 上限），注入到 container 的系統上下文
     hot_memory = get_hot_memory(jid)
 
+    # Phase 2 (UnifiedClaw): inject stable agent_id so FitnessReporter can self-identify
+    _agent_id = _get_agent_id(
+        group_name=folder,
+        project=group.get("project", ""),
+        channel=group.get("channel", ""),
+    )
     input_data = {
         "prompt": prompt,
         "sessionId": session_id,
@@ -411,6 +417,7 @@ async def run_container_agent(
         "scheduledTasks": scheduled_tasks,  # 此群組的排程任務清單，讓 agent 可以列出和取消
         "runId": run_id,  # 關聯 ID：供 container 在 stderr 中記錄，與 host 日誌對齊
         "hotMemory": hot_memory,  # 三層記憶：熱記憶（8KB MEMORY.md，每次對話自動注入）
+        "agentId": _agent_id,  # Phase 2 (UnifiedClaw): stable agent_id for FitnessReporter
     }
     input_json = json.dumps(input_data, ensure_ascii=True)
     # 記錄 container 啟動時間，用於計算回應時間（適應度追蹤）
