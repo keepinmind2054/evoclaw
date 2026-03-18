@@ -1,20 +1,11 @@
 """
 RBAC — Role-Based Access Control — Phase 3
 
-Roles:
-  admin     — full access, can grant roles
-  operator  — can run agents, manage memory
-  agent     — can read/write own memory, submit tasks
-  viewer    — read-only access
-
-Permissions:
-  memory:read, memory:write, memory:delete
-  agent:spawn, agent:kill, agent:list
-  task:submit, task:cancel
-  registry:read, registry:write
-  rbac:grant, rbac:revoke
+Roles: admin, operator, agent, viewer
+Permissions: memory:*, agent:*, task:*, registry:*, rbac:*
 """
 import sqlite3
+import time
 import logging
 from dataclasses import dataclass
 from enum import Enum
@@ -47,7 +38,7 @@ class Role(str, Enum):
 
 
 ROLE_PERMISSIONS: dict = {
-    Role.ADMIN: set(Permission),  # all permissions
+    Role.ADMIN:    set(Permission),
     Role.OPERATOR: {
         Permission.MEMORY_READ, Permission.MEMORY_WRITE,
         Permission.AGENT_SPAWN, Permission.AGENT_KILL, Permission.AGENT_LIST,
@@ -60,14 +51,16 @@ ROLE_PERMISSIONS: dict = {
         Permission.REGISTRY_READ,
     },
     Role.VIEWER: {
-        Permission.MEMORY_READ, Permission.AGENT_LIST, Permission.REGISTRY_READ,
+        Permission.MEMORY_READ,
+        Permission.AGENT_LIST,
+        Permission.REGISTRY_READ,
     },
 }
 
 
 @dataclass
 class RBACEntry:
-    subject_id: str   # agent_id or bot_id
+    subject_id: str
     role: Role
     granted_by: Optional[str] = None
     granted_at: float = 0.0
@@ -82,6 +75,7 @@ class RBACStore:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._init_db()
+        logger.info(f"RBACStore initialized at {db_path}")
 
     def _init_db(self):
         self._conn.execute("""
@@ -96,7 +90,6 @@ class RBACStore:
         self._conn.commit()
 
     def grant(self, subject_id: str, role: Role, granted_by: Optional[str] = None):
-        import time
         self._conn.execute("""
             INSERT OR REPLACE INTO rbac_grants (subject_id, role, granted_by, granted_at)
             VALUES (?,?,?,?)
@@ -110,6 +103,7 @@ class RBACStore:
             (subject_id, role.value)
         )
         self._conn.commit()
+        logger.info(f"RBAC revoke: {subject_id} - {role.value}")
 
     def get_roles(self, subject_id: str) -> Set[Role]:
         rows = self._conn.execute(
@@ -132,6 +126,9 @@ class RBACStore:
             "SELECT subject_id, role, granted_by, granted_at FROM rbac_grants"
         ).fetchall()
         return [RBACEntry(r[0], Role(r[1]), r[2], r[3]) for r in rows]
+
+    def close(self):
+        self._conn.close()
 
 
 def require_permission(rbac: RBACStore, subject_id: str, permission: Permission) -> bool:
