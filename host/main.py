@@ -66,6 +66,17 @@ except ImportError as _e:
     _PHASE1_AVAILABLE = False
     print(f"[Phase1] Components not available: {_e}")
 
+# Phase 2 (UnifiedClaw): SDK API + Memory Summarizer
+try:
+    from sdk_api import SdkApi as _SdkApi
+    from memory.summarizer import MemorySummarizer as _MemorySummarizer
+    _PHASE2_AVAILABLE = True
+except ImportError as _e2:
+    _PHASE2_AVAILABLE = False
+    _SdkApi = None
+    _MemorySummarizer = None
+    print(f"[Phase2] Components not available: {_e2}")
+
 
 
 async def _discord_notify(content: str) -> None:
@@ -745,6 +756,19 @@ async def main() -> None:
             print(f"[Phase1] MemoryBus | WSBridge (port {_ws_bridge.port}) | AgentIdentityStore initialized")
         except Exception as _e:
             print(f"[Phase1] Initialization failed (non-fatal): {_e}")
+
+    # Phase 2 (UnifiedClaw): SDK API + Memory Summarizer
+    _sdk_api = None
+    _summarizer = None
+    if _PHASE2_AVAILABLE and _memory_bus is not None and _identity_store is not None:
+        try:
+            _sdk_api = _SdkApi(_memory_bus, _identity_store)
+            _summarizer = _MemorySummarizer()
+            asyncio.create_task(_sdk_api.start())
+            print(f"[Phase2] SdkApi OK (port {_sdk_api.port}) | MemorySummarizer OK")
+        except Exception as _e3:
+            print(f"[Phase2] Initialization failed (non-fatal): {_e3}")
+
 
     global _registered_groups, _sender_allowlist, _stop_event, _group_fail_lock, _dedup_lock
     global _startup_time, _HEARTBEAT_INTERVAL, _last_heartbeat
