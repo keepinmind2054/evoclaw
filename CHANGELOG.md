@@ -1,5 +1,78 @@
 # Changelog
 
+## [1.12.0-phase2] -- 2026-03-18
+
+### Added (Phase 2: Universal Memory Layer)
+- `host/memory/summarizer.py` -- MemorySummarizer: LLM-powered conversation->MEMORY.md compression
+  - Supports Gemini / Claude / OpenAI-compatible APIs with graceful fallback
+  - Auto-compress MEMORY.md when approaching 8KB limit
+- `host/sdk_api.py` -- External WebSocket SDK API (port 8767)
+  - Query agent memories from external tools/CLIs
+  - Submit tasks to groups via WebSocket
+  - Real-time event broadcasting to monitoring clients
+  - Optional bearer token authentication
+- `host/container_runner.py` -- Pass stable AGENT_ID env var to Docker containers
+  - Enables persistent agent identity across restarts
+- `host/main.py` -- Phase 2 startup integration
+  - SdkApi started as background asyncio task
+  - MemorySummarizer initialized
+
+### Architecture After Phase 2
+```
+Gateway (main.py)
++-- MemoryBus         (Phase 1) OK
++-- WSBridge          (Phase 1) OK  port 8768
++-- AgentIdentityStore (Phase 1) OK
++-- SdkApi            (Phase 2) OK  port 8767  <- NEW
++-- MemorySummarizer  (Phase 2) OK              <- NEW
+        |
+        v WebSocket
+Agent Runtime
++-- FitnessReporter   (Phase 1) OK
+    AGENT_ID env var  (Phase 2) OK              <- NEW
+```
+
+### Issues Addressed
+- #255 (MemorySummarizer), #256 (SdkApi), #257 (AGENT_ID in containers),
+- #258 (cross-project knowledge), #259 (auto identity summary update)
+
+---
+
+## [Unreleased] — UnifiedClaw Roadmap
+
+### Architecture (Planned)
+- [ ] Universal Memory Bus (sqlite-vec + shared memory scope)
+- [ ] Agent Identity Layer (persistent profiles across restarts)
+- [ ] WebSocket IPC replacing file-based polling
+- [ ] Cross-agent genome collaboration (Phase 4)
+- [ ] MinionDesk enterprise tools port (Phase 3)
+- [ ] Matrix/Signal channel support (Phase 3)
+
+### Phase 1 In Progress
+- [ ] sqlite-vec semantic search integration
+- [ ] MemoryBus abstract interface class
+- [ ] Agent fitness feedback via WebSocket
+
+---
+
+## [1.11.42] — 2026-03-17
+
+### Added
+- SECURITY.md — vulnerability reporting policy
+- ARCHITECTURE.md — UnifiedClaw architecture design and roadmap
+- Updated .gitignore to exclude __pycache__ and .pyc files
+
+### Fixed
+- Path traversal vulnerability in dev_engine _deploy_files()
+- Memory leak in long-running container sessions
+- Evolution daemon timestamp handling error
+
+### Security
+- 22 architecture and security issues tracked (see GitHub Issues)
+- 3 CRITICAL issues identified for immediate remediation
+
+---
+
 ## [1.11.34] - 2026-03-17
 ### Added
 - Heartbeat: EvoClaw sends `💓 EvoClaw 運行中 | 上線時間 | 群組數 | 成功/失敗數` to monitor group every 30 minutes — if pings stop, host is down (#217)

@@ -23,6 +23,14 @@ import threading
 from pathlib import Path
 
 import logging as _logging
+
+# Phase 1 (UnifiedClaw): Fitness feedback to Gateway
+try:
+    from fitness_reporter import FitnessReporter as _FitnessReporter
+    _REPORTER_AVAILABLE = True
+except ImportError:
+    _REPORTER_AVAILABLE = False
+
 _logging.getLogger("httpx").setLevel(_logging.WARNING)
 _logging.getLogger("httpcore").setLevel(_logging.WARNING)
 _logging.getLogger("google").setLevel(_logging.WARNING)
@@ -1507,6 +1515,16 @@ def main():
     # 必須在 API key 設定後、LLM loop 前執行，讓工具有機會使用環境變數
     _load_dynamic_tools()
 
+    # ── Phase 1 (UnifiedClaw): Initialize FitnessReporter ─────────────────────
+    # agentId is injected by container_runner._get_agent_id() via input_data
+    _phase1_agent_id = inp.get("agentId", "") or os.environ.get("AGENT_ID", "")
+    if _phase1_agent_id and _REPORTER_AVAILABLE:
+        try:
+            import asyncio as _asyncio_phase1
+            _asyncio_phase1.run(_init_fitness_reporter(_phase1_agent_id))
+        except Exception as _phase1_err:
+            print(f"[Phase1] FitnessReporter init error: {_phase1_err}", file=sys.stderr)
+
     # ── Backend selection: NIM / OpenAI-compatible takes priority ────────────────
     # Build key pools from potentially comma-separated values to support rotation
     nim_pool = _KeyPool(os.environ.get("NIM_API_KEY", ""))
@@ -1741,6 +1759,29 @@ def main():
         traceback.print_exc(file=sys.stderr)
         emit({"status": "error", "result": None, "error": str(e)})
 
+
+
+# Phase 1 (UnifiedClaw): Fitness reporter instance (module-level)
+_phase1_reporter = None
+
+async def _init_fitness_reporter(agent_id: str) -> object:
+    """Initialize and connect FitnessReporter (Phase 1). No-op if unavailable."""
+    global _phase1_reporter
+    if not _REPORTER_AVAILABLE:
+        return None
+    reporter = _FitnessReporter(agent_id=agent_id)
+    connected = await reporter.connect()
+    if connected:
+        print(f"[Phase1] FitnessReporter connected for agent: {agent_id}")
+    else:
+        print(f"[Phase1] FitnessReporter: WSBridge unavailable, using file IPC")
+    _phase1_reporter = reporter
+    return reporter
+
+async def _report_fitness(score: float, metadata: dict = None):
+    """Report fitness score to Gateway evolution engine (Phase 1)."""
+    if _phase1_reporter and getattr(_phase1_reporter, 'connected', False):
+        await _phase1_reporter.report_fitness(score=score, metadata=metadata or {})
 
 if __name__ == "__main__":
     main()

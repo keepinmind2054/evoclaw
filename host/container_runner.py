@@ -296,6 +296,18 @@ async def update_container_activity(container_name: str, activity: str) -> None:
             _active_containers[container_name]["current_activity"] = activity
 
 
+
+def _get_agent_id(group_name: str, project: str = "", channel: str = "") -> str:
+    """Phase 2 (UnifiedClaw): Generate stable agent_id for a group.
+    
+    Produces a deterministic 16-char hex ID from group name + project + channel.
+    This is the same algorithm used by AgentIdentityStore.get_or_create().
+    Passed as AGENT_ID env var to containers so FitnessReporter can self-identify.
+    """
+    import hashlib
+    raw = f"{group_name.lower()}:{project.lower()}:{channel.lower()}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
 async def run_container_agent(
     group: dict,
     prompt: str,
@@ -385,6 +397,12 @@ async def run_container_agent(
     # 取得此群組的熱記憶（per-group MEMORY.md，8KB 上限），注入到 container 的系統上下文
     hot_memory = get_hot_memory(jid)
 
+    # Phase 2 (UnifiedClaw): inject stable agent_id so FitnessReporter can self-identify
+    _agent_id = _get_agent_id(
+        group_name=folder,
+        project=group.get("project", ""),
+        channel=group.get("channel", ""),
+    )
     input_data = {
         "prompt": prompt,
         "sessionId": session_id,
@@ -399,6 +417,7 @@ async def run_container_agent(
         "scheduledTasks": scheduled_tasks,  # 此群組的排程任務清單，讓 agent 可以列出和取消
         "runId": run_id,  # 關聯 ID：供 container 在 stderr 中記錄，與 host 日誌對齊
         "hotMemory": hot_memory,  # 三層記憶：熱記憶（8KB MEMORY.md，每次對話自動注入）
+        "agentId": _agent_id,  # Phase 2 (UnifiedClaw): stable agent_id for FitnessReporter
     }
     input_json = json.dumps(input_data, ensure_ascii=True)
     # 記錄 container 啟動時間，用於計算回應時間（適應度追蹤）

@@ -56,6 +56,28 @@ from .evolution import check_message as immune_check, evolution_loop
 from .health_monitor import health_monitor_loop
 from .memory import append_warm_log
 
+# Phase 1 (UnifiedClaw): Universal Memory Bus + WSBridge + Agent Identity
+try:
+    from .memory.memory_bus import MemoryBus as _MemoryBus
+    from .identity.agent_identity import AgentIdentityStore as _AgentIdentityStore
+    from .ws_bridge import WSBridge as _WSBridge
+    _PHASE1_AVAILABLE = True
+except ImportError as _e:
+    _PHASE1_AVAILABLE = False
+    print(f"[Phase1] Components not available: {_e}")
+
+# Phase 2 (UnifiedClaw): SDK API + Memory Summarizer
+try:
+    from .sdk_api import SdkApi as _SdkApi
+    from .memory.summarizer import MemorySummarizer as _MemorySummarizer
+    _PHASE2_AVAILABLE = True
+except ImportError as _e2:
+    _PHASE2_AVAILABLE = False
+    _SdkApi = None
+    _MemorySummarizer = None
+    print(f"[Phase2] Components not available: {_e2}")
+
+
 
 async def _discord_notify(content: str) -> None:
     """POST a message to the Discord webhook (if configured).
@@ -709,6 +731,43 @@ async def main() -> None:
     6. 設定 SIGTERM/SIGINT 優雅關機處理器
     7. 同時啟動訊息輪詢、IPC watcher 及排程器三個背景迴圈
     """
+
+    # Phase 1 (UnifiedClaw): Initialize Universal Memory Bus, WSBridge, AgentIdentityStore
+    _memory_bus = None
+    _ws_bridge = None
+    _identity_store = None
+    if _PHASE1_AVAILABLE:
+        try:
+            import sqlite3 as _sqlite3
+            from pathlib import Path as _Path
+            _db_conn = _sqlite3.connect("evoclaw.db", check_same_thread=False)
+            _memory_bus = _MemoryBus(_db_conn, _Path("groups"))
+            _identity_store = _AgentIdentityStore(_db_conn)
+            _ws_bridge = _WSBridge(_memory_bus)
+
+            @_ws_bridge.on_fitness_update
+            async def _on_fitness(agent_id, score, metadata):
+                # Forward fitness to evolution engine
+                pass  # TODO: wire to evolution/fitness.py
+
+            asyncio.create_task(_ws_bridge.start())
+            print(f"[Phase1] MemoryBus | WSBridge (port {_ws_bridge.port}) | AgentIdentityStore initialized")
+        except Exception as _e:
+            print(f"[Phase1] Initialization failed (non-fatal): {_e}")
+
+    # Phase 2 (UnifiedClaw): SDK API + Memory Summarizer
+    _sdk_api = None
+    _summarizer = None
+    if _PHASE2_AVAILABLE and _memory_bus is not None and _identity_store is not None:
+        try:
+            _sdk_api = _SdkApi(_memory_bus, _identity_store)
+            _summarizer = _MemorySummarizer()
+            asyncio.create_task(_sdk_api.start())
+            print(f"[Phase2] SdkApi OK (port {_sdk_api.port}) | MemorySummarizer OK")
+        except Exception as _e3:
+            print(f"[Phase2] Initialization failed (non-fatal): {_e3}")
+
+
     global _registered_groups, _sender_allowlist, _stop_event, _group_fail_lock, _dedup_lock
     global _startup_time, _HEARTBEAT_INTERVAL, _last_heartbeat
     _stop_event = asyncio.Event()

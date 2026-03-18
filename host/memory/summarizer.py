@@ -1,0 +1,282 @@
+"""
+Memory Summarizer — Phase 2 of UnifiedClaw architecture
+
+Automatically compresses conversation history into MEMORY.md hot memory.
+
+Two main operations:
+1. summarize_session(): After a conversation ends, summarize key learnings
+2. compress_memory(): When MEMORY.md approaches size limit, compress it
+
+Usage:
+    summarizer = MemorySummarizer()
+    patch = await summarizer.summarize_session(
+        agent_id="mybot",
+        messages=[{"role": "user", "content": "..."}, ...],
+    )
+    await memory_bus.patch_hot_memory(agent_id, patch)
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import time
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+COMPRESS_THRESHOLD = 6144   # Start compressing at 6KB
+MAX_MEMORY_BYTES = 8192     # Hard limit 8KB
+MAX_CONV_CHARS = 4000       # Truncate long conversations before LLM
+
+_SUMMARIZE_PROMPT = (
+    "You are a memory distillation system. Extract key facts from a "
+    "conversation as concise bullet points for a persistent memory file.\n\n"
+    "Rules:\n"
+    "- Extract only genuinely useful, long-term facts\n"
+    "- Be extremely concise (each bullet <= 15 words)\n"
+    "- Use format: bullet [fact] one per line\n"
+    "- Maximum 5 bullet points per session\n"
+    "- If nothing important: output: bullet [no significant new information]\n\n"
+    "Conversation:\n{conversation}\n\n"
+    "Existing memory (do not repeat):\n{existing_memory}\n\n"
+    "Output ONLY bullet points:"
+)
+
+_COMPRESS_PROMPT = (
+    "Compress this memory file to under {max_words} words while preserving all key facts.\n\n"
+    "Rules:\n"
+    "- Merge duplicate/redundant facts\n"
+    "- Remove outdated information\n"
+    "- Keep bullet point format\n\n"
+    "Memory:\n{memory}\n\n"
+    "Output compressed memory ONLY:"
+)
+
+
+class MemorySummarizer:
+    """
+    LLM-powered memory summarization and compression.
+
+    Supports Gemini (default), Claude, and OpenAI-compatible APIs.
+    Falls back to a simple stub if no LLM is available.
+    """
+
+    def __init__(
+        self,
+        google_api_key: Optional[str] = None,
+        anthropic_api_key: Optional[str] = None,
+        openai_api_key: Optional[str] = None,
+        openai_base_url: Optional[str] = None,
+    ):
+        self._google_key = (
+            google_api_key
+            or os.environ.get("GOOGLE_API_KEY", "").split(",")[0].strip()
+        )
+        self._anthropic_key = anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        self._openai_key = openai_api_key or os.environ.get("OPENAI_API_KEY", "")
+        self._openai_base = openai_base_url or os.environ.get("OPENAI_BASE_URL", "")
+
+    async def summarize_session(
+        self,
+        agent_id: str,
+        messages: list,
+        existing_memory: str = "",
+        max_messages: int = 20,
+    ) -> str:
+        """
+        Summarize a conversation session into bullet points for MEMORY.md.
+
+        Returns a patch string to append to MEMORY.md.
+        """
+        if not messages:
+            return ""
+
+        recent = messages[-max_messages:]
+        lines = []
+        for m in recent:
+            role = str(m.get("role", "?")).upper()
+            body = str(m.get("content", ""))[:200]
+            lines.append(role + ": " + body)
+        conversation_text = "\n".join(lines)[:MAX_CONV_CHARS]
+
+        prompt = _SUMMARIZE_PROMPT.format(
+            conversation=conversation_text,
+            existing_memory=existing_memory[:500] if existing_memory else "(empty)",
+        )
+
+        result = await self._call_llm(prompt, max_tokens=200)
+        if not result:
+            return self._fallback_summarize(agent_id, messages)
+
+        date_str = time.strftime("%Y-%m-%d")
+        patch = "\n## Session " + date_str + " [" + agent_id + "]\n" + result.strip() + "\n"
+        logger.info("MemorySummarizer: session summarized for %s (%d chars)", agent_id, len(patch))
+        return patch
+
+    async def compress_memory(
+        self,
+        agent_id: str,
+        memory_content: str,
+        target_bytes: int = 4096,
+    ) -> str:
+        """
+        Compress MEMORY.md when it approaches the size limit.
+        """
+        current_size = len(memory_content.encode("utf-8"))
+        if current_size < COMPRESS_THRESHOLD:
+            return memory_content
+
+        max_words = target_bytes // 6
+        prompt = _COMPRESS_PROMPT.format(
+            memory=memory_content[:3000],
+            max_words=max_words,
+        )
+
+        result = await self._call_llm(prompt, max_tokens=600)
+        if not result:
+            logger.warning("MemorySummarizer: LLM unavailable for %s, truncating", agent_id)
+            return self._truncate_memory(memory_content, target_bytes)
+
+        compressed = result.strip()
+        new_size = len(compressed.encode("utf-8"))
+        reduction = 100 * (1 - new_size / max(current_size, 1))
+        logger.info(
+            "MemorySummarizer: compressed %s memory %d->%d bytes (%.0f%% reduction)",
+            agent_id, current_size, new_size, reduction,
+        )
+        return compressed
+
+    async def should_compress(self, memory_content: str) -> bool:
+        """Check if memory content needs compression."""
+        return len(memory_content.encode("utf-8")) >= COMPRESS_THRESHOLD
+
+    # ── LLM backends ─────────────────────────────────────────────────────
+
+    async def _call_llm(self, prompt: str, max_tokens: int = 300) -> Optional[str]:
+        """Try available LLM backends in order. Returns None if all fail."""
+        if self._google_key:
+            result = await self._call_gemini(prompt, max_tokens)
+            if result:
+                return result
+        if self._anthropic_key:
+            result = await self._call_claude(prompt, max_tokens)
+            if result:
+                return result
+        if self._openai_key or self._openai_base:
+            result = await self._call_openai(prompt, max_tokens)
+            if result:
+                return result
+        logger.warning("MemorySummarizer: no LLM available")
+        return None
+
+    async def _call_gemini(self, prompt: str, max_tokens: int) -> Optional[str]:
+        try:
+            import urllib.request
+            import json as _json
+            import asyncio
+            url = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                "gemini-2.0-flash:generateContent?key=" + self._google_key
+            )
+            payload = _json.dumps({
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.1},
+            }).encode()
+            req = urllib.request.Request(
+                url, data=payload,
+                headers={"Content-Type": "application/json"}, method="POST"
+            )
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None, lambda: urllib.request.urlopen(req, timeout=10)
+            )
+            data = _json.loads(response.read())
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+        except Exception as exc:
+            logger.debug("Gemini summarization failed: %s", exc)
+            return None
+
+    async def _call_claude(self, prompt: str, max_tokens: int) -> Optional[str]:
+        try:
+            import urllib.request
+            import json as _json
+            import asyncio
+            payload = _json.dumps({
+                "model": "claude-3-haiku-20240307",
+                "max_tokens": max_tokens,
+                "messages": [{"role": "user", "content": prompt}],
+            }).encode()
+            req = urllib.request.Request(
+                "https://api.anthropic.com/v1/messages",
+                data=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": self._anthropic_key,
+                    "anthropic-version": "2023-06-01",
+                },
+                method="POST",
+            )
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None, lambda: urllib.request.urlopen(req, timeout=10)
+            )
+            data = _json.loads(response.read())
+            return data["content"][0]["text"]
+        except Exception as exc:
+            logger.debug("Claude summarization failed: %s", exc)
+            return None
+
+    async def _call_openai(self, prompt: str, max_tokens: int) -> Optional[str]:
+        try:
+            import urllib.request
+            import json as _json
+            import asyncio
+            base = self._openai_base or "https://api.openai.com"
+            payload = _json.dumps({
+                "model": "gpt-4o-mini",
+                "max_tokens": max_tokens,
+                "temperature": 0.1,
+                "messages": [{"role": "user", "content": prompt}],
+            }).encode()
+            req = urllib.request.Request(
+                base + "/v1/chat/completions",
+                data=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer " + self._openai_key,
+                },
+                method="POST",
+            )
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None, lambda: urllib.request.urlopen(req, timeout=10)
+            )
+            data = _json.loads(response.read())
+            return data["choices"][0]["message"]["content"]
+        except Exception as exc:
+            logger.debug("OpenAI summarization failed: %s", exc)
+            return None
+
+    # ── Fallbacks ─────────────────────────────────────────────────────────
+
+    def _fallback_summarize(self, agent_id: str, messages: list) -> str:
+        """Stub entry when LLM is unavailable."""
+        date_str = time.strftime("%Y-%m-%d %H:%M")
+        n_msgs = len(messages)
+        return (
+            "\n## Session " + date_str + "\n"
+            "- [" + str(n_msgs) + " messages — LLM summarization unavailable]\n"
+        )
+
+    @staticmethod
+    def _truncate_memory(content: str, target_bytes: int) -> str:
+        """Keep the most recent content when truncating."""
+        encoded = content.encode("utf-8")
+        if len(encoded) <= target_bytes:
+            return content
+        truncated = encoded[-target_bytes:].decode("utf-8", errors="ignore")
+        nl = truncated.find("\n")
+        if nl > 0:
+            truncated = truncated[nl:]
+        return "<!-- memory compressed -->\n" + truncated
