@@ -1515,6 +1515,16 @@ def main():
     # 必須在 API key 設定後、LLM loop 前執行，讓工具有機會使用環境變數
     _load_dynamic_tools()
 
+    # ── Phase 1 (UnifiedClaw): Initialize FitnessReporter ─────────────────────
+    # agentId is injected by container_runner._get_agent_id() via input_data
+    _phase1_agent_id = inp.get("agentId", "") or os.environ.get("AGENT_ID", "")
+    if _phase1_agent_id and _REPORTER_AVAILABLE:
+        try:
+            import asyncio as _asyncio_phase1
+            _asyncio_phase1.run(_init_fitness_reporter(_phase1_agent_id))
+        except Exception as _phase1_err:
+            print(f"[Phase1] FitnessReporter init error: {_phase1_err}", file=sys.stderr)
+
     # ── Backend selection: NIM / OpenAI-compatible takes priority ────────────────
     # Build key pools from potentially comma-separated values to support rotation
     nim_pool = _KeyPool(os.environ.get("NIM_API_KEY", ""))
