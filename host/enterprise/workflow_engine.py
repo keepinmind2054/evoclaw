@@ -169,21 +169,27 @@ class WorkflowDAG:
             remaining -= ready
 
             # Run all ready steps IN PARALLEL
+            # Collect results separately and merge after gather to prevent
+            # parallel steps from seeing each other's partial writes to run.context.
+            _parallel_results: dict = {}
+
             async def run_step(step_name):
                 step = run.steps[step_name]
                 step.status = StepStatus.RUNNING
                 step.started_at = time.time()
+                # Pass a read-only snapshot so no step sees a sibling's partial write
+                ctx_snapshot = dict(run.context)
                 for attempt in range(step.retries + 1):
                     try:
                         if inspect.iscoroutinefunction(step.fn):
-                            coro = step.fn(run.context)
+                            coro = step.fn(ctx_snapshot)
                         else:
                             loop = asyncio.get_running_loop()
-                            coro = loop.run_in_executor(None, step.fn, run.context)
+                            coro = loop.run_in_executor(None, step.fn, ctx_snapshot)
                         result = await asyncio.wait_for(coro, timeout=step.timeout)
                         step.result = result
                         step.status = StepStatus.SUCCESS
-                        run.context[step_name] = result
+                        _parallel_results[step_name] = result  # collect result separately
                         logger.info(f"Step '{step_name}' succeeded")
                         break
                     except asyncio.TimeoutError:
@@ -197,6 +203,9 @@ class WorkflowDAG:
                 step.finished_at = time.time()
 
             await asyncio.gather(*[run_step(name) for name in ready])
+            # Merge results back into context AFTER all parallel steps complete
+            run.context.update(_parallel_results)
+            _parallel_results.clear()
 
         failed = [n for n, s in run.steps.items() if s.status == StepStatus.FAILED]
         run.status = RunStatus.FAILED if failed else RunStatus.SUCCESS

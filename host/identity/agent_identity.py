@@ -104,36 +104,37 @@ class AgentIdentityStore:
     ) -> AgentIdentity:
         """
         Retrieve existing identity or create a new one.
-        
+
         The agent_id is stable: same name+project+channel always
         returns the same agent_id.
         """
         agent_id = AgentIdentity.make_id(name, project, channel)
-        row = self._conn.execute(
-            "SELECT * FROM agent_identities WHERE agent_id = ?", (agent_id,)
-        ).fetchone()
-
-        if row:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM agent_identities WHERE agent_id = ?", (agent_id,)
+            ).fetchone()
+            if row:
+                return self._row_to_identity(row)
+            # Insert new identity atomically — INSERT OR IGNORE prevents duplicate
+            # if two threads race to create the same agent_id simultaneously.
+            now = time.time()
+            self._conn.execute(
+                """INSERT OR IGNORE INTO agent_identities
+                   (agent_id, name, project, channel, skills, profile,
+                    history_summary, genome_ref, last_active, created_at, message_count)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    agent_id, name, project, channel,
+                    json.dumps([]), json.dumps({}), "", "",
+                    now, now, 0,
+                )
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM agent_identities WHERE agent_id = ?", (agent_id,)
+            ).fetchone()
+            logger.info(f"New agent identity created: {name} (id={agent_id})")
             return self._row_to_identity(row)
-
-        # Create new identity
-        now = time.time()
-        identity = AgentIdentity(
-            agent_id=agent_id,
-            name=name,
-            project=project,
-            channel=channel,
-            skills=[],
-            profile={},
-            history_summary="",
-            genome_ref="",
-            last_active=now,
-            created_at=now,
-            message_count=0,
-        )
-        self._insert(identity)
-        logger.info(f"New agent identity created: {name} (id={agent_id})")
-        return identity
 
     def get(self, agent_id: str) -> Optional[AgentIdentity]:
         """Retrieve identity by agent_id. Returns None if not found."""
@@ -145,11 +146,12 @@ class AgentIdentityStore:
     def update_summary(self, agent_id: str, summary: str):
         """Update compressed conversation history summary."""
         try:
-            self._conn.execute(
-                "UPDATE agent_identities SET history_summary = ?, last_active = ? WHERE agent_id = ?",
-                (summary, time.time(), agent_id)
-            )
-            self._conn.commit()
+            with self._lock:
+                self._conn.execute(
+                    "UPDATE agent_identities SET history_summary = ?, last_active = ? WHERE agent_id = ?",
+                    (summary, time.time(), agent_id)
+                )
+                self._conn.commit()
         except sqlite3.Error as e:
             logger.error(f"AgentIdentity update_summary error: {e}")
 
@@ -176,13 +178,14 @@ class AgentIdentityStore:
     def increment_message_count(self, agent_id: str):
         """Increment the message counter for this agent."""
         try:
-            self._conn.execute(
-                """UPDATE agent_identities
-                   SET message_count = message_count + 1, last_active = ?
-                   WHERE agent_id = ?""",
-                (time.time(), agent_id)
-            )
-            self._conn.commit()
+            with self._lock:
+                self._conn.execute(
+                    """UPDATE agent_identities
+                       SET message_count = message_count + 1, last_active = ?
+                       WHERE agent_id = ?""",
+                    (time.time(), agent_id)
+                )
+                self._conn.commit()
         except sqlite3.Error as e:
             logger.error(f"AgentIdentity increment_message_count error: {e}")
 

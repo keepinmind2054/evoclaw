@@ -172,8 +172,8 @@ class SharedMemoryStore:
                 if ids:
                     placeholders = ",".join("?" * len(ids))
                     self._conn.execute(
-                        f"UPDATE shared_memories SET access_count=access_count+1, last_accessed=? WHERE id IN ({placeholders})",
-                        [time.time()] + ids
+                        f"UPDATE shared_memories SET access_count=access_count+1 WHERE id IN ({placeholders})",
+                        ids
                     )
                 self._conn.commit()
             return [
@@ -351,24 +351,26 @@ class VectorStore:
 class MemoryBus:
     """
     Universal Memory Bus - unified interface for all memory operations.
-    
+
     Combines Hot + Shared + Vector + Cold memory layers into a single
     coherent interface that all agents use.
-    
+
     Example:
         bus = MemoryBus(db_conn, groups_dir=Path("groups"))
-        
+
         # Remember something (private to this agent)
         await bus.remember("User likes Python", agent_id="bot1")
-        
+
         # Remember shared knowledge (all agents can read)
         await bus.remember("API endpoint changed to v3", agent_id="bot1", scope="shared")
-        
+
         # Recall relevant memories (searches all accessible layers)
         memories = await bus.recall("Python preferences", agent_id="bot1")
         for m in memories:
             print(f"[{m.source}] {m.content} (score={m.score:.2f})")
     """
+
+    _hot_memory_locks: dict = {}  # {agent_id: asyncio.Lock}
 
     def __init__(self, conn: sqlite3.Connection, groups_dir: Path):
         self._conn = conn
@@ -490,29 +492,34 @@ class MemoryBus:
         """Remove a memory (only owner can delete private memories)."""
         return self.shared.delete(memory_id, agent_id)
 
-    async def patch_hot_memory(self, agent_id: str, patch: str, max_bytes: int = 8192):
+    async def patch_hot_memory(self, agent_id: str, patch: str, max_bytes: int = 8192) -> bool:
         """
         Append a patch to the agent's hot MEMORY.md file.
         Called by Agent Runtime via WebSocket when agent wants to update its memory.
-        
+
         Args:
             agent_id:   Agent identifier (maps to group folder name)
             patch:      Text to append to MEMORY.md
             max_bytes:  Maximum file size (default 8KB)
         """
-        memory_file = self._groups_dir / agent_id / "MEMORY.md"
-        try:
-            memory_file.parent.mkdir(parents=True, exist_ok=True)
-            current = memory_file.read_text(encoding="utf-8") if memory_file.exists() else ""
-            updated = current + "\n" + patch
-            # Truncate to max_bytes, being careful with UTF-8 boundaries
-            if len(updated.encode("utf-8")) > max_bytes:
-                encoded = updated.encode("utf-8")[:max_bytes]
-                updated = encoded.decode("utf-8", errors="ignore")
-            memory_file.write_text(updated, encoding="utf-8")
-            logger.debug(f"Hot memory patched for agent {agent_id}: +{len(patch)} chars")
-        except OSError as e:
-            logger.error(f"Hot memory patch failed for {agent_id}: {e}")
+        if agent_id not in self._hot_memory_locks:
+            self._hot_memory_locks[agent_id] = asyncio.Lock()
+        async with self._hot_memory_locks[agent_id]:
+            memory_file = self._groups_dir / agent_id / "MEMORY.md"
+            try:
+                memory_file.parent.mkdir(parents=True, exist_ok=True)
+                current = memory_file.read_text(encoding="utf-8") if memory_file.exists() else ""
+                updated = current + "\n" + patch
+                # Truncate to max_bytes, being careful with UTF-8 boundaries
+                if len(updated.encode("utf-8")) > max_bytes:
+                    encoded = updated.encode("utf-8")[:max_bytes]
+                    updated = encoded.decode("utf-8", errors="ignore")
+                memory_file.write_text(updated, encoding="utf-8")
+                logger.debug(f"Hot memory patched for agent {agent_id}: +{len(patch)} chars")
+                return True
+            except OSError as e:
+                logger.error(f"Hot memory patch failed for {agent_id}: {e}")
+                return False
 
     def status(self) -> dict:
         """Return current status of all memory layers."""
