@@ -1,5 +1,48 @@
 # Changelog
 
+## [1.13.0-phase3] -- 2026-03-18
+
+### Added (Phase 3: Cross-bot Identity + RBAC Foundation)
+- `host/identity/bot_registry.py` -- BotRegistry: SQLite-backed cross-framework bot identity store
+  - Stable `bot_id = SHA-256(name:framework:channel)[:16]` format shared across NanoClaw/EvoClaw
+  - BotIdentity dataclass with capabilities, endpoints, trust status
+  - Nonce-based handshake protocol for cross-system bot recognition
+  - Pre-registered known bots: 小白 (NanoClaw/Telegram) and 小Eve (EvoClaw/Discord)
+  - `bootstrap_known_bots()` pre-registers and trusts known bots on startup
+- `host/identity/cross_bot_protocol.py` -- CrossBotProtocol: `crossbot/1.0` message envelope
+  - Message types: hello, ack, memory_share, task_delegate, status, ping, pong
+  - HMAC-SHA256 message signing and verification
+  - Decorator-based message handler registration
+- `host/rbac/__init__.py` + `host/rbac/roles.py` -- Role-Based Access Control
+  - Roles: admin, operator, agent, viewer
+  - Permissions: memory:read/write/delete, agent:spawn/kill/list, task:submit/cancel, registry:read/write, rbac:grant/revoke
+  - SQLite-backed RBACStore with grant/revoke/query operations
+- `host/identity/__init__.py` -- Updated to export BotRegistry, BotIdentity, CrossBotProtocol, CrossBotMessage
+- `host/sdk_api.py` -- Added bot registry WebSocket endpoints: bot_register, bot_lookup, bot_list, bot_handshake
+- `host/main.py` -- Phase 3 startup block: BotRegistry + RBAC initialized
+
+### GitHub Issues Created
+- #265 [Phase 3] Cross-bot Identity Protocol
+- #266 [Phase 3] Enterprise Tool Suite - Integration Layer
+- #267 [Phase 3] RBAC - Role-Based Access Control
+- #268 [Phase 3] Matrix Channel Support
+- #269 [Phase 3] Multi-tenant Support
+
+### Architecture After Phase 3
+```
+Gateway (main.py)
++-- MemoryBus          (Phase 1) OK
++-- WSBridge           (Phase 1) OK  port 8768
++-- AgentIdentityStore (Phase 1) OK
++-- SdkApi             (Phase 2) OK  port 8767
++-- MemorySummarizer   (Phase 2) OK
++-- BotRegistry        (Phase 3) OK  <- NEW  cross-framework bot identity
++-- RBACStore          (Phase 3) OK  <- NEW  role-based access control
+        |
+        v crossbot/1.0
+NanoClaw (小白) <--> EvoClaw (小Eve)
+```
+
 ## [1.12.0-phase2] -- 2026-03-18
 
 ### Added (Phase 2: Universal Memory Layer)

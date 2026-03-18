@@ -203,9 +203,17 @@ Agent ←──── task_payload ──────── Gateway
 - [ ] WebSocket SDK API
 - [ ] Auto memory summarization
 
-### Phase 3 — Enterprise Tools + RBAC (Mid-long term)
-- [ ] MinionDesk enterprise tool suite port
-- [ ] RBAC per agent role/permission
+### Phase 3 — Enterprise Tools + RBAC + Cross-bot Identity (In Progress)
+- [x] **Cross-bot Identity Protocol** — stable `bot_id = SHA-256(name:framework:channel)[:16]`
+  - `host/identity/bot_registry.py` — BotRegistry (SQLite-backed), BotIdentity dataclass
+  - `host/identity/cross_bot_protocol.py` — CrossBotProtocol, CrossBotMessage (`crossbot/1.0`)
+  - Handshake protocol: nonce-based cross-system recognition
+  - Pre-registered known bots: 小白 (NanoClaw/Telegram) and 小Eve (EvoClaw/Discord)
+  - Bot registry endpoints exposed via SDK API WebSocket: `bot_register`, `bot_lookup`, `bot_list`, `bot_handshake`
+- [x] **RBAC — Role-Based Access Control**
+  - `host/rbac/roles.py` — Role enum (admin/operator/agent/viewer), Permission enum, RBACStore
+  - Permission gates: `memory:read/write/delete`, `agent:spawn/kill/list`, `task:submit/cancel`, `registry:read/write`, `rbac:grant/revoke`
+- [ ] MinionDesk enterprise tool suite port (LDAP, Jira, HPC, Workflow)
 - [ ] Matrix channel support
 - [ ] Multi-tenant support
 

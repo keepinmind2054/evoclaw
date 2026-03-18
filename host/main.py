@@ -77,6 +77,18 @@ except ImportError as _e2:
     _MemorySummarizer = None
     print(f"[Phase2] Components not available: {_e2}")
 
+# Phase 3: Bot Registry + RBAC
+try:
+    from .identity.bot_registry import BotRegistry as _BotRegistry, bootstrap_known_bots as _bootstrap_bots
+    from .rbac.roles import RBACStore as _RBACStore
+    _PHASE3_AVAILABLE = True
+except ImportError as _e3p:
+    _PHASE3_AVAILABLE = False
+    _BotRegistry = None
+    _bootstrap_bots = None
+    _RBACStore = None
+    print(f"[Phase3] Components not available: {_e3p}")
+
 
 
 async def _discord_notify(content: str) -> None:
@@ -767,6 +779,17 @@ async def main() -> None:
         except Exception as _e3:
             print(f"[Phase2] Initialization failed (non-fatal): {_e3}")
 
+    # Phase 3: Bot Registry + RBAC
+    _bot_registry = None
+    _rbac_store = None
+    if _PHASE3_AVAILABLE:
+        try:
+            _bot_registry = _BotRegistry()
+            _bootstrap_bots(_bot_registry)
+            _rbac_store = _RBACStore()
+            print(f"[Phase3] BotRegistry + RBAC initialized")
+        except Exception as _e4:
+            print(f"[Phase3] Initialization failed (non-fatal): {_e4}")
 
     global _registered_groups, _sender_allowlist, _stop_event, _group_fail_lock, _dedup_lock
     global _startup_time, _HEARTBEAT_INTERVAL, _last_heartbeat
