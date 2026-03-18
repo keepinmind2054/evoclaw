@@ -23,6 +23,14 @@ import threading
 from pathlib import Path
 
 import logging as _logging
+
+# Phase 1 (UnifiedClaw): Fitness feedback to Gateway
+try:
+    from fitness_reporter import FitnessReporter as _FitnessReporter
+    _REPORTER_AVAILABLE = True
+except ImportError:
+    _REPORTER_AVAILABLE = False
+
 _logging.getLogger("httpx").setLevel(_logging.WARNING)
 _logging.getLogger("httpcore").setLevel(_logging.WARNING)
 _logging.getLogger("google").setLevel(_logging.WARNING)
@@ -1741,6 +1749,29 @@ def main():
         traceback.print_exc(file=sys.stderr)
         emit({"status": "error", "result": None, "error": str(e)})
 
+
+
+# Phase 1 (UnifiedClaw): Fitness reporter instance (module-level)
+_phase1_reporter = None
+
+async def _init_fitness_reporter(agent_id: str) -> object:
+    """Initialize and connect FitnessReporter (Phase 1). No-op if unavailable."""
+    global _phase1_reporter
+    if not _REPORTER_AVAILABLE:
+        return None
+    reporter = _FitnessReporter(agent_id=agent_id)
+    connected = await reporter.connect()
+    if connected:
+        print(f"[Phase1] FitnessReporter connected for agent: {agent_id}")
+    else:
+        print(f"[Phase1] FitnessReporter: WSBridge unavailable, using file IPC")
+    _phase1_reporter = reporter
+    return reporter
+
+async def _report_fitness(score: float, metadata: dict = None):
+    """Report fitness score to Gateway evolution engine (Phase 1)."""
+    if _phase1_reporter and getattr(_phase1_reporter, 'connected', False):
+        await _phase1_reporter.report_fitness(score=score, metadata=metadata or {})
 
 if __name__ == "__main__":
     main()
