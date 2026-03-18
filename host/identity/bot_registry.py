@@ -1,11 +1,11 @@
 """
 Cross-bot Identity Registry — Phase 3
-Enables NanoClaw ↔ EvoClaw bot recognition via shared identity protocol.
+Enables NanoClaw <-> EvoClaw bot recognition via shared identity protocol.
 
 Protocol:
-  1. Each bot has a stable bot_id = SHA-256(name:framework:channel)[:16]
-  2. Bots register on startup via /bots/register endpoint
-  3. Cross-bot messages include X-Bot-Id header + signature
+  1. Each bot has stable bot_id = SHA-256(name:framework:channel)[:16]
+  2. Bots register on startup
+  3. Cross-bot messages carry X-Bot-Id header
   4. Receiving bot verifies identity against registry
 """
 import hashlib
@@ -25,18 +25,18 @@ BOT_REGISTRY_VERSION = "1.0"
 @dataclass
 class BotIdentity:
     """Stable identity for a bot across framework boundaries."""
-    bot_id: str           # SHA-256(name:framework:channel)[:16]
-    name: str             # Human-readable name (e.g. "小白", "小Eve")
-    display_name: str     # Display/alias name
-    framework: str        # "nanoclaw" | "evoclaw" | "openclaw"
-    channel: str          # Primary channel ("telegram", "discord", etc.)
+    bot_id: str
+    name: str
+    display_name: str
+    framework: str        # "nanoclaw" | "evoclaw"
+    channel: str          # "telegram" | "discord"
     capabilities: List[str] = field(default_factory=list)
-    ws_endpoint: Optional[str] = None   # WebSocket endpoint for direct comms
-    http_endpoint: Optional[str] = None  # HTTP endpoint for REST
-    public_key: Optional[str] = None    # For message signing (future)
+    ws_endpoint: Optional[str] = None
+    http_endpoint: Optional[str] = None
+    public_key: Optional[str] = None
     registered_at: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
-    trusted: bool = False  # Admin-verified trusted bot
+    trusted: bool = False
 
     @staticmethod
     def make_bot_id(name: str, framework: str, channel: str) -> str:
@@ -48,16 +48,12 @@ class BotIdentity:
 
     @classmethod
     def from_dict(cls, d: dict) -> "BotIdentity":
-        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+        valid = {k for k in d if k in cls.__dataclass_fields__}
+        return cls(**{k: d[k] for k in valid})
 
 
 class BotRegistry:
-    """
-    Persistent registry of known bots across frameworks.
-
-    Storage: SQLite (same DB as AgentIdentityStore for co-location).
-    API: Simple dict-based in-process + optional HTTP for cross-system.
-    """
+    """Persistent registry of known bots across frameworks."""
 
     def __init__(self, db_path: Optional[str] = None):
         if db_path is None:
@@ -93,18 +89,16 @@ class BotRegistry:
                 status TEXT DEFAULT 'pending',
                 initiated_at REAL,
                 completed_at REAL,
-                nonce TEXT,
-                FOREIGN KEY(initiator_bot_id) REFERENCES bots(bot_id)
+                nonce TEXT
             )
         """)
         self._conn.commit()
 
     def register(self, identity: BotIdentity) -> BotIdentity:
-        """Register or update a bot identity."""
         self._conn.execute("""
             INSERT INTO bots
-                (bot_id, name, display_name, framework, channel, capabilities,
-                 ws_endpoint, http_endpoint, public_key, registered_at, last_seen, trusted)
+                (bot_id,name,display_name,framework,channel,capabilities,
+                 ws_endpoint,http_endpoint,public_key,registered_at,last_seen,trusted)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(bot_id) DO UPDATE SET
                 display_name=excluded.display_name,
@@ -121,42 +115,33 @@ class BotRegistry:
             identity.last_seen, int(identity.trusted)
         ))
         self._conn.commit()
-        logger.info(f"Registered bot: {identity.name} ({identity.bot_id}) [{identity.framework}]")
+        logger.info(f"Registered bot: {identity.name} ({identity.bot_id})")
         return identity
 
     def lookup(self, bot_id: str) -> Optional[BotIdentity]:
-        """Look up a bot by its stable ID."""
         row = self._conn.execute(
             "SELECT * FROM bots WHERE bot_id=?", (bot_id,)
         ).fetchone()
-        if not row:
-            return None
-        return self._row_to_identity(row)
+        return self._row_to_identity(row) if row else None
 
     def lookup_by_name(self, name: str) -> Optional[BotIdentity]:
-        """Look up a bot by name (case-insensitive)."""
         row = self._conn.execute(
             "SELECT * FROM bots WHERE lower(name)=lower(?) OR lower(display_name)=lower(?)",
             (name, name)
         ).fetchone()
-        if not row:
-            return None
-        return self._row_to_identity(row)
+        return self._row_to_identity(row) if row else None
 
     def list_all(self) -> List[BotIdentity]:
-        """List all registered bots."""
         rows = self._conn.execute("SELECT * FROM bots ORDER BY registered_at").fetchall()
         return [self._row_to_identity(r) for r in rows]
 
     def list_trusted(self) -> List[BotIdentity]:
-        """List trusted bots only."""
         rows = self._conn.execute(
             "SELECT * FROM bots WHERE trusted=1 ORDER BY registered_at"
         ).fetchall()
         return [self._row_to_identity(r) for r in rows]
 
     def trust(self, bot_id: str) -> bool:
-        """Mark a bot as trusted (admin action)."""
         cur = self._conn.execute(
             "UPDATE bots SET trusted=1 WHERE bot_id=?", (bot_id,)
         )
@@ -164,46 +149,36 @@ class BotRegistry:
         return cur.rowcount > 0
 
     def initiate_handshake(self, initiator_id: str, target_id: str) -> str:
-        """
-        Initiate cross-bot handshake. Returns nonce for verification.
-
-        Handshake flow:
-          1. Bot A calls initiate_handshake(A_id, B_id) -> nonce
-          2. Bot A sends: {type: "bot_hello", bot_id: A_id, nonce: nonce}
-          3. Bot B verifies nonce via complete_handshake()
-          4. Bot B responds: {type: "bot_ack", bot_id: B_id, nonce: nonce}
-        """
         import secrets
         nonce = secrets.token_hex(16)
         self._conn.execute("""
             INSERT INTO bot_handshakes
-                (initiator_bot_id, target_bot_id, status, initiated_at, nonce)
+                (initiator_bot_id,target_bot_id,status,initiated_at,nonce)
             VALUES (?,?,?,?,?)
         """, (initiator_id, target_id, "pending", time.time(), nonce))
         self._conn.commit()
         return nonce
 
     def complete_handshake(self, initiator_id: str, target_id: str, nonce: str) -> bool:
-        """Complete a handshake — verify nonce and mark trusted."""
         row = self._conn.execute("""
             SELECT id FROM bot_handshakes
             WHERE initiator_bot_id=? AND target_bot_id=? AND nonce=? AND status='pending'
         """, (initiator_id, target_id, nonce)).fetchone()
         if not row:
-            logger.warning(f"Handshake verification failed: {initiator_id} -> {target_id}")
+            logger.warning(f"Handshake failed: {initiator_id} -> {target_id}")
             return False
         self._conn.execute("""
             UPDATE bot_handshakes SET status='completed', completed_at=? WHERE id=?
         """, (time.time(), row[0]))
-        # Auto-trust after successful handshake
-        self._conn.execute("UPDATE bots SET trusted=1 WHERE bot_id IN (?,?)",
-                           (initiator_id, target_id))
+        self._conn.execute(
+            "UPDATE bots SET trusted=1 WHERE bot_id IN (?,?)",
+            (initiator_id, target_id)
+        )
         self._conn.commit()
         logger.info(f"Handshake completed: {initiator_id} <-> {target_id}")
         return True
 
     def update_last_seen(self, bot_id: str):
-        """Update last seen timestamp."""
         self._conn.execute(
             "UPDATE bots SET last_seen=? WHERE bot_id=?", (time.time(), bot_id)
         )
@@ -212,7 +187,7 @@ class BotRegistry:
     def _row_to_identity(self, row) -> BotIdentity:
         cols = [d[0] for d in self._conn.execute("SELECT * FROM bots LIMIT 0").description]
         d = dict(zip(cols, row))
-        d["capabilities"] = json.loads(d.get("capabilities", "[]"))
+        d["capabilities"] = json.loads(d.get("capabilities") or "[]")
         d["trusted"] = bool(d.get("trusted", 0))
         return BotIdentity.from_dict(d)
 
@@ -220,50 +195,40 @@ class BotRegistry:
         self._conn.close()
 
 
-# ── Default bot definitions ─────────────────────────────────────────────────
-
 KNOWN_BOTS: Dict[str, dict] = {
     "xiao_bai": {
-        "name": "小白",
+        "name": "\u5c0f\u767d",
         "display_name": "Andy",
         "framework": "nanoclaw",
         "channel": "telegram",
         "capabilities": ["memory", "code", "analysis", "multi-channel"],
-        "ws_endpoint": None,  # Set via env XIAOBAI_WS_ENDPOINT
-        "http_endpoint": None,
     },
     "xiao_eve": {
-        "name": "小Eve",
+        "name": "\u5c0fEve",
         "display_name": "Eve",
         "framework": "evoclaw",
         "channel": "discord",
         "capabilities": ["memory", "evolution", "fitness", "enterprise"],
-        "ws_endpoint": None,  # Set via env XIAOEVE_WS_ENDPOINT
         "http_endpoint": "http://localhost:8767",
     },
 }
 
 
 def bootstrap_known_bots(registry: BotRegistry):
-    """Pre-register known bots (小白 and 小Eve) into the registry."""
+    """Pre-register \u5c0f\u767d and \u5c0fEve as trusted bots."""
     import os
-    for key, config in KNOWN_BOTS.items():
-        bot_id = BotIdentity.make_bot_id(
-            config["name"], config["framework"], config["channel"]
-        )
-        # Override endpoints from environment
-        ws_ep = os.getenv(f"{key.upper()}_WS_ENDPOINT", config.get("ws_endpoint"))
-        http_ep = os.getenv(f"{key.upper()}_HTTP_ENDPOINT", config.get("http_endpoint"))
+    for key, cfg in KNOWN_BOTS.items():
+        bot_id = BotIdentity.make_bot_id(cfg["name"], cfg["framework"], cfg["channel"])
         identity = BotIdentity(
             bot_id=bot_id,
-            name=config["name"],
-            display_name=config["display_name"],
-            framework=config["framework"],
-            channel=config["channel"],
-            capabilities=config["capabilities"],
-            ws_endpoint=ws_ep,
-            http_endpoint=http_ep,
-            trusted=True,  # Pre-trusted known bots
+            name=cfg["name"],
+            display_name=cfg["display_name"],
+            framework=cfg["framework"],
+            channel=cfg["channel"],
+            capabilities=cfg["capabilities"],
+            ws_endpoint=os.getenv(f"{key.upper()}_WS_ENDPOINT"),
+            http_endpoint=cfg.get("http_endpoint"),
+            trusted=True,
         )
         registry.register(identity)
-        logger.info(f"Bootstrapped known bot: {identity.name} -> {bot_id}")
+        logger.info(f"Bootstrapped: {identity.name} -> {bot_id}")
