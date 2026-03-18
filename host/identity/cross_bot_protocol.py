@@ -68,7 +68,7 @@ class CrossBotMessage:
             "from_bot_id": self.from_bot_id,
             "to_bot_id": self.to_bot_id,
             "msg_id": self.msg_id,
-            "timestamp": self.timestamp,
+            "timestamp_ms": int(self.timestamp * 1000),  # integer ms, not float
             "type": self.type,
             "payload": self.payload,
             "signature": self.signature,
@@ -77,11 +77,16 @@ class CrossBotMessage:
     @classmethod
     def from_json(cls, data: str) -> "CrossBotMessage":
         d = json.loads(data)
+        # Support both old float "timestamp" and new integer "timestamp_ms"
+        if "timestamp_ms" in d:
+            ts = d["timestamp_ms"] / 1000.0
+        else:
+            ts = d.get("timestamp", time.time())
         return cls(
             from_bot_id=d["from_bot_id"],
             to_bot_id=d.get("to_bot_id"),
             msg_id=d.get("msg_id", str(uuid.uuid4())),
-            timestamp=d.get("timestamp", time.time()),
+            timestamp=ts,
             type=d["type"],
             payload=d.get("payload", {}),
             protocol=d.get("protocol", PROTOCOL_VERSION),

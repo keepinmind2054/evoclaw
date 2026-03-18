@@ -77,8 +77,10 @@ class RBACStore:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._lock = threading.Lock()
+        self._cache_lock = threading.Lock()  # separate lock to avoid deadlock with _lock
         self._role_cache: dict = {}  # {subject_id: (roles_set, fetched_at)}
         self._cache_ttl = 60.0
+        self._cache_maxsize = 512
         self._init_db()
         logger.info(f"RBACStore initialized at {db_path}")
 
@@ -96,16 +98,27 @@ class RBACStore:
             self._conn.commit()
 
     def _get_cached_roles(self, subject_id: str):
-        entry = self._role_cache.get(subject_id)
-        if entry and (_time.time() - entry[1]) < self._cache_ttl:
-            return entry[0]
+        with self._cache_lock:
+            entry = self._role_cache.get(subject_id)
+            if entry:
+                roles, fetched_at = entry
+                if (_time.time() - fetched_at) < self._cache_ttl:
+                    return roles
+                # Expired — evict immediately
+                del self._role_cache[subject_id]
         return None
 
     def _set_cached_roles(self, subject_id: str, roles):
-        self._role_cache[subject_id] = (roles, _time.time())
+        with self._cache_lock:
+            # Evict oldest entry if at capacity
+            if len(self._role_cache) >= self._cache_maxsize:
+                oldest_key = min(self._role_cache, key=lambda k: self._role_cache[k][1])
+                del self._role_cache[oldest_key]
+            self._role_cache[subject_id] = (roles, _time.time())
 
     def _invalidate_cache(self, subject_id: str):
-        self._role_cache.pop(subject_id, None)
+        with self._cache_lock:
+            self._role_cache.pop(subject_id, None)
 
     def grant(self, subject_id: str, role: Role, granted_by: Optional[str] = None):
         with self._lock:

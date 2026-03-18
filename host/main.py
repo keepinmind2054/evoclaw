@@ -1095,20 +1095,6 @@ async def main() -> None:
         os.execv(_sys_restart.executable, [_sys_restart.executable] + _sys_restart.argv)
 
 
-# ── Phase 3: RBAC + BotRegistry ───────────────────────────────────────────
-try:
-    from .rbac.roles import RBACStore as _RBACStore, Role as _Role
-    from .identity.bot_registry import BotRegistry as _BotRegistry, bootstrap_known_bots as _bootstrap_bots
-    _rbac_store = _RBACStore()
-    _bot_registry_p3 = _BotRegistry()
-    _bootstrap_bots(_bot_registry_p3)
-    log.info("[Phase 3] RBAC + BotRegistry initialized")
-except Exception as _e:
-    _rbac_store = None
-    _bot_registry_p3 = None
-    log.warning(f"[Phase 3] RBAC/BotRegistry unavailable: {_e}")
-
-
 if __name__ == "__main__":
     import sys
     if sys.platform == "win32":

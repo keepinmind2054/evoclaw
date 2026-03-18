@@ -279,10 +279,14 @@ class SdkApi:
         """Return system status."""
         try:
             memory_status = self._memory_bus.status()
-            agent_count_row = self._identity_store._conn.execute(
-                "SELECT COUNT(*) FROM agent_identities"
-            ).fetchone()
-            agent_count = agent_count_row[0] if agent_count_row else 0
+            try:
+                with self._identity_store._lock:
+                    agent_count_row = self._identity_store._conn.execute(
+                        "SELECT COUNT(*) FROM agent_identities"
+                    ).fetchone()
+                agent_count = agent_count_row[0] if agent_count_row else 0
+            except Exception:
+                agent_count = -1
             await websocket.send(json.dumps({
                 "type": "system_status",
                 "status": {
