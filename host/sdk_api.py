@@ -83,6 +83,7 @@ class SdkApi:
         identity_store: "AgentIdentityStore",
         port: Optional[int] = None,
         token: Optional[str] = None,
+        bot_registry=None,
     ):
         self._memory_bus = memory_bus
         self._identity_store = identity_store
@@ -91,6 +92,7 @@ class SdkApi:
         self._connections: Set = set()
         self._running = False
         self._task_submit_callback = None
+        self._bot_registry = bot_registry  # Phase 3: BotRegistry
 
     async def start(self):
         """Start the SDK API WebSocket server."""
@@ -172,12 +174,17 @@ class SdkApi:
         msg_type = msg.get("type", "")
 
         handlers = {
-            "ping":          self._handle_ping,
-            "memory_query":  self._handle_memory_query,
-            "memory_write":  self._handle_memory_write,
-            "agent_list":    self._handle_agent_list,
-            "system_status": self._handle_system_status,
-            "task_submit":   self._handle_task_submit,
+            "ping":           self._handle_ping,
+            "memory_query":   self._handle_memory_query,
+            "memory_write":   self._handle_memory_write,
+            "agent_list":     self._handle_agent_list,
+            "system_status":  self._handle_system_status,
+            "task_submit":    self._handle_task_submit,
+            # Phase 3: Bot Registry
+            "bot_register":   self._handle_bot_register,
+            "bot_lookup":     self._handle_bot_lookup,
+            "bot_list":       self._handle_bot_list,
+            "bot_handshake":  self._handle_bot_handshake,
         }
 
         handler = handlers.get(msg_type)
@@ -306,6 +313,118 @@ class SdkApi:
                 await self._send_error(websocket, "task_error", str(e))
         else:
             await self._send_error(websocket, "not_configured", "Task submission not configured")
+
+    # ── Phase 3: Bot Registry handlers ──────────────────────────────────────
+
+    async def _handle_bot_register(self, websocket, msg: dict):
+        """Register a bot identity in the registry."""
+        if not self._bot_registry:
+            await self._send_error(websocket, "not_configured", "BotRegistry not initialized")
+            return
+        try:
+            from .identity.bot_registry import BotIdentity
+            required = ("name", "display_name", "framework", "channel")
+            for field_name in required:
+                if not msg.get(field_name):
+                    await self._send_error(websocket, "missing_params", f"Missing field: {field_name}")
+                    return
+            bot_id = BotIdentity.make_bot_id(msg["name"], msg["framework"], msg["channel"])
+            identity = BotIdentity(
+                bot_id=bot_id,
+                name=msg["name"],
+                display_name=msg["display_name"],
+                framework=msg["framework"],
+                channel=msg["channel"],
+                capabilities=msg.get("capabilities", []),
+                ws_endpoint=msg.get("ws_endpoint"),
+                http_endpoint=msg.get("http_endpoint"),
+                trusted=False,
+            )
+            self._bot_registry.register(identity)
+            await websocket.send(json.dumps({
+                "type": "bot_registered",
+                "bot_id": bot_id,
+                "name": identity.name,
+            }))
+        except Exception as e:
+            await self._send_error(websocket, "bot_register_error", str(e))
+
+    async def _handle_bot_lookup(self, websocket, msg: dict):
+        """Look up a bot by ID or name."""
+        if not self._bot_registry:
+            await self._send_error(websocket, "not_configured", "BotRegistry not initialized")
+            return
+        try:
+            bot_id = msg.get("bot_id")
+            name = msg.get("name")
+            if bot_id:
+                identity = self._bot_registry.lookup(bot_id)
+            elif name:
+                identity = self._bot_registry.lookup_by_name(name)
+            else:
+                await self._send_error(websocket, "missing_params", "bot_id or name required")
+                return
+            if identity:
+                await websocket.send(json.dumps({"type": "bot_identity", "bot": identity.to_dict()}))
+            else:
+                await websocket.send(json.dumps({"type": "bot_not_found", "bot_id": bot_id, "name": name}))
+        except Exception as e:
+            await self._send_error(websocket, "bot_lookup_error", str(e))
+
+    async def _handle_bot_list(self, websocket, msg: dict):
+        """List all registered bots."""
+        if not self._bot_registry:
+            await self._send_error(websocket, "not_configured", "BotRegistry not initialized")
+            return
+        try:
+            trusted_only = msg.get("trusted_only", False)
+            bots = self._bot_registry.list_trusted() if trusted_only else self._bot_registry.list_all()
+            await websocket.send(json.dumps({
+                "type": "bot_list",
+                "bots": [b.to_dict() for b in bots],
+                "count": len(bots),
+            }))
+        except Exception as e:
+            await self._send_error(websocket, "bot_list_error", str(e))
+
+    async def _handle_bot_handshake(self, websocket, msg: dict):
+        """Initiate or complete a cross-bot handshake."""
+        if not self._bot_registry:
+            await self._send_error(websocket, "not_configured", "BotRegistry not initialized")
+            return
+        try:
+            action = msg.get("action", "initiate")
+            if action == "initiate":
+                initiator_id = msg.get("initiator_id", "")
+                target_id = msg.get("target_id", "")
+                if not initiator_id or not target_id:
+                    await self._send_error(websocket, "missing_params", "initiator_id and target_id required")
+                    return
+                nonce = self._bot_registry.initiate_handshake(initiator_id, target_id)
+                await websocket.send(json.dumps({
+                    "type": "bot_handshake_initiated",
+                    "initiator_id": initiator_id,
+                    "target_id": target_id,
+                    "nonce": nonce,
+                }))
+            elif action == "complete":
+                initiator_id = msg.get("initiator_id", "")
+                target_id = msg.get("target_id", "")
+                nonce = msg.get("nonce", "")
+                if not all([initiator_id, target_id, nonce]):
+                    await self._send_error(websocket, "missing_params", "initiator_id, target_id, nonce required")
+                    return
+                success = self._bot_registry.complete_handshake(initiator_id, target_id, nonce)
+                await websocket.send(json.dumps({
+                    "type": "bot_handshake_result",
+                    "success": success,
+                    "initiator_id": initiator_id,
+                    "target_id": target_id,
+                }))
+            else:
+                await self._send_error(websocket, "unknown_action", f"Unknown handshake action: {action}")
+        except Exception as e:
+            await self._send_error(websocket, "bot_handshake_error", str(e))
 
     @staticmethod
     async def _send_error(websocket, code: str, message: str):
