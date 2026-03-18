@@ -58,9 +58,9 @@ from .memory import append_warm_log
 
 # Phase 1 (UnifiedClaw): Universal Memory Bus + WSBridge + Agent Identity
 try:
-    from memory.memory_bus import MemoryBus as _MemoryBus
-    from identity.agent_identity import AgentIdentityStore as _AgentIdentityStore
-    from ws_bridge import WSBridge as _WSBridge
+    from .memory.memory_bus import MemoryBus as _MemoryBus
+    from .identity.agent_identity import AgentIdentityStore as _AgentIdentityStore
+    from .ws_bridge import WSBridge as _WSBridge
     _PHASE1_AVAILABLE = True
 except ImportError as _e:
     _PHASE1_AVAILABLE = False
@@ -68,8 +68,8 @@ except ImportError as _e:
 
 # Phase 2 (UnifiedClaw): SDK API + Memory Summarizer
 try:
-    from sdk_api import SdkApi as _SdkApi
-    from memory.summarizer import MemorySummarizer as _MemorySummarizer
+    from .sdk_api import SdkApi as _SdkApi
+    from .memory.summarizer import MemorySummarizer as _MemorySummarizer
     _PHASE2_AVAILABLE = True
 except ImportError as _e2:
     _PHASE2_AVAILABLE = False
@@ -751,8 +751,7 @@ async def main() -> None:
                 # Forward fitness to evolution engine
                 pass  # TODO: wire to evolution/fitness.py
 
-            import asyncio as _asyncio
-            _asyncio.create_task(_ws_bridge.start())
+            asyncio.create_task(_ws_bridge.start())
             print(f"[Phase1] MemoryBus | WSBridge (port {_ws_bridge.port}) | AgentIdentityStore initialized")
         except Exception as _e:
             print(f"[Phase1] Initialization failed (non-fatal): {_e}")
