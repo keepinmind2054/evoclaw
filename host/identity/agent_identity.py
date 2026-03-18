@@ -24,6 +24,7 @@ import hashlib
 import json
 import logging
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -80,6 +81,7 @@ class AgentIdentityStore:
 
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
+        self._lock = threading.Lock()
         self._ensure_schema()
 
     def _ensure_schema(self):
@@ -88,6 +90,8 @@ class AgentIdentityStore:
                 s = stmt.strip()
                 if s:
                     self._conn.execute(s)
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA busy_timeout=5000")
             self._conn.commit()
         except sqlite3.Error as e:
             logger.error(f"AgentIdentityStore schema error: {e}")
@@ -151,19 +155,23 @@ class AgentIdentityStore:
 
     def add_skill(self, agent_id: str, skill: str):
         """Add a skill tag to the agent's skill list."""
-        identity = self.get(agent_id)
-        if not identity:
-            return
-        if skill not in identity.skills:
-            skills = identity.skills + [skill]
-            try:
-                self._conn.execute(
-                    "UPDATE agent_identities SET skills = ? WHERE agent_id = ?",
-                    (json.dumps(skills), agent_id)
-                )
-                self._conn.commit()
-            except sqlite3.Error as e:
-                logger.error(f"AgentIdentity add_skill error: {e}")
+        try:
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT skills FROM agent_identities WHERE agent_id=?", (agent_id,)
+                ).fetchone()
+                if not row:
+                    return
+                skills = json.loads(row[0] or "[]")
+                if skill not in skills:
+                    skills.append(skill)
+                    self._conn.execute(
+                        "UPDATE agent_identities SET skills=? WHERE agent_id=?",
+                        (json.dumps(skills), agent_id)
+                    )
+                    self._conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"AgentIdentity add_skill error: {e}")
 
     def increment_message_count(self, agent_id: str):
         """Increment the message counter for this agent."""
@@ -180,16 +188,20 @@ class AgentIdentityStore:
 
     def update_profile(self, agent_id: str, updates: dict):
         """Merge updates into the agent's profile dict."""
-        identity = self.get(agent_id)
-        if not identity:
-            return
-        merged = {**identity.profile, **updates}
         try:
-            self._conn.execute(
-                "UPDATE agent_identities SET profile = ? WHERE agent_id = ?",
-                (json.dumps(merged), agent_id)
-            )
-            self._conn.commit()
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT profile FROM agent_identities WHERE agent_id=?", (agent_id,)
+                ).fetchone()
+                if not row:
+                    return
+                profile = json.loads(row[0] or "{}")
+                profile.update(updates)
+                self._conn.execute(
+                    "UPDATE agent_identities SET profile=? WHERE agent_id=?",
+                    (json.dumps(profile), agent_id)
+                )
+                self._conn.commit()
         except sqlite3.Error as e:
             logger.error(f"AgentIdentity update_profile error: {e}")
 

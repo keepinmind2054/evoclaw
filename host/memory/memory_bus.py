@@ -28,6 +28,7 @@ import hashlib
 import json
 import logging
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -100,16 +101,18 @@ class SharedMemoryStore:
 
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
+        self._lock = threading.Lock()
         self._ensure_schema()
 
     def _ensure_schema(self):
         """Create tables if they don't exist."""
         try:
-            for stmt in self.TABLE_DDL.strip().split(";"):
-                stmt = stmt.strip()
-                if stmt:
-                    self._conn.execute(stmt)
-            self._conn.commit()
+            with self._lock:
+                for stmt in self.TABLE_DDL.strip().split(";"):
+                    stmt = stmt.strip()
+                    if stmt:
+                        self._conn.execute(stmt)
+                self._conn.commit()
         except sqlite3.Error as e:
             logger.error(f"SharedMemoryStore schema error: {e}")
 
@@ -127,13 +130,14 @@ class SharedMemoryStore:
         ).hexdigest()[:16]
         now = time.time()
         try:
-            self._conn.execute(
-                """INSERT INTO shared_memories
-                   (id, agent_id, project, scope, content, importance, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (memory_id, agent_id, project, scope, content, importance, now, now),
-            )
-            self._conn.commit()
+            with self._lock:
+                self._conn.execute(
+                    """INSERT INTO shared_memories
+                       (id, agent_id, project, scope, content, importance, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (memory_id, agent_id, project, scope, content, importance, now, now),
+                )
+                self._conn.commit()
             logger.debug(f"SharedMemory written: {memory_id} scope={scope}")
         except sqlite3.Error as e:
             logger.error(f"SharedMemory write error: {e}")
@@ -148,27 +152,30 @@ class SharedMemoryStore:
     ) -> list[dict]:
         """FTS5 search across accessible memories."""
         try:
-            rows = self._conn.execute(
-                """SELECT sm.id, sm.content, sm.agent_id, sm.scope,
-                          sm.importance, sm.created_at,
-                          rank as fts_rank
-                   FROM shared_memories_fts fts
-                   JOIN shared_memories sm ON sm.rowid = fts.rowid
-                   WHERE shared_memories_fts MATCH ?
-                     AND (sm.scope = 'shared'
-                          OR (sm.scope = 'private' AND sm.agent_id = ?)
-                          OR (sm.scope = 'project' AND sm.project = ?))
-                   ORDER BY fts_rank, sm.importance DESC
-                   LIMIT ?""",
-                (query, agent_id, project, k),
-            ).fetchall()
-            # Increment access counts
-            for row in rows:
-                self._conn.execute(
-                    "UPDATE shared_memories SET access_count = access_count + 1 WHERE id = ?",
-                    (row[0],)
-                )
-            self._conn.commit()
+            with self._lock:
+                rows = self._conn.execute(
+                    """SELECT sm.id, sm.content, sm.agent_id, sm.scope,
+                              sm.importance, sm.created_at,
+                              rank as fts_rank
+                       FROM shared_memories_fts fts
+                       JOIN shared_memories sm ON sm.rowid = fts.rowid
+                       WHERE shared_memories_fts MATCH ?
+                         AND (sm.scope = 'shared'
+                              OR (sm.scope = 'private' AND sm.agent_id = ?)
+                              OR (sm.scope = 'project' AND sm.project = ?))
+                       ORDER BY fts_rank, sm.importance DESC
+                       LIMIT ?""",
+                    (query, agent_id, project, k),
+                ).fetchall()
+                # Batch increment access counts
+                ids = [row[0] for row in rows]
+                if ids:
+                    placeholders = ",".join("?" * len(ids))
+                    self._conn.execute(
+                        f"UPDATE shared_memories SET access_count=access_count+1, last_accessed=? WHERE id IN ({placeholders})",
+                        [time.time()] + ids
+                    )
+                self._conn.commit()
             return [
                 {
                     "id": r[0], "content": r[1], "agent_id": r[2],
@@ -184,12 +191,13 @@ class SharedMemoryStore:
     def delete(self, memory_id: str, agent_id: str) -> bool:
         """Delete a memory (only owner can delete private memories)."""
         try:
-            result = self._conn.execute(
-                """DELETE FROM shared_memories
-                   WHERE id = ? AND (agent_id = ? OR scope != 'private')""",
-                (memory_id, agent_id),
-            )
-            self._conn.commit()
+            with self._lock:
+                result = self._conn.execute(
+                    """DELETE FROM shared_memories
+                       WHERE id = ? AND (agent_id = ? OR scope != 'private')""",
+                    (memory_id, agent_id),
+                )
+                self._conn.commit()
             return result.rowcount > 0
         except sqlite3.Error as e:
             logger.error(f"SharedMemory delete error: {e}")

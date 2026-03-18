@@ -10,6 +10,13 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
+try:
+    import ldap3
+    _LDAP3_AVAILABLE = True
+except ImportError:
+    ldap3 = None
+    _LDAP3_AVAILABLE = False
+
 
 @dataclass
 class LDAPUser:
@@ -48,24 +55,25 @@ class LDAPConnector:
             self._try_connect()
 
     def _try_connect(self):
+        if not _LDAP3_AVAILABLE:
+            logger.warning("ldap3 not installed — LDAP connector unavailable")
+            return
         try:
-            import ldap3
             server = ldap3.Server(self.server, get_info=ldap3.ALL)
             self._conn = ldap3.Connection(
                 server, user=self.bind_dn, password=self.bind_pw, auto_bind=True
             )
             logger.info(f"LDAP connected: {self.server}")
-        except ImportError:
-            logger.warning("ldap3 not installed — LDAP connector unavailable")
         except Exception as e:
             logger.error(f"LDAP connection failed: {e}")
 
     def lookup_user(self, username: str) -> Optional[LDAPUser]:
         """Look up a user by sAMAccountName."""
+        if not _LDAP3_AVAILABLE:
+            return None
         if not self._conn:
             return None
         try:
-            import ldap3
             self._conn.search(
                 self.base_dn,
                 f"(sAMAccountName={username})",
@@ -90,10 +98,11 @@ class LDAPConnector:
 
     def get_group_members(self, group_cn: str) -> List[str]:
         """Get members of an LDAP group."""
+        if not _LDAP3_AVAILABLE:
+            return []
         if not self._conn:
             return []
         try:
-            import ldap3
             self._conn.search(
                 self.base_dn,
                 f"(&(objectClass=group)(cn={group_cn}))",
