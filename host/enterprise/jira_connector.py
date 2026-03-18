@@ -65,7 +65,7 @@ class JiraConnector:
         except ImportError:
             logger.warning("requests not installed — Jira connector unavailable")
 
-    def _get(self, path: str, params: Dict = None) -> Optional[Dict]:
+    def _get(self, path: str, params: Optional[Dict] = None) -> Optional[Dict]:
         if not self._session:
             return None
         r = self._session.get(f"{self.base_url}/rest/api/3{path}", params=params)
@@ -85,7 +85,7 @@ class JiraConnector:
         description: str = "",
         issue_type: str = "Task",
         priority: str = "Medium",
-        labels: List[str] = None,
+        labels: Optional[List[str]] = None,
         project: Optional[str] = None,
     ) -> Optional[JiraIssue]:
         """Create a Jira issue and return the created issue."""
@@ -175,7 +175,7 @@ class JiraConnector:
         for t in transitions.get("transitions", []):
             if t["name"].lower() == status_name.lower():
                 result = self._post(f"/issue/{key}/transitions", {"transition": {"id": t["id"]}})
-                return True
+                return result is not None
         logger.warning(f"Transition '{status_name}' not found for {key}")
         return False
 

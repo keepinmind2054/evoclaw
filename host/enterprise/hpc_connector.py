@@ -6,6 +6,7 @@ Submits and monitors jobs on SLURM/PBS HPC clusters.
 import os
 import logging
 import subprocess
+import tempfile
 from typing import Optional, Dict, List
 from dataclasses import dataclass
 from enum import Enum
@@ -105,12 +106,15 @@ class HPCConnector:
 {script}
 """
         try:
-            # Write to temp file and submit
-            import tempfile
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as f:
-                f.write(sbatch)
-                fname = f.name
-            out = self._run_remote(f"sbatch {fname}")
+            # Use sbatch --wrap to avoid writing a temp file to the local filesystem
+            # that the remote head node cannot access.  The script content is passed
+            # inline via the heredoc-style --wrap flag so no file transfer is needed.
+            out = self._run_remote(
+                f"sbatch --job-name={name} --nodes={nodes} --ntasks-per-node={cpus}"
+                f" --mem={memory_gb}G --time={hours:02d}:{mins:02d}:00"
+                f" --partition={partition} --output={name}_%j.out"
+                f" --wrap={sbatch!r}"
+            )
             job_id = out.split()[-1]  # "Submitted batch job 12345"
             return HPCJob(job_id=job_id, name=name, status=JobStatus.PENDING,
                          nodes=nodes, cpus=cpus, memory_gb=memory_gb,
@@ -132,11 +136,26 @@ class HPCConnector:
 {script}
 """
         try:
-            import tempfile
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.pbs', delete=False) as f:
-                f.write(pbs_script)
-                fname = f.name
-            out = self._run_remote(f"qsub {fname}")
+            # Write script to a local temp file, copy it to the remote host via SSH,
+            # submit it there, then clean up the local temp file.
+            fname = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode='w', suffix='.pbs', delete=False
+                ) as f:
+                    f.write(pbs_script)
+                    fname = f.name
+                # scp the script to the remote head node, then submit
+                scp_args = ["scp", "-o", "StrictHostKeyChecking=no"]
+                if self.ssh_key:
+                    scp_args += ["-i", self.ssh_key]
+                remote_path = f"/tmp/{os.path.basename(fname)}"
+                scp_args += [fname, f"{self.host}:{remote_path}"]
+                subprocess.run(scp_args, check=True, timeout=30)
+                out = self._run_remote(f"qsub {remote_path}; rm -f {remote_path}")
+            finally:
+                if fname and os.path.exists(fname):
+                    os.unlink(fname)
             job_id = out.strip()
             return HPCJob(job_id=job_id, name=name, status=JobStatus.PENDING,
                          nodes=nodes, cpus=cpus, memory_gb=memory_gb,

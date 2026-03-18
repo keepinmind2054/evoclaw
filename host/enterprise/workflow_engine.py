@@ -3,6 +3,7 @@ Workflow Engine — Phase 3 Enterprise Suite
 
 DAG-based task orchestration for multi-step agent workflows.
 """
+import inspect
 import time
 import logging
 import asyncio
@@ -73,7 +74,7 @@ class WorkflowDAG:
         self.name = name
         self._steps: Dict[str, WorkflowStep] = {}
 
-    def step(self, name: str, depends_on: List[str] = None, timeout: float = 300.0, retries: int = 0):
+    def step(self, name: str, depends_on: Optional[List[str]] = None, timeout: float = 300.0, retries: int = 0):
         """Decorator to register a workflow step."""
         def decorator(fn):
             self._steps[name] = WorkflowStep(
@@ -103,7 +104,7 @@ class WorkflowDAG:
             visit(name)
         return order
 
-    async def run(self, initial_context: Dict = None) -> WorkflowRun:
+    async def run(self, initial_context: Optional[Dict] = None) -> WorkflowRun:
         """Execute all steps in dependency order."""
         import uuid
         run = WorkflowRun(
@@ -132,9 +133,13 @@ class WorkflowDAG:
             step.started_at = time.time()
             for attempt in range(step.retries + 1):
                 try:
-                    result = await asyncio.wait_for(
-                        step.fn(run.context), timeout=step.timeout
-                    )
+                    if inspect.iscoroutinefunction(step.fn):
+                        coro_or_future = step.fn(run.context)
+                    else:
+                        # Wrap sync callables so asyncio.wait_for can handle them
+                        loop = asyncio.get_running_loop()
+                        coro_or_future = loop.run_in_executor(None, step.fn, run.context)
+                    result = await asyncio.wait_for(coro_or_future, timeout=step.timeout)
                     step.result = result
                     step.status = StepStatus.SUCCESS
                     run.context[step_name] = result
@@ -170,7 +175,7 @@ class WorkflowEngine:
     def get(self, name: str) -> Optional[WorkflowDAG]:
         return self._dags.get(name)
 
-    async def run(self, name: str, context: Dict = None) -> Optional[WorkflowRun]:
+    async def run(self, name: str, context: Optional[Dict] = None) -> Optional[WorkflowRun]:
         dag = self._dags.get(name)
         if not dag:
             logger.error(f"Workflow not found: {name}")

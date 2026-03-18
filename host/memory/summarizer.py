@@ -187,7 +187,7 @@ class MemorySummarizer:
                 url, data=payload,
                 headers={"Content-Type": "application/json"}, method="POST"
             )
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             response = await loop.run_in_executor(
                 None, lambda: urllib.request.urlopen(req, timeout=10)
             )
@@ -217,7 +217,7 @@ class MemorySummarizer:
                 },
                 method="POST",
             )
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             response = await loop.run_in_executor(
                 None, lambda: urllib.request.urlopen(req, timeout=10)
             )
@@ -248,7 +248,7 @@ class MemorySummarizer:
                 },
                 method="POST",
             )
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             response = await loop.run_in_executor(
                 None, lambda: urllib.request.urlopen(req, timeout=10)
             )
