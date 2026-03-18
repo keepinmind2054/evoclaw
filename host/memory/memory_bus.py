@@ -279,7 +279,7 @@ class VectorStore:
                 headers={"Content-Type": "application/json"},
                 method="POST"
             )
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             response = await loop.run_in_executor(None, lambda: urllib.request.urlopen(req, timeout=5))
             data = _json.loads(response.read())
             return data.get("embedding", {}).get("values")
@@ -411,24 +411,27 @@ class MemoryBus:
         agent_id: str,
         k: int = 5,
         project: str = "",
-        include_sources: tuple = ("shared", "vector", "cold"),
+        include_sources: tuple = ("shared", "vector"),
     ) -> list[Memory]:
         """
         Recall relevant memories from all accessible layers.
-        
+
         Search order:
         1. Vector (semantic) - most accurate for meaning
         2. Shared FTS5 - keyword matches in shared store
-        3. Cold FTS5 - full conversation history
-        
+
+        Note: "cold" (FTS5 full conversation history) is not yet integrated into
+        MemoryBus recall.  Pass include_sources=("shared", "vector") explicitly or
+        rely on the default; do NOT pass "cold" — it is silently ignored.
+
         Results are deduplicated and sorted by combined relevance score.
-        
+
         Args:
             query:    Natural language query
             agent_id: Requesting agent's ID
             k:        Maximum number of results
             project:  Project context for scoped memories
-            
+
         Returns:
             List of Memory objects sorted by relevance (highest first)
         """
