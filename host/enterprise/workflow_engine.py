@@ -3,11 +3,12 @@ Workflow Engine — Phase 3 Enterprise Suite
 
 DAG-based task orchestration for multi-step agent workflows.
 """
+import collections
 import inspect
 import time
 import logging
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import Optional, Dict, List, Callable, Any
 
@@ -20,6 +21,13 @@ class StepStatus(str, Enum):
     SUCCESS   = "success"
     FAILED    = "failed"
     SKIPPED   = "skipped"
+
+
+class RunStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCESS = "success"
+    FAILED  = "failed"
 
 
 @dataclass
@@ -41,7 +49,7 @@ class WorkflowRun:
     workflow_id: str
     name: str
     steps: Dict[str, WorkflowStep]
-    status: str = "pending"
+    status: RunStatus = RunStatus.PENDING
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
     context: Dict[str, Any] = field(default_factory=dict)
@@ -86,18 +94,24 @@ class WorkflowDAG:
         return decorator
 
     def _topo_sort(self) -> List[str]:
-        """Topological sort of steps."""
+        """Iterative topological sort of steps."""
         visited = set()
         order = []
 
-        def visit(name):
+        def visit(name, visiting=None):
+            if visiting is None:
+                visiting = set()
             if name in visited:
                 return
-            visited.add(name)
+            if name in visiting:
+                return  # cycle, skip
+            visiting.add(name)
             step = self._steps.get(name)
             if step:
                 for dep in step.depends_on:
-                    visit(dep)
+                    visit(dep, visiting)
+            visiting.discard(name)
+            visited.add(name)
             order.append(name)
 
         for name in self._steps:
@@ -105,58 +119,87 @@ class WorkflowDAG:
         return order
 
     async def run(self, initial_context: Optional[Dict] = None) -> WorkflowRun:
-        """Execute all steps in dependency order."""
+        """Execute all steps in dependency order, running independent steps in parallel."""
         import uuid
         run = WorkflowRun(
             workflow_id=str(uuid.uuid4())[:8],
             name=self.name,
-            steps={k: v for k, v in self._steps.items()},
+            steps={k: WorkflowStep(**{f.name: getattr(v, f.name) for f in fields(v)})
+                   for k, v in self._steps.items()},
             context=initial_context or {},
             started_at=time.time(),
-            status="running",
+            status=RunStatus.RUNNING,
         )
-        order = self._topo_sort()
-        for step_name in order:
-            step = run.steps.get(step_name)
-            if not step:
-                continue
-            # Check dependencies
-            all_ok = all(
-                run.steps.get(dep, WorkflowStep("", lambda ctx: None)).status == StepStatus.SUCCESS
-                for dep in step.depends_on
-            )
-            if not all_ok:
-                step.status = StepStatus.SKIPPED
-                logger.warning(f"Step '{step_name}' skipped (deps failed)")
-                continue
-            step.status = StepStatus.RUNNING
-            step.started_at = time.time()
-            for attempt in range(step.retries + 1):
-                try:
-                    if inspect.iscoroutinefunction(step.fn):
-                        coro_or_future = step.fn(run.context)
-                    else:
-                        # Wrap sync callables so asyncio.wait_for can handle them
-                        loop = asyncio.get_running_loop()
-                        coro_or_future = loop.run_in_executor(None, step.fn, run.context)
-                    result = await asyncio.wait_for(coro_or_future, timeout=step.timeout)
-                    step.result = result
-                    step.status = StepStatus.SUCCESS
-                    run.context[step_name] = result
-                    logger.info(f"Step '{step_name}' succeeded")
-                    break
-                except asyncio.TimeoutError:
-                    step.error = f"Timeout after {step.timeout}s"
-                    logger.error(f"Step '{step_name}' timed out (attempt {attempt+1})")
-                except Exception as e:
-                    step.error = str(e)
-                    logger.error(f"Step '{step_name}' failed: {e} (attempt {attempt+1})")
-                if attempt == step.retries:
-                    step.status = StepStatus.FAILED
-            step.finished_at = time.time()
+
+        # Build dependency map
+        remaining = set(run.steps.keys())
+
+        while remaining:
+            # Find all steps whose dependencies are satisfied
+            ready = {
+                name for name in remaining
+                if all(
+                    (s := run.steps.get(dep)) is not None and
+                    s.status == StepStatus.SUCCESS
+                    for dep in run.steps[name].depends_on
+                )
+            }
+
+            # Check for steps that can never run (deps failed/skipped)
+            blocked = set()
+            for name in remaining - ready:
+                step = run.steps[name]
+                for dep in step.depends_on:
+                    dep_step = run.steps.get(dep)
+                    if dep_step and dep_step.status in (StepStatus.FAILED, StepStatus.SKIPPED):
+                        step.status = StepStatus.SKIPPED
+                        blocked.add(name)
+                        break
+
+            remaining -= blocked
+
+            if not ready:
+                if remaining:
+                    # Deadlock - mark remaining as failed
+                    for name in remaining:
+                        run.steps[name].status = StepStatus.FAILED
+                        run.steps[name].error = "Deadlock: unsatisfied dependencies"
+                break
+
+            remaining -= ready
+
+            # Run all ready steps IN PARALLEL
+            async def run_step(step_name):
+                step = run.steps[step_name]
+                step.status = StepStatus.RUNNING
+                step.started_at = time.time()
+                for attempt in range(step.retries + 1):
+                    try:
+                        if inspect.iscoroutinefunction(step.fn):
+                            coro = step.fn(run.context)
+                        else:
+                            loop = asyncio.get_running_loop()
+                            coro = loop.run_in_executor(None, step.fn, run.context)
+                        result = await asyncio.wait_for(coro, timeout=step.timeout)
+                        step.result = result
+                        step.status = StepStatus.SUCCESS
+                        run.context[step_name] = result
+                        logger.info(f"Step '{step_name}' succeeded")
+                        break
+                    except asyncio.TimeoutError:
+                        step.error = f"Timeout after {step.timeout}s"
+                        logger.error(f"Step '{step_name}' timed out (attempt {attempt+1})")
+                    except Exception as e:
+                        step.error = str(e)
+                        logger.error(f"Step '{step_name}' failed: {e} (attempt {attempt+1})")
+                    if attempt == step.retries:
+                        step.status = StepStatus.FAILED
+                step.finished_at = time.time()
+
+            await asyncio.gather(*[run_step(name) for name in ready])
 
         failed = [n for n, s in run.steps.items() if s.status == StepStatus.FAILED]
-        run.status = "failed" if failed else "success"
+        run.status = RunStatus.FAILED if failed else RunStatus.SUCCESS
         run.finished_at = time.time()
         return run
 
@@ -166,7 +209,7 @@ class WorkflowEngine:
 
     def __init__(self):
         self._dags: Dict[str, WorkflowDAG] = {}
-        self._history: List[WorkflowRun] = []
+        self._history: collections.deque = collections.deque(maxlen=1000)
 
     def register(self, dag: WorkflowDAG):
         self._dags[dag.name] = dag
@@ -188,4 +231,5 @@ class WorkflowEngine:
         return list(self._dags.keys())
 
     def history(self, limit: int = 20) -> List[WorkflowRun]:
-        return self._history[-limit:]
+        history_list = list(self._history)
+        return history_list[-limit:]

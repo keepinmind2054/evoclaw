@@ -46,15 +46,19 @@ class CrossBotMessage:
     protocol: str = PROTOCOL_VERSION
     signature: Optional[str] = None
 
+    def _signing_body(self) -> str:
+        ts_ms = int(self.timestamp * 1000)  # integer ms, no float precision issues
+        return f"{self.msg_id}:{self.from_bot_id}:{ts_ms}:{json.dumps(self.payload, sort_keys=True)}"
+
     def sign(self, secret: str) -> "CrossBotMessage":
-        body = f"{self.msg_id}:{self.from_bot_id}:{self.timestamp}:{json.dumps(self.payload, sort_keys=True)}"
+        body = self._signing_body()
         self.signature = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
         return self
 
     def verify(self, secret: str) -> bool:
         if not self.signature:
             return False
-        body = f"{self.msg_id}:{self.from_bot_id}:{self.timestamp}:{json.dumps(self.payload, sort_keys=True)}"
+        body = self._signing_body()
         expected = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
         return hmac.compare_digest(self.signature, expected)
 

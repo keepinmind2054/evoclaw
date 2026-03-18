@@ -7,7 +7,7 @@ import os
 import json
 import logging
 from typing import Optional, List, Dict, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +20,8 @@ class JiraIssue:
     assignee: Optional[str] = None
     priority: str = "Medium"
     description: str = ""
-    labels: List[str] = None
+    labels: List[str] = field(default_factory=list)
     url: str = ""
-
-    def __post_init__(self):
-        if self.labels is None:
-            self.labels = []
 
 
 class JiraConnector:
@@ -68,16 +64,24 @@ class JiraConnector:
     def _get(self, path: str, params: Optional[Dict] = None) -> Optional[Dict]:
         if not self._session:
             return None
-        r = self._session.get(f"{self.base_url}/rest/api/3{path}", params=params)
-        r.raise_for_status()
-        return r.json()
+        try:
+            r = self._session.get(f"{self.base_url}/rest/api/3{path}", params=params)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            logger.error(f"Jira GET {path} failed: {e}")
+            return None
 
     def _post(self, path: str, data: Dict) -> Optional[Dict]:
         if not self._session:
             return None
-        r = self._session.post(f"{self.base_url}/rest/api/3{path}", json=data)
-        r.raise_for_status()
-        return r.json()
+        try:
+            r = self._session.post(f"{self.base_url}/rest/api/3{path}", json=data)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            logger.error(f"Jira POST {path} failed: {e}")
+            return None
 
     def create_issue(
         self,

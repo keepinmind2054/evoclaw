@@ -12,6 +12,7 @@ import hashlib
 import json
 import time
 import sqlite3
+import threading
 import logging
 from dataclasses import dataclass, field, asdict
 from typing import Optional, Dict, List
@@ -55,138 +56,152 @@ class BotIdentity:
 class BotRegistry:
     """Persistent registry of known bots across frameworks."""
 
+    _BOT_COLS = ["bot_id", "name", "display_name", "framework", "channel",
+                 "capabilities", "ws_endpoint", "http_endpoint", "public_key",
+                 "registered_at", "last_seen", "trusted"]
+
     def __init__(self, db_path: Optional[str] = None):
         if db_path is None:
             db_path = str(Path.home() / ".evoclaw" / "bot_registry.db")
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.db_path = db_path
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._lock = threading.Lock()
         self._init_db()
         logger.info(f"BotRegistry initialized at {db_path}")
 
     def _init_db(self):
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS bots (
-                bot_id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                display_name TEXT,
-                framework TEXT NOT NULL,
-                channel TEXT NOT NULL,
-                capabilities TEXT DEFAULT '[]',
-                ws_endpoint TEXT,
-                http_endpoint TEXT,
-                public_key TEXT,
-                registered_at REAL,
-                last_seen REAL,
-                trusted INTEGER DEFAULT 0
-            )
-        """)
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS bot_handshakes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                initiator_bot_id TEXT NOT NULL,
-                target_bot_id TEXT NOT NULL,
-                status TEXT DEFAULT 'pending',
-                initiated_at REAL,
-                completed_at REAL,
-                nonce TEXT
-            )
-        """)
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS bots (
+                    bot_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    display_name TEXT,
+                    framework TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    capabilities TEXT DEFAULT '[]',
+                    ws_endpoint TEXT,
+                    http_endpoint TEXT,
+                    public_key TEXT,
+                    registered_at REAL,
+                    last_seen REAL,
+                    trusted INTEGER DEFAULT 0
+                )
+            """)
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS bot_handshakes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    initiator_bot_id TEXT NOT NULL,
+                    target_bot_id TEXT NOT NULL,
+                    status TEXT DEFAULT 'pending',
+                    initiated_at REAL,
+                    completed_at REAL,
+                    nonce TEXT
+                )
+            """)
+            self._conn.commit()
 
     def register(self, identity: BotIdentity) -> BotIdentity:
-        self._conn.execute("""
-            INSERT INTO bots
-                (bot_id,name,display_name,framework,channel,capabilities,
-                 ws_endpoint,http_endpoint,public_key,registered_at,last_seen,trusted)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-            ON CONFLICT(bot_id) DO UPDATE SET
-                display_name=excluded.display_name,
-                ws_endpoint=excluded.ws_endpoint,
-                http_endpoint=excluded.http_endpoint,
-                last_seen=excluded.last_seen,
-                capabilities=excluded.capabilities
-        """, (
-            identity.bot_id, identity.name, identity.display_name,
-            identity.framework, identity.channel,
-            json.dumps(identity.capabilities),
-            identity.ws_endpoint, identity.http_endpoint,
-            identity.public_key, identity.registered_at,
-            identity.last_seen, int(identity.trusted)
-        ))
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute("""
+                INSERT INTO bots
+                    (bot_id,name,display_name,framework,channel,capabilities,
+                     ws_endpoint,http_endpoint,public_key,registered_at,last_seen,trusted)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(bot_id) DO UPDATE SET
+                    display_name=excluded.display_name,
+                    ws_endpoint=excluded.ws_endpoint,
+                    http_endpoint=excluded.http_endpoint,
+                    last_seen=excluded.last_seen,
+                    capabilities=excluded.capabilities
+            """, (
+                identity.bot_id, identity.name, identity.display_name,
+                identity.framework, identity.channel,
+                json.dumps(identity.capabilities),
+                identity.ws_endpoint, identity.http_endpoint,
+                identity.public_key, identity.registered_at,
+                identity.last_seen, int(identity.trusted)
+            ))
+            self._conn.commit()
         logger.info(f"Registered bot: {identity.name} ({identity.bot_id})")
         return identity
 
     def lookup(self, bot_id: str) -> Optional[BotIdentity]:
-        row = self._conn.execute(
-            "SELECT * FROM bots WHERE bot_id=?", (bot_id,)
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM bots WHERE bot_id=?", (bot_id,)
+            ).fetchone()
         return self._row_to_identity(row) if row else None
 
     def lookup_by_name(self, name: str) -> Optional[BotIdentity]:
-        row = self._conn.execute(
-            "SELECT * FROM bots WHERE lower(name)=lower(?) OR lower(display_name)=lower(?)",
-            (name, name)
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM bots WHERE lower(name)=lower(?) OR lower(display_name)=lower(?)",
+                (name, name)
+            ).fetchone()
         return self._row_to_identity(row) if row else None
 
     def list_all(self) -> List[BotIdentity]:
-        rows = self._conn.execute("SELECT * FROM bots ORDER BY registered_at").fetchall()
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM bots ORDER BY registered_at").fetchall()
         return [self._row_to_identity(r) for r in rows]
 
     def list_trusted(self) -> List[BotIdentity]:
-        rows = self._conn.execute(
-            "SELECT * FROM bots WHERE trusted=1 ORDER BY registered_at"
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM bots WHERE trusted=1 ORDER BY registered_at"
+            ).fetchall()
         return [self._row_to_identity(r) for r in rows]
 
     def trust(self, bot_id: str) -> bool:
-        cur = self._conn.execute(
-            "UPDATE bots SET trusted=1 WHERE bot_id=?", (bot_id,)
-        )
-        self._conn.commit()
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE bots SET trusted=1 WHERE bot_id=?", (bot_id,)
+            )
+            self._conn.commit()
         return cur.rowcount > 0
 
     def initiate_handshake(self, initiator_id: str, target_id: str) -> str:
         import secrets
         nonce = secrets.token_hex(16)
-        self._conn.execute("""
-            INSERT INTO bot_handshakes
-                (initiator_bot_id,target_bot_id,status,initiated_at,nonce)
-            VALUES (?,?,?,?,?)
-        """, (initiator_id, target_id, "pending", time.time(), nonce))
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute("""
+                INSERT INTO bot_handshakes
+                    (initiator_bot_id,target_bot_id,status,initiated_at,nonce)
+                VALUES (?,?,?,?,?)
+            """, (initiator_id, target_id, "pending", time.time(), nonce))
+            self._conn.commit()
         return nonce
 
     def complete_handshake(self, initiator_id: str, target_id: str, nonce: str) -> bool:
-        row = self._conn.execute("""
-            SELECT id FROM bot_handshakes
-            WHERE initiator_bot_id=? AND target_bot_id=? AND nonce=? AND status='pending'
-        """, (initiator_id, target_id, nonce)).fetchone()
-        if not row:
-            logger.warning(f"Handshake failed: {initiator_id} -> {target_id}")
-            return False
-        self._conn.execute("""
-            UPDATE bot_handshakes SET status='completed', completed_at=? WHERE id=?
-        """, (time.time(), row[0]))
-        self._conn.execute(
-            "UPDATE bots SET trusted=1 WHERE bot_id IN (?,?)",
-            (initiator_id, target_id)
-        )
-        self._conn.commit()
+        with self._lock:
+            row = self._conn.execute("""
+                SELECT id FROM bot_handshakes
+                WHERE initiator_bot_id=? AND target_bot_id=? AND nonce=? AND status='pending'
+            """, (initiator_id, target_id, nonce)).fetchone()
+            if not row:
+                logger.warning(f"Handshake failed: {initiator_id} -> {target_id}")
+                return False
+            self._conn.execute("""
+                UPDATE bot_handshakes SET status='completed', completed_at=? WHERE id=?
+            """, (time.time(), row[0]))
+            self._conn.execute(
+                "UPDATE bots SET trusted=1 WHERE bot_id IN (?,?)",
+                (initiator_id, target_id)
+            )
+            self._conn.commit()
         logger.info(f"Handshake completed: {initiator_id} <-> {target_id}")
         return True
 
     def update_last_seen(self, bot_id: str):
-        self._conn.execute(
-            "UPDATE bots SET last_seen=? WHERE bot_id=?", (time.time(), bot_id)
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE bots SET last_seen=? WHERE bot_id=?", (time.time(), bot_id)
+            )
+            self._conn.commit()
 
     def _row_to_identity(self, row) -> BotIdentity:
-        cols = [d[0] for d in self._conn.execute("SELECT * FROM bots LIMIT 0").description]
-        d = dict(zip(cols, row))
+        d = dict(zip(self._BOT_COLS, row))
         d["capabilities"] = json.loads(d.get("capabilities") or "[]")
         d["trusted"] = bool(d.get("trusted", 0))
         return BotIdentity.from_dict(d)

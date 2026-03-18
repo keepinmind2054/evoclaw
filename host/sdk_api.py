@@ -93,6 +93,18 @@ class SdkApi:
         self._running = False
         self._task_submit_callback = None
         self._bot_registry = bot_registry  # Phase 3: BotRegistry
+        self._handlers = {
+            "ping":           self._handle_ping,
+            "memory_query":   self._handle_memory_query,
+            "memory_write":   self._handle_memory_write,
+            "agent_list":     self._handle_agent_list,
+            "bot_register":   self._handle_bot_register,
+            "bot_lookup":     self._handle_bot_lookup,
+            "bot_list":       self._handle_bot_list,
+            "bot_handshake":  self._handle_bot_handshake,
+            "system_status":  self._handle_system_status,
+            "task_submit":    self._handle_task_submit,
+        }
 
     async def start(self):
         """Start the SDK API WebSocket server."""
@@ -172,22 +184,7 @@ class SdkApi:
     async def _dispatch(self, websocket, msg: dict):
         """Route incoming message to appropriate handler."""
         msg_type = msg.get("type", "")
-
-        handlers = {
-            "ping":           self._handle_ping,
-            "memory_query":   self._handle_memory_query,
-            "memory_write":   self._handle_memory_write,
-            "agent_list":     self._handle_agent_list,
-            "system_status":  self._handle_system_status,
-            "task_submit":    self._handle_task_submit,
-            # Phase 3: Bot Registry
-            "bot_register":   self._handle_bot_register,
-            "bot_lookup":     self._handle_bot_lookup,
-            "bot_list":       self._handle_bot_list,
-            "bot_handshake":  self._handle_bot_handshake,
-        }
-
-        handler = handlers.get(msg_type)
+        handler = self._handlers.get(msg_type)
         if handler:
             await handler(websocket, msg)
         else:
@@ -282,7 +279,10 @@ class SdkApi:
         """Return system status."""
         try:
             memory_status = self._memory_bus.status()
-            agent_count = len(self._identity_store.list_agents())
+            agent_count_row = self._identity_store._conn.execute(
+                "SELECT COUNT(*) FROM agent_identities"
+            ).fetchone()
+            agent_count = agent_count_row[0] if agent_count_row else 0
             await websocket.send(json.dumps({
                 "type": "system_status",
                 "status": {

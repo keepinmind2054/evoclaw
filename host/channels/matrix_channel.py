@@ -60,7 +60,7 @@ class MatrixChannel:
         self.user_id = user_id or os.getenv("MATRIX_USER_ID", "")
         self.access_token = access_token or os.getenv("MATRIX_ACCESS_TOKEN", "")
         self.default_room = default_room or os.getenv("MATRIX_ROOM_ID", "")
-        self._session = None
+        self._session = None  # Will be created lazily in async context
         self._sync_token: Optional[str] = None
         self._message_handlers: List[Callable] = []
         if self.homeserver and self.access_token:
@@ -72,6 +72,12 @@ class MatrixChannel:
             logger.info(f"Matrix configured: {self.homeserver} as {self.user_id}")
         except ImportError:
             logger.warning("aiohttp not installed — Matrix channel unavailable")
+
+    async def _get_session(self):
+        if self._session is None or self._session.closed:
+            import aiohttp
+            self._session = aiohttp.ClientSession()
+        return self._session
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -91,7 +97,6 @@ class MatrixChannel:
             logger.error("No Matrix room configured")
             return None
         try:
-            import aiohttp
             import uuid
             txn_id = str(uuid.uuid4()).replace("-", "")
             payload = {
@@ -103,15 +108,15 @@ class MatrixChannel:
                 payload["formatted_body"] = formatted
 
             url = f"{self.homeserver}/_matrix/client/v3/rooms/{room}/send/m.room.message/{txn_id}"
-            async with aiohttp.ClientSession() as session:
-                async with session.put(url, headers=self._headers(), json=payload) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return data.get("event_id")
-                    else:
-                        text = await resp.text()
-                        logger.error(f"Matrix send failed: {resp.status} {text}")
-                        return None
+            session = await self._get_session()
+            async with session.put(url, headers=self._headers(), json=payload) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("event_id")
+                else:
+                    text = await resp.text()
+                    logger.error(f"Matrix send failed: {resp.status} {text}")
+                    return None
         except Exception as e:
             logger.error(f"Matrix send error: {e}")
             return None
@@ -120,35 +125,34 @@ class MatrixChannel:
         """Long-poll sync to receive new messages."""
         messages = []
         try:
-            import aiohttp
             params = {"timeout": timeout_ms}
             if self._sync_token:
                 params["since"] = self._sync_token
             url = f"{self.homeserver}/_matrix/client/v3/sync"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=self._headers(), params=params) as resp:
-                    if resp.status != 200:
-                        return messages
-                    data = await resp.json()
-                    self._sync_token = data.get("next_batch")
-                    rooms = data.get("rooms", {}).get("join", {})
-                    for room_id, room_data in rooms.items():
-                        timeline = room_data.get("timeline", {}).get("events", [])
-                        for event in timeline:
-                            if event.get("type") != "m.room.message":
-                                continue
-                            if event.get("sender") == self.user_id:
-                                continue  # skip own messages
-                            content = event.get("content", {})
-                            messages.append(MatrixMessage(
-                                room_id=room_id,
-                                sender=event.get("sender", ""),
-                                body=content.get("body", ""),
-                                event_id=event.get("event_id", ""),
-                                msg_type=content.get("msgtype", "m.text"),
-                                timestamp=event.get("origin_server_ts", 0) / 1000,
-                                formatted_body=content.get("formatted_body"),
-                            ))
+            session = await self._get_session()
+            async with session.get(url, headers=self._headers(), params=params) as resp:
+                if resp.status != 200:
+                    return messages
+                data = await resp.json()
+                self._sync_token = data.get("next_batch")
+                rooms = data.get("rooms", {}).get("join", {})
+                for room_id, room_data in rooms.items():
+                    timeline = room_data.get("timeline", {}).get("events", [])
+                    for event in timeline:
+                        if event.get("type") != "m.room.message":
+                            continue
+                        if event.get("sender") == self.user_id:
+                            continue  # skip own messages
+                        content = event.get("content", {})
+                        messages.append(MatrixMessage(
+                            room_id=room_id,
+                            sender=event.get("sender", ""),
+                            body=content.get("body", ""),
+                            event_id=event.get("event_id", ""),
+                            msg_type=content.get("msgtype", "m.text"),
+                            timestamp=event.get("origin_server_ts", 0) / 1000,
+                            formatted_body=content.get("formatted_body"),
+                        ))
         except Exception as e:
             logger.error(f"Matrix sync error: {e}")
         return messages
@@ -157,17 +161,16 @@ class MatrixChannel:
         """Get list of user IDs in a room."""
         room = room_id or self.default_room
         try:
-            import aiohttp
             url = f"{self.homeserver}/_matrix/client/v3/rooms/{room}/members"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=self._headers()) as resp:
-                    if resp.status != 200:
-                        return []
-                    data = await resp.json()
-                    return [
-                        e["state_key"] for e in data.get("chunk", [])
-                        if e.get("content", {}).get("membership") == "join"
-                    ]
+            session = await self._get_session()
+            async with session.get(url, headers=self._headers()) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+                return [
+                    e["state_key"] for e in data.get("chunk", [])
+                    if e.get("content", {}).get("membership") == "join"
+                ]
         except Exception as e:
             logger.error(f"Matrix get_members error: {e}")
             return []
@@ -175,14 +178,19 @@ class MatrixChannel:
     async def join_room(self, room_id_or_alias: str) -> bool:
         """Join a Matrix room."""
         try:
-            import aiohttp
             url = f"{self.homeserver}/_matrix/client/v3/join/{room_id_or_alias}"
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=self._headers(), json={}) as resp:
-                    return resp.status == 200
+            session = await self._get_session()
+            async with session.post(url, headers=self._headers(), json={}) as resp:
+                return resp.status == 200
         except Exception as e:
             logger.error(f"Matrix join error: {e}")
             return False
+
+    async def close(self):
+        """Close the persistent HTTP session."""
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
 
     def on_message(self, fn: Callable):
         """Register a message handler."""
