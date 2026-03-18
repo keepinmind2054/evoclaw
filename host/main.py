@@ -584,7 +584,7 @@ async def _message_loop() -> None:
     independently, so a successful run for group A can never push the
     shared timestamp past group B's pending messages.
     """
-    global _registered_groups, _per_jid_cursors
+    global _registered_groups, _per_jid_cursors, _running, _self_update_requested
     log.info("Message loop started")
     while _running:
         try:
@@ -634,7 +634,6 @@ async def _message_loop() -> None:
             # ── Self-update flag: restart via os.execv() ────────────────────
             self_update_flag = config.DATA_DIR / "self_update.flag"
             if self_update_flag.exists():
-                global _self_update_requested
                 _self_update_requested = True
                 self_update_flag.unlink(missing_ok=True)
                 log.info("self_update flag detected — initiating graceful restart")
