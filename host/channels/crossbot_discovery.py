@@ -54,12 +54,20 @@ class CrossbotDiscovery:
             msg = CrossBotMessage.from_json(payload)
             if msg.type not in _ALLOWED_HELLO_TYPES:
                 return True  # consumed but ignored
-            if self._protocol.secret and not msg.verify(self._protocol.secret):
-                logger.warning("CrossbotDiscovery: invalid signature from %s", msg.from_bot_id)
-                return True
-            if self._protocol.registry and not self._protocol.registry.lookup(msg.from_bot_id):
-                logger.warning("CrossbotDiscovery: unknown bot %s", msg.from_bot_id)
-                return True
+
+            # Guard 1: HMAC signature check
+            if hasattr(self._protocol, 'secret') and self._protocol.secret:
+                if not msg.verify(self._protocol.secret):
+                    logger.warning("crossbot: rejected hello with invalid signature from author_id=%s", author_id)
+                    return True  # consumed but rejected
+
+            # Guard 2: Registry check
+            if hasattr(self._protocol, 'registry') and self._protocol.registry:
+                identity = self._protocol.registry.lookup(msg.from_bot_id)
+                if identity is None:
+                    logger.warning("crossbot: hello from unregistered bot_id=%s author_id=%s", msg.from_bot_id, author_id)
+                    return True  # consumed but rejected
+
             if msg.type == "hello":
                 # Respond with ack using the original message for context
                 ack = self._protocol.make_ack(msg)
