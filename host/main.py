@@ -56,11 +56,6 @@ from .evolution import check_message as immune_check, evolution_loop
 from .health_monitor import health_monitor_loop
 from .memory import append_warm_log
 
-# Phase 1 (UnifiedClaw): New components — direct imports for main() Phase 1 init block
-from .memory.memory_bus import MemoryBus
-from .ws_bridge import WSBridge
-from .identity.agent_identity import AgentIdentityStore
-
 # Phase 1 (UnifiedClaw): Universal Memory Bus + WSBridge + Agent Identity (guarded)
 try:
     from .memory.memory_bus import MemoryBus as _MemoryBus
@@ -150,12 +145,10 @@ def _setup_logging() -> None:
     LOG_FORMAT=text  → human-readable text (default)
     LOG_LEVEL        → logging level (default: INFO)
     """
-    import os
     from host.log_formatter import JsonFormatter
 
-    level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
-    log_format = os.environ.get("LOG_FORMAT", "text").lower()
+    level = getattr(logging, config.LOG_LEVEL, logging.INFO)
+    log_format = config.LOG_FORMAT
 
     handler = logging.StreamHandler()
 
@@ -460,13 +453,14 @@ async def _process_group_messages(group: dict, messages: list[dict],
 
     # Phase 1 (UnifiedClaw): Track agent identity per group
     try:
-        _channel_name = group.get("channel", "unknown")
-        _identity = _identity_store.get_or_create(
-            name=folder,
-            project="evoclaw",
-            channel=_channel_name,
-        )
-        _identity_store.increment_message_count(_identity.agent_id)
+        if _identity_store is not None:
+            _channel_name = group.get("channel", "unknown")
+            _identity = _identity_store.get_or_create(
+                name=folder,
+                project="evoclaw",
+                channel=_channel_name,
+            )
+            _identity_store.increment_message_count(_identity.agent_id)
     except Exception as _id_exc:
         log.debug("Phase 1: identity tracking failed (non-fatal): %s", _id_exc)
 
@@ -799,7 +793,6 @@ async def main() -> None:
                 # Forward fitness to evolution engine
                 pass  # TODO: wire to evolution/fitness.py
 
-            asyncio.create_task(_ws_bridge.start())
             print(f"[Phase1] MemoryBus | WSBridge (port {_ws_bridge.port}) | AgentIdentityStore initialized")
         except Exception as _e:
             print(f"[Phase1] Initialization failed (non-fatal): {_e}")
@@ -857,15 +850,6 @@ async def main() -> None:
         db.prune_old_logs(days=30)
     except Exception as _prune_exc:
         log.warning("Log pruning failed (non-fatal): %s", _prune_exc)
-
-    # Phase 1 (UnifiedClaw): Initialize MemoryBus, AgentIdentityStore, WSBridge
-    _groups_dir = Path(os.environ.get("GROUPS_DIR", str(config.GROUPS_DIR)))
-    _db_conn = db.get_connection()
-    _memory_bus = MemoryBus(conn=_db_conn, groups_dir=_groups_dir)
-    _identity_store = AgentIdentityStore(conn=_db_conn)
-    _ws_bridge = WSBridge(memory_bus=_memory_bus)
-    log.info("Phase 1: MemoryBus initialized | %s", _memory_bus.status())
-    log.info("Phase 1: WSBridge ready on port %s", _ws_bridge.port)
 
     # 啟動 Web dashboard（背景 daemon thread，port DASHBOARD_PORT）
     start_dashboard(_stop_event)

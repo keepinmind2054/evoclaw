@@ -20,6 +20,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_SKILL_STEPS_DAG = "_skill_steps"
+
 
 class StepStatus(str, Enum):
     PENDING   = "pending"
@@ -310,11 +312,10 @@ class WorkflowEngine:
                 return {"error": str(exc), "skill": skill_name, "step": name}
 
         # Ensure a DAG exists for ad-hoc skill steps
-        _DAG_NAME = "_skill_steps"
-        if _DAG_NAME not in self._dags:
-            self._dags[_DAG_NAME] = WorkflowDAG(_DAG_NAME)
+        if _SKILL_STEPS_DAG not in self._dags:
+            self._dags[_SKILL_STEPS_DAG] = WorkflowDAG(_SKILL_STEPS_DAG)
 
-        dag = self._dags[_DAG_NAME]
+        dag = self._dags[_SKILL_STEPS_DAG]
         dag._steps[name] = WorkflowStep(
             name=name,
             fn=skill_step_fn,
@@ -327,4 +328,4 @@ class WorkflowEngine:
 
     async def run_skill_steps(self, context: Optional[Dict] = None) -> Optional[WorkflowRun]:
         """Execute all skill steps registered via add_skill_step()."""
-        return await self.run("_skill_steps", context)
+        return await self.run(_SKILL_STEPS_DAG, context)
