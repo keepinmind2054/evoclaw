@@ -29,6 +29,10 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
 ]
+# Phase 4C: install with: pip install evoclaw[postgresql]
+postgresql = [
+    "psycopg2-binary>=2.9.0",  # optional, for PostgreSQL support (DATABASE_URL=postgresql://...)
+]
 
 [project.scripts]
 evoclaw = "host.main:main"

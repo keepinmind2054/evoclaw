@@ -122,6 +122,9 @@ EDITABLE_ENV_KEYS: frozenset = frozenset({
 })
 
 
+# Database (optional — defaults to SQLite)
+DATABASE_URL: str = os.environ.get("DATABASE_URL", "")  # e.g. postgresql://user:pass@host:5432/dbname
+
 # Multi-instance Leader Election
 LEADER_ELECTION_ENABLED: bool = os.environ.get("LEADER_ELECTION_ENABLED", "false").lower() == "true"
 LEADER_HEARTBEAT_INTERVAL: int = int(os.environ.get("LEADER_HEARTBEAT_INTERVAL", "10"))
