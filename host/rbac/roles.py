@@ -40,23 +40,23 @@ class Role(str, Enum):
 
 
 ROLE_PERMISSIONS: dict = {
-    Role.ADMIN:    set(Permission),
-    Role.OPERATOR: {
+    Role.ADMIN:    frozenset(Permission),
+    Role.OPERATOR: frozenset({
         Permission.MEMORY_READ, Permission.MEMORY_WRITE,
         Permission.AGENT_SPAWN, Permission.AGENT_KILL, Permission.AGENT_LIST,
         Permission.TASK_SUBMIT, Permission.TASK_CANCEL,
         Permission.REGISTRY_READ,
-    },
-    Role.AGENT: {
+    }),
+    Role.AGENT: frozenset({
         Permission.MEMORY_READ, Permission.MEMORY_WRITE,
         Permission.AGENT_LIST, Permission.TASK_SUBMIT,
         Permission.REGISTRY_READ,
-    },
-    Role.VIEWER: {
+    }),
+    Role.VIEWER: frozenset({
         Permission.MEMORY_READ,
         Permission.AGENT_LIST,
         Permission.REGISTRY_READ,
-    },
+    }),
 }
 
 
@@ -156,7 +156,7 @@ class RBACStore:
         roles = self.get_roles(subject_id)
         perms: Set[Permission] = set()
         for role in roles:
-            perms.update(ROLE_PERMISSIONS.get(role, set()))
+            perms.update(ROLE_PERMISSIONS.get(role, frozenset()))
         return perms
 
     def has_permission(self, subject_id: str, permission: Permission) -> bool:

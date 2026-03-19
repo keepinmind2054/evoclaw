@@ -67,6 +67,7 @@ class BotRegistry:
         self.db_path = db_path
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._lock = threading.Lock()
+        self._pending_handshakes: Dict[str, List[float]] = {}
         self._init_db()
         logger.info(f"BotRegistry initialized at {db_path}")
 
@@ -163,13 +164,21 @@ class BotRegistry:
 
     def initiate_handshake(self, initiator_id: str, target_id: str) -> str:
         import secrets
+        # Rate limiting: allow at most 5 handshake attempts per target within 300s
+        now = time.time()
+        timestamps = self._pending_handshakes.setdefault(target_id, [])
+        # Prune timestamps older than 300 seconds
+        self._pending_handshakes[target_id] = [t for t in timestamps if now - t < 300]
+        if len(self._pending_handshakes[target_id]) >= 5:
+            raise RuntimeError("Handshake rate limit exceeded for target")
+        self._pending_handshakes[target_id].append(now)
         nonce = secrets.token_hex(16)
         with self._lock:
             self._conn.execute("""
                 INSERT INTO bot_handshakes
                     (initiator_bot_id,target_bot_id,status,initiated_at,nonce)
                 VALUES (?,?,?,?,?)
-            """, (initiator_id, target_id, "pending", time.time(), nonce))
+            """, (initiator_id, target_id, "pending", now, nonce))
             self._conn.commit()
         return nonce
 

@@ -8,7 +8,7 @@ try:
 except ImportError:
     pass
 try:
-    from .workflow_engine import WorkflowEngine, WorkflowStep, WorkflowDAG
+    from .workflow_engine import WorkflowEngine, WorkflowStep, WorkflowDAG, WorkflowRun
 except ImportError:
     pass
 try:

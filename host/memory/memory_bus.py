@@ -32,7 +32,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Dict, Literal, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -370,11 +370,10 @@ class MemoryBus:
             print(f"[{m.source}] {m.content} (score={m.score:.2f})")
     """
 
-    _hot_memory_locks: dict = {}  # {agent_id: asyncio.Lock}
-
     def __init__(self, conn: sqlite3.Connection, groups_dir: Path):
         self._conn = conn
         self._groups_dir = groups_dir
+        self._hot_memory_locks: Dict[str, asyncio.Lock] = {}
         self.shared = SharedMemoryStore(conn)
         self.vector = VectorStore(conn)
         logger.info(
@@ -502,9 +501,8 @@ class MemoryBus:
             patch:      Text to append to MEMORY.md
             max_bytes:  Maximum file size (default 8KB)
         """
-        if agent_id not in self._hot_memory_locks:
-            self._hot_memory_locks[agent_id] = asyncio.Lock()
-        async with self._hot_memory_locks[agent_id]:
+        lock = self._hot_memory_locks.setdefault(agent_id, asyncio.Lock())
+        async with lock:
             memory_file = self._groups_dir / agent_id / "MEMORY.md"
             try:
                 memory_file.parent.mkdir(parents=True, exist_ok=True)

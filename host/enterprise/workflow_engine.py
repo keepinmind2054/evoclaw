@@ -4,6 +4,7 @@ Workflow Engine — Phase 3 Enterprise Suite
 DAG-based task orchestration for multi-step agent workflows.
 """
 import collections
+import copy
 import inspect
 import time
 import logging
@@ -94,7 +95,7 @@ class WorkflowDAG:
         return decorator
 
     def _topo_sort(self) -> List[str]:
-        """Iterative topological sort of steps."""
+        """Iterative topological sort of steps. Raises ValueError if a cycle is detected."""
         visited = set()
         order = []
 
@@ -104,7 +105,7 @@ class WorkflowDAG:
             if name in visited:
                 return
             if name in visiting:
-                return  # cycle, skip
+                raise ValueError(f"Cycle detected in workflow graph")
             visiting.add(name)
             step = self._steps.get(name)
             if step:
@@ -177,8 +178,8 @@ class WorkflowDAG:
                 step = run.steps[step_name]
                 step.status = StepStatus.RUNNING
                 step.started_at = time.time()
-                # Pass a read-only snapshot so no step sees a sibling's partial write
-                ctx_snapshot = dict(run.context)
+                # Pass a deep copy snapshot so no step sees a sibling's partial write
+                ctx_snapshot = copy.deepcopy(run.context)
                 for attempt in range(step.retries + 1):
                     try:
                         if inspect.iscoroutinefunction(step.fn):
