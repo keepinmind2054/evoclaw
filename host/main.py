@@ -191,6 +191,14 @@ _self_update_requested: bool = False
 # 共用的停止事件：shutdown 時 set()，讓所有等待中的 sleep 立即醒來
 _stop_event: asyncio.Event | None = None
 
+# Leader election instance; None when leader election is disabled.
+# Set in main() after initialization; read by _message_loop to gate processing.
+_leader = None
+
+# RBAC store instance; None when Phase 3 is not available or not yet initialized.
+# Set in main() after initialization; read by _on_message to gate message pipeline.
+_rbac_store = None
+
 # 允許傳送訊息的發送者白名單（phone number 或 JID 集合）
 _sender_allowlist: set[str] = set()
 
@@ -402,6 +410,22 @@ async def _on_message(jid: str, sender: str, sender_name: str, content: str,
     if not is_sender_allowed(sender, _sender_allowlist):
         log.debug(f"Sender {sender} blocked by allowlist")
         return
+
+    # RBAC enforcement: check that the sender has TASK_SUBMIT permission before
+    # allowing the message into the pipeline.  When _rbac_store is None (Phase 3
+    # not available or not yet initialized) we fall through and allow all messages
+    # so the system degrades gracefully rather than blocking all traffic.
+    if _rbac_store is not None:
+        try:
+            from .rbac.roles import Permission as _Permission
+            if not _rbac_store.has_permission(sender, _Permission.TASK_SUBMIT):
+                log.warning(
+                    "RBAC: sender %s lacks task:submit permission — message rejected (jid=%s)",
+                    sender, jid,
+                )
+                return
+        except Exception as _rbac_exc:
+            log.debug("RBAC check failed (non-fatal, allowing message): %s", _rbac_exc)
 
     # Per-group rate limit: drop excess messages to prevent one group from
     # starving others.  Logged at DEBUG to avoid log spam under sustained load.
@@ -654,6 +678,16 @@ async def _message_loop() -> None:
     log.info("Message loop started")
     while _running:
         try:
+            # Leader-gate: skip message processing when another instance holds the lock.
+            # If _leader is None, leader election is disabled and we always process.
+            if _leader is not None and not _leader.is_leader:
+                log.debug("Not leader, skipping message poll cycle")
+                try:
+                    await asyncio.wait_for(_stop_event.wait(), timeout=config.POLL_INTERVAL)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+
             # 偵測是否有 refresh_groups.flag 旗標檔，有的話重新從 DB 載入群組清單
             # 這讓 IPC watcher 可以在不重啟程序的情況下動態新增群組
             refresh_flag = config.DATA_DIR / "refresh_groups.flag"
@@ -809,6 +843,9 @@ async def main() -> None:
         except Exception as _e3:
             print(f"[Phase2] Initialization failed (non-fatal): {_e3}")
 
+    global _registered_groups, _sender_allowlist, _stop_event, _group_fail_lock, _dedup_lock
+    global _startup_time, _HEARTBEAT_INTERVAL, _last_heartbeat, _leader, _rbac_store
+
     # Phase 3: Bot Registry + RBAC
     _bot_registry = None
     _rbac_store = None
@@ -820,9 +857,6 @@ async def main() -> None:
             print(f"[Phase3] BotRegistry + RBAC initialized")
         except Exception as _e4:
             print(f"[Phase3] Initialization failed (non-fatal): {_e4}")
-
-    global _registered_groups, _sender_allowlist, _stop_event, _group_fail_lock, _dedup_lock
-    global _startup_time, _HEARTBEAT_INTERVAL, _last_heartbeat
     _stop_event = asyncio.Event()
     _group_fail_lock = asyncio.Lock()
     _dedup_lock = asyncio.Lock()
