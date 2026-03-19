@@ -34,6 +34,8 @@ MSG_STATUS        = "status"
 MSG_PING          = "ping"
 MSG_PONG          = "pong"
 
+_ALLOWED_MSG_TYPES = frozenset({"hello", "ack", "message", "heartbeat", "query", "response"})
+
 
 @dataclass
 class CrossBotMessage:
@@ -147,6 +149,9 @@ class CrossBotProtocol:
             return None
         if not msg.protocol.startswith("crossbot/"):
             logger.warning(f"Unknown protocol: {msg.protocol}")
+            return None
+        if msg.type not in _ALLOWED_MSG_TYPES:
+            logger.warning("Rejected unknown message type: %s", msg.type)
             return None
         if self.registry:
             self.registry.update_last_seen(msg.from_bot_id)
