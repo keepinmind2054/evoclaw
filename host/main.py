@@ -56,10 +56,43 @@ from .evolution import check_message as immune_check, evolution_loop
 from .health_monitor import health_monitor_loop
 from .memory import append_warm_log
 
-# Phase 1 (UnifiedClaw): New components
+# Phase 1 (UnifiedClaw): New components — direct imports for main() Phase 1 init block
 from .memory.memory_bus import MemoryBus
 from .ws_bridge import WSBridge
 from .identity.agent_identity import AgentIdentityStore
+
+# Phase 1 (UnifiedClaw): Universal Memory Bus + WSBridge + Agent Identity (guarded)
+try:
+    from .memory.memory_bus import MemoryBus as _MemoryBus
+    from .identity.agent_identity import AgentIdentityStore as _AgentIdentityStore
+    from .ws_bridge import WSBridge as _WSBridge
+    _PHASE1_AVAILABLE = True
+except ImportError as _e:
+    _PHASE1_AVAILABLE = False
+    print(f"[Phase1] Components not available: {_e}")
+
+# Phase 2 (UnifiedClaw): SDK API + Memory Summarizer
+try:
+    from .sdk_api import SdkApi as _SdkApi
+    from .memory.summarizer import MemorySummarizer as _MemorySummarizer
+    _PHASE2_AVAILABLE = True
+except ImportError as _e2:
+    _PHASE2_AVAILABLE = False
+    _SdkApi = None
+    _MemorySummarizer = None
+    print(f"[Phase2] Components not available: {_e2}")
+
+# Phase 3: Bot Registry + RBAC
+try:
+    from .identity.bot_registry import BotRegistry as _BotRegistry, bootstrap_known_bots as _bootstrap_bots
+    from .rbac.roles import RBACStore as _RBACStore
+    _PHASE3_AVAILABLE = True
+except ImportError as _e3p:
+    _PHASE3_AVAILABLE = False
+    _BotRegistry = None
+    _bootstrap_bots = None
+    _RBACStore = None
+    print(f"[Phase3] Components not available: {_e3p}")
 
 
 async def _discord_notify(content: str) -> None:
@@ -476,7 +509,14 @@ async def _process_group_messages(group: dict, messages: list[dict],
     prompt = format_messages(messages, config.TIMEZONE)
     session_id = db.get_session(folder)
 
-    log.info(f"Processing {len(messages)} message(s) for {folder}")
+    # Generate a short run_id so all log lines for this agent invocation can be correlated
+    run_id = str(uuid.uuid4())[:8]
+
+    log.info(
+        "Processing %d message(s) for %s",
+        len(messages), folder,
+        extra={"run_id": run_id, "jid": jid, "folder": folder},
+    )
 
     # Capture prompt text for warm memory logging (join all new message contents)
     _user_prompt_text = " ".join(m.get("content", "") for m in messages if m.get("content", "").strip())
@@ -550,6 +590,10 @@ async def _process_group_messages(group: dict, messages: list[dict],
         if on_success:
             await on_success()
 
+    log.debug(
+        "Invoking container agent",
+        extra={"run_id": run_id, "jid": jid, "folder": folder, "session_id": session_id},
+    )
     try:
         result = await asyncio.wait_for(
             run_container_agent(
@@ -565,13 +609,19 @@ async def _process_group_messages(group: dict, messages: list[dict],
         )
         # run_container_agent returns {"status": "error", ...} when no output markers found
         if not _run_succeeded and isinstance(result, dict) and result.get("status") == "error":
+            log.warning(
+                "Agent run ended with error status",
+                extra={"run_id": run_id, "jid": jid, "folder": folder},
+            )
             async with _group_fail_lock:
                 _group_fail_counts[jid] = _group_fail_counts.get(jid, 0) + 1
                 _group_fail_timestamps[jid] = time.time()
     except asyncio.TimeoutError:
         log.error(
             "Container run timed out after %ds for group %s — message NOT dropped, "
-            "will be retried on next poll cycle", int(config.CONTAINER_TIMEOUT), jid
+            "will be retried on next poll cycle",
+            int(config.CONTAINER_TIMEOUT), jid,
+            extra={"run_id": run_id, "jid": jid, "folder": folder},
         )
         async with _group_fail_lock:
             _group_fail_counts[jid] = _group_fail_counts.get(jid, 0) + 1
@@ -601,7 +651,7 @@ async def _message_loop() -> None:
     independently, so a successful run for group A can never push the
     shared timestamp past group B's pending messages.
     """
-    global _registered_groups, _per_jid_cursors
+    global _registered_groups, _per_jid_cursors, _running, _self_update_requested
     log.info("Message loop started")
     while _running:
         try:
@@ -651,7 +701,6 @@ async def _message_loop() -> None:
             # ── Self-update flag: restart via os.execv() ────────────────────
             self_update_flag = config.DATA_DIR / "self_update.flag"
             if self_update_flag.exists():
-                global _self_update_requested
                 _self_update_requested = True
                 self_update_flag.unlink(missing_ok=True)
                 log.info("self_update flag detected — initiating graceful restart")
@@ -727,6 +776,53 @@ async def main() -> None:
     6. 設定 SIGTERM/SIGINT 優雅關機處理器
     7. 同時啟動訊息輪詢、IPC watcher 及排程器三個背景迴圈
     """
+
+    # Phase 1 (UnifiedClaw): Initialize Universal Memory Bus, WSBridge, AgentIdentityStore
+    _memory_bus = None
+    _ws_bridge = None
+    _identity_store = None
+    if _PHASE1_AVAILABLE:
+        try:
+            import sqlite3 as _sqlite3
+            _db_conn = _sqlite3.connect(str(config.STORE_DIR / "evoclaw.db"), check_same_thread=False)
+            _memory_bus = _MemoryBus(_db_conn, config.GROUPS_DIR)
+            _identity_store = _AgentIdentityStore(_db_conn)
+            _ws_bridge = _WSBridge(_memory_bus)
+
+            @_ws_bridge.on_fitness_update
+            async def _on_fitness(agent_id, score, metadata):
+                # Forward fitness to evolution engine
+                pass  # TODO: wire to evolution/fitness.py
+
+            asyncio.create_task(_ws_bridge.start())
+            print(f"[Phase1] MemoryBus | WSBridge (port {_ws_bridge.port}) | AgentIdentityStore initialized")
+        except Exception as _e:
+            print(f"[Phase1] Initialization failed (non-fatal): {_e}")
+
+    # Phase 2 (UnifiedClaw): SDK API + Memory Summarizer
+    _sdk_api = None
+    _summarizer = None
+    if _PHASE2_AVAILABLE and _memory_bus is not None and _identity_store is not None:
+        try:
+            _sdk_api = _SdkApi(_memory_bus, _identity_store)
+            _summarizer = _MemorySummarizer()
+            asyncio.create_task(_sdk_api.start())
+            print(f"[Phase2] SdkApi OK (port {_sdk_api.port}) | MemorySummarizer OK")
+        except Exception as _e3:
+            print(f"[Phase2] Initialization failed (non-fatal): {_e3}")
+
+    # Phase 3: Bot Registry + RBAC
+    _bot_registry = None
+    _rbac_store = None
+    if _PHASE3_AVAILABLE:
+        try:
+            _bot_registry = _BotRegistry()
+            _bootstrap_bots(_bot_registry)
+            _rbac_store = _RBACStore()
+            print(f"[Phase3] BotRegistry + RBAC initialized")
+        except Exception as _e4:
+            print(f"[Phase3] Initialization failed (non-fatal): {_e4}")
+
     global _registered_groups, _sender_allowlist, _stop_event, _group_fail_lock, _dedup_lock
     global _startup_time, _HEARTBEAT_INTERVAL, _last_heartbeat
     _stop_event = asyncio.Event()

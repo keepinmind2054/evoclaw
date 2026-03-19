@@ -46,6 +46,8 @@ from typing import TYPE_CHECKING, Optional
 
 logger = logging.getLogger(__name__)
 
+WS_BRIDGE_TOKEN = os.environ.get("WS_BRIDGE_TOKEN", "")
+
 if TYPE_CHECKING:
     from .memory.memory_bus import MemoryBus
 
@@ -84,8 +86,11 @@ class WSBridge:
             return
 
         self._running = True
-        logger.info(f"WSBridge starting on ws://0.0.0.0:{self._port}")
-        async with websockets.serve(self._handle_connection, "0.0.0.0", self._port):
+        _host = os.environ.get("WS_BRIDGE_HOST", "127.0.0.1")
+        if _host not in ("127.0.0.1", "localhost"):
+            logger.warning("WSBridge bound to %s — ensure firewall rules are in place", _host)
+        logger.info(f"WSBridge starting on ws://{_host}:{self._port}")
+        async with websockets.serve(self._handle_connection, _host, self._port):
             while self._running:
                 await asyncio.sleep(1)
 
@@ -103,6 +108,7 @@ class WSBridge:
     async def _handle_connection(self, websocket, path: str = "/"):
         """Handle incoming WebSocket connection from Agent Runtime."""
         agent_id = None
+        _first_message = True
         try:
             async for raw_message in websocket:
                 try:
@@ -110,6 +116,15 @@ class WSBridge:
                 except json.JSONDecodeError:
                     logger.warning(f"WSBridge: invalid JSON from {websocket.remote_address}")
                     continue
+
+                if _first_message:
+                    _first_message = False
+                    if WS_BRIDGE_TOKEN:
+                        token = msg.get("token", "")
+                        if token != WS_BRIDGE_TOKEN:
+                            await websocket.send(json.dumps({"type": "error", "error": "unauthorized"}))
+                            await websocket.close()
+                            return
 
                 msg_type = msg.get("type", "")
                 agent_id = msg.get("agent_id", agent_id)

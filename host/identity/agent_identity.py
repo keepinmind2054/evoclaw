@@ -24,6 +24,7 @@ import hashlib
 import json
 import logging
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -80,6 +81,7 @@ class AgentIdentityStore:
 
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
+        self._lock = threading.Lock()
         self._ensure_schema()
 
     def _ensure_schema(self):
@@ -88,6 +90,8 @@ class AgentIdentityStore:
                 s = stmt.strip()
                 if s:
                     self._conn.execute(s)
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA busy_timeout=5000")
             self._conn.commit()
         except sqlite3.Error as e:
             logger.error(f"AgentIdentityStore schema error: {e}")
@@ -100,36 +104,37 @@ class AgentIdentityStore:
     ) -> AgentIdentity:
         """
         Retrieve existing identity or create a new one.
-        
+
         The agent_id is stable: same name+project+channel always
         returns the same agent_id.
         """
         agent_id = AgentIdentity.make_id(name, project, channel)
-        row = self._conn.execute(
-            "SELECT * FROM agent_identities WHERE agent_id = ?", (agent_id,)
-        ).fetchone()
-
-        if row:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM agent_identities WHERE agent_id = ?", (agent_id,)
+            ).fetchone()
+            if row:
+                return self._row_to_identity(row)
+            # Insert new identity atomically — INSERT OR IGNORE prevents duplicate
+            # if two threads race to create the same agent_id simultaneously.
+            now = time.time()
+            self._conn.execute(
+                """INSERT OR IGNORE INTO agent_identities
+                   (agent_id, name, project, channel, skills, profile,
+                    history_summary, genome_ref, last_active, created_at, message_count)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    agent_id, name, project, channel,
+                    json.dumps([]), json.dumps({}), "", "",
+                    now, now, 0,
+                )
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM agent_identities WHERE agent_id = ?", (agent_id,)
+            ).fetchone()
+            logger.info(f"New agent identity created: {name} (id={agent_id})")
             return self._row_to_identity(row)
-
-        # Create new identity
-        now = time.time()
-        identity = AgentIdentity(
-            agent_id=agent_id,
-            name=name,
-            project=project,
-            channel=channel,
-            skills=[],
-            profile={},
-            history_summary="",
-            genome_ref="",
-            last_active=now,
-            created_at=now,
-            message_count=0,
-        )
-        self._insert(identity)
-        logger.info(f"New agent identity created: {name} (id={agent_id})")
-        return identity
 
     def get(self, agent_id: str) -> Optional[AgentIdentity]:
         """Retrieve identity by agent_id. Returns None if not found."""
@@ -141,70 +146,81 @@ class AgentIdentityStore:
     def update_summary(self, agent_id: str, summary: str):
         """Update compressed conversation history summary."""
         try:
-            self._conn.execute(
-                "UPDATE agent_identities SET history_summary = ?, last_active = ? WHERE agent_id = ?",
-                (summary, time.time(), agent_id)
-            )
-            self._conn.commit()
+            with self._lock:
+                self._conn.execute(
+                    "UPDATE agent_identities SET history_summary = ?, last_active = ? WHERE agent_id = ?",
+                    (summary, time.time(), agent_id)
+                )
+                self._conn.commit()
         except sqlite3.Error as e:
             logger.error(f"AgentIdentity update_summary error: {e}")
 
     def add_skill(self, agent_id: str, skill: str):
         """Add a skill tag to the agent's skill list."""
-        identity = self.get(agent_id)
-        if not identity:
-            return
-        if skill not in identity.skills:
-            skills = identity.skills + [skill]
-            try:
-                self._conn.execute(
-                    "UPDATE agent_identities SET skills = ? WHERE agent_id = ?",
-                    (json.dumps(skills), agent_id)
-                )
-                self._conn.commit()
-            except sqlite3.Error as e:
-                logger.error(f"AgentIdentity add_skill error: {e}")
+        try:
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT skills FROM agent_identities WHERE agent_id=?", (agent_id,)
+                ).fetchone()
+                if not row:
+                    return
+                skills = json.loads(row[0] or "[]")
+                if skill not in skills:
+                    skills.append(skill)
+                    self._conn.execute(
+                        "UPDATE agent_identities SET skills=? WHERE agent_id=?",
+                        (json.dumps(skills), agent_id)
+                    )
+                    self._conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"AgentIdentity add_skill error: {e}")
 
     def increment_message_count(self, agent_id: str):
         """Increment the message counter for this agent."""
         try:
-            self._conn.execute(
-                """UPDATE agent_identities
-                   SET message_count = message_count + 1, last_active = ?
-                   WHERE agent_id = ?""",
-                (time.time(), agent_id)
-            )
-            self._conn.commit()
+            with self._lock:
+                self._conn.execute(
+                    """UPDATE agent_identities
+                       SET message_count = message_count + 1, last_active = ?
+                       WHERE agent_id = ?""",
+                    (time.time(), agent_id)
+                )
+                self._conn.commit()
         except sqlite3.Error as e:
             logger.error(f"AgentIdentity increment_message_count error: {e}")
 
     def update_profile(self, agent_id: str, updates: dict):
         """Merge updates into the agent's profile dict."""
-        identity = self.get(agent_id)
-        if not identity:
-            return
-        merged = {**identity.profile, **updates}
         try:
-            self._conn.execute(
-                "UPDATE agent_identities SET profile = ? WHERE agent_id = ?",
-                (json.dumps(merged), agent_id)
-            )
-            self._conn.commit()
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT profile FROM agent_identities WHERE agent_id=?", (agent_id,)
+                ).fetchone()
+                if not row:
+                    return
+                profile = json.loads(row[0] or "{}")
+                profile.update(updates)
+                self._conn.execute(
+                    "UPDATE agent_identities SET profile=? WHERE agent_id=?",
+                    (json.dumps(profile), agent_id)
+                )
+                self._conn.commit()
         except sqlite3.Error as e:
             logger.error(f"AgentIdentity update_profile error: {e}")
 
     def list_agents(self, project: str = "") -> list[AgentIdentity]:
         """List all known agents, optionally filtered by project."""
         try:
-            if project:
-                rows = self._conn.execute(
-                    "SELECT * FROM agent_identities WHERE project = ? ORDER BY last_active DESC",
-                    (project,)
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    "SELECT * FROM agent_identities ORDER BY last_active DESC"
-                ).fetchall()
+            with self._lock:
+                if project:
+                    rows = self._conn.execute(
+                        "SELECT * FROM agent_identities WHERE project = ? ORDER BY last_active DESC",
+                        (project,)
+                    ).fetchall()
+                else:
+                    rows = self._conn.execute(
+                        "SELECT * FROM agent_identities ORDER BY last_active DESC"
+                    ).fetchall()
             return [self._row_to_identity(r) for r in rows]
         except sqlite3.Error as e:
             logger.error(f"AgentIdentity list_agents error: {e}")

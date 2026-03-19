@@ -17,6 +17,6 @@ google-api-python-client>=2.120.0
 google-auth-httplib2>=0.2.0
 google-auth-oauthlib>=1.2.0
 
-# Phase 1: UnifiedClaw additions
+# Phase 1/2 (UnifiedClaw)
 sqlite-vec>=0.1.0  # Phase 1: Vector semantic search (optional, graceful fallback)
-websockets>=12.0   # Phase 1: WSBridge bidirectional IPC
+websockets>=12.0   # Phase 1: WSBridge bidirectional IPC + SdkApi WebSocket servers

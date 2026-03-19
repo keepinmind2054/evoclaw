@@ -1,5 +1,86 @@
 # Changelog
 
+## [1.13.0-phase3] -- 2026-03-18
+
+### Added (Phase 3: Cross-bot Identity + RBAC Foundation)
+- `host/identity/bot_registry.py` -- BotRegistry: SQLite-backed cross-framework bot identity store
+  - Stable `bot_id = SHA-256(name:framework:channel)[:16]` format shared across NanoClaw/EvoClaw
+  - BotIdentity dataclass with capabilities, endpoints, trust status
+  - Nonce-based handshake protocol for cross-system bot recognition
+  - Pre-registered known bots: 小白 (NanoClaw/Telegram) and 小Eve (EvoClaw/Discord)
+  - `bootstrap_known_bots()` pre-registers and trusts known bots on startup
+- `host/identity/cross_bot_protocol.py` -- CrossBotProtocol: `crossbot/1.0` message envelope
+  - Message types: hello, ack, memory_share, task_delegate, status, ping, pong
+  - HMAC-SHA256 message signing and verification
+  - Decorator-based message handler registration
+- `host/rbac/__init__.py` + `host/rbac/roles.py` -- Role-Based Access Control
+  - Roles: admin, operator, agent, viewer
+  - Permissions: memory:read/write/delete, agent:spawn/kill/list, task:submit/cancel, registry:read/write, rbac:grant/revoke
+  - SQLite-backed RBACStore with grant/revoke/query operations
+- `host/identity/__init__.py` -- Updated to export BotRegistry, BotIdentity, CrossBotProtocol, CrossBotMessage
+- `host/sdk_api.py` -- Added bot registry WebSocket endpoints: bot_register, bot_lookup, bot_list, bot_handshake
+- `host/main.py` -- Phase 3 startup block: BotRegistry + RBAC initialized
+
+### GitHub Issues Created
+- #265 [Phase 3] Cross-bot Identity Protocol
+- #266 [Phase 3] Enterprise Tool Suite - Integration Layer
+- #267 [Phase 3] RBAC - Role-Based Access Control
+- #268 [Phase 3] Matrix Channel Support
+- #269 [Phase 3] Multi-tenant Support
+
+### Architecture After Phase 3
+```
+Gateway (main.py)
++-- MemoryBus          (Phase 1) OK
++-- WSBridge           (Phase 1) OK  port 8768
++-- AgentIdentityStore (Phase 1) OK
++-- SdkApi             (Phase 2) OK  port 8767
++-- MemorySummarizer   (Phase 2) OK
++-- BotRegistry        (Phase 3) OK  <- NEW  cross-framework bot identity
++-- RBACStore          (Phase 3) OK  <- NEW  role-based access control
+        |
+        v crossbot/1.0
+NanoClaw (小白) <--> EvoClaw (小Eve)
+```
+
+## [1.12.0-phase2] -- 2026-03-18
+
+### Added (Phase 2: Universal Memory Layer)
+- `host/memory/summarizer.py` -- MemorySummarizer: LLM-powered conversation->MEMORY.md compression
+  - Supports Gemini / Claude / OpenAI-compatible APIs with graceful fallback
+  - Auto-compress MEMORY.md when approaching 8KB limit
+- `host/sdk_api.py` -- External WebSocket SDK API (port 8767)
+  - Query agent memories from external tools/CLIs
+  - Submit tasks to groups via WebSocket
+  - Real-time event broadcasting to monitoring clients
+  - Optional bearer token authentication
+- `host/container_runner.py` -- Pass stable AGENT_ID env var to Docker containers
+  - Enables persistent agent identity across restarts
+- `host/main.py` -- Phase 2 startup integration
+  - SdkApi started as background asyncio task
+  - MemorySummarizer initialized
+
+### Architecture After Phase 2
+```
+Gateway (main.py)
++-- MemoryBus         (Phase 1) OK
++-- WSBridge          (Phase 1) OK  port 8768
++-- AgentIdentityStore (Phase 1) OK
++-- SdkApi            (Phase 2) OK  port 8767  <- NEW
++-- MemorySummarizer  (Phase 2) OK              <- NEW
+        |
+        v WebSocket
+Agent Runtime
++-- FitnessReporter   (Phase 1) OK
+    AGENT_ID env var  (Phase 2) OK              <- NEW
+```
+
+### Issues Addressed
+- #255 (MemorySummarizer), #256 (SdkApi), #257 (AGENT_ID in containers),
+- #258 (cross-project knowledge), #259 (auto identity summary update)
+
+---
+
 ## [Unreleased] — UnifiedClaw Roadmap
 
 ### Architecture (Planned)
