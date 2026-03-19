@@ -3,6 +3,8 @@ Workflow Engine — Phase 3 Enterprise Suite
 
 DAG-based task orchestration for multi-step agent workflows.
 """
+from __future__ import annotations
+
 import collections
 import copy
 import inspect
@@ -11,7 +13,10 @@ import logging
 import asyncio
 from dataclasses import dataclass, field, fields
 from enum import Enum
-from typing import Optional, Dict, List, Callable, Any
+from typing import TYPE_CHECKING, Optional, Dict, List, Callable, Any
+
+if TYPE_CHECKING:
+    from host.skill_loader import SkillLoader
 
 logger = logging.getLogger(__name__)
 
@@ -243,3 +248,83 @@ class WorkflowEngine:
     def history(self, limit: int = 20) -> List[WorkflowRun]:
         history_list = list(self._history)
         return history_list[-limit:]
+
+    def add_skill_step(
+        self,
+        name: str,
+        skill_name: str,
+        *,
+        skill_loader: SkillLoader,
+        agent_id: str = "default",
+        kwargs: dict | None = None,
+        depends_on: list[str] | None = None,
+        timeout: float = 60.0,
+        retries: int = 0,
+    ) -> WorkflowEngine:
+        """Register a SkillLoader skill as a workflow step.
+
+        The skill's handler.py run() function is called as the step function.
+        If the skill has no handler.py (SKILL.md only), the SKILL.md content
+        is returned as the step result.
+
+        Args:
+            name: Unique step name in the workflow.
+            skill_name: Name of the skill to load (directory under skills/).
+            skill_loader: SkillLoader instance used to load the skill.
+            agent_id: Agent identifier passed to the skill's run() function.
+            kwargs: Additional keyword arguments forwarded to the skill's run().
+            depends_on: List of step names that must complete before this step.
+            timeout: Per-attempt timeout in seconds.
+            retries: Number of retry attempts on failure.
+
+        Returns:
+            self, to enable method chaining.
+        """
+        _kwargs = kwargs or {}
+
+        def skill_step_fn(_ctx: dict) -> Any:
+            try:
+                module = skill_loader.exec_skill(skill_name)
+                if module is not None:
+                    run_fn = getattr(module, "run", None)
+                    if run_fn is not None:
+                        return run_fn(agent_id=agent_id, **_kwargs)
+                    # handler.py exists but has no run() — treat as md-only
+                    logger.warning(
+                        "add_skill_step: handler.py for '%s' has no run() function; "
+                        "falling back to SKILL.md content",
+                        skill_name,
+                    )
+                # No handler.py (or no run()); return SKILL.md content
+                content = skill_loader.load(skill_name)
+                if content is None:
+                    raise FileNotFoundError(f"Skill not found: {skill_name}")
+                return content
+            except Exception as exc:
+                logger.error(
+                    "add_skill_step: skill '%s' (step '%s') raised: %s",
+                    skill_name,
+                    name,
+                    exc,
+                )
+                return {"error": str(exc), "skill": skill_name, "step": name}
+
+        # Ensure a DAG exists for ad-hoc skill steps
+        _DAG_NAME = "_skill_steps"
+        if _DAG_NAME not in self._dags:
+            self._dags[_DAG_NAME] = WorkflowDAG(_DAG_NAME)
+
+        dag = self._dags[_DAG_NAME]
+        dag._steps[name] = WorkflowStep(
+            name=name,
+            fn=skill_step_fn,
+            depends_on=depends_on or [],
+            timeout=timeout,
+            retries=retries,
+        )
+        logger.info("add_skill_step: registered step '%s' using skill '%s'", name, skill_name)
+        return self
+
+    async def run_skill_steps(self, context: Optional[Dict] = None) -> Optional[WorkflowRun]:
+        """Execute all skill steps registered via add_skill_step()."""
+        return await self.run("_skill_steps", context)
