@@ -844,6 +844,13 @@ async def main() -> None:
     log_buffer.install()
     _load_state()
 
+    # Phase 4C: Leader election (no-op when LEADER_ELECTION_ENABLED=false)
+    from .leader_election import LeaderElection
+    _leader = LeaderElection(db.get_db())
+    await _leader.acquire()  # blocks until we are leader (instant when disabled)
+    log.info("LeaderElection: running as leader (LEADER_ELECTION_ENABLED=%s)",
+             os.environ.get("LEADER_ELECTION_ENABLED", "false"))
+
     # Prune old log rows at startup to prevent unbounded disk growth.
     # Keeps last 30 days of task_run_logs and evolution_runs by default.
     try:
@@ -1116,6 +1123,9 @@ async def main() -> None:
                 )
             except asyncio.TimeoutError:
                 log.warning("Task cleanup timed out — forcing exit")
+
+    # Phase 4C: Release leader lease on shutdown
+    await _leader.release()
 
     log.info("EvoClaw shut down cleanly.")
 
