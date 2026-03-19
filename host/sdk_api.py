@@ -116,6 +116,8 @@ class SdkApi:
 
         self._running = True
         _host = os.environ.get("SDK_API_HOST", "127.0.0.1")
+        if _host not in ("127.0.0.1", "localhost"):
+            logger.warning("SDK API bound to %s — ensure firewall rules are in place", _host)
         logger.info(f"SdkApi starting on ws://{_host}:{self._port}")
         async with websockets.serve(
             self._handle_connection,
