@@ -4,6 +4,7 @@ HPC Connector — Phase 3 Enterprise Suite
 Submits and monitors jobs on SLURM/PBS HPC clusters.
 """
 import os
+import re
 import logging
 import shlex
 import subprocess
@@ -13,6 +14,17 @@ from dataclasses import dataclass
 from enum import Enum
 
 logger = logging.getLogger(__name__)
+
+# Only allow job IDs that consist of word characters, dots, and hyphens.
+# This prevents shell injection when job_id is interpolated into SSH commands.
+_SAFE_JOB_ID_RE = re.compile(r'^[\w.\-]+$')
+
+
+def _validate_job_id(job_id: str) -> str:
+    """Raise ValueError if job_id contains shell-unsafe characters."""
+    if not _SAFE_JOB_ID_RE.match(job_id):
+        raise ValueError(f"Invalid job_id: {job_id!r}")
+    return job_id
 
 
 class JobStatus(str, Enum):
@@ -111,8 +123,9 @@ class HPCConnector:
             # that the remote head node cannot access.  The script content is passed
             # inline via the heredoc-style --wrap flag so no file transfer is needed.
             out = self._run_remote(
-                f"sbatch --job-name={shlex.quote(name)} --nodes={nodes} --ntasks-per-node={cpus}"
-                f" --mem={memory_gb}G --time={hours:02d}:{mins:02d}:00"
+                f"sbatch --job-name={shlex.quote(name)} --nodes={shlex.quote(str(nodes))}"
+                f" --ntasks-per-node={shlex.quote(str(cpus))}"
+                f" --mem={shlex.quote(str(memory_gb) + 'G')} --time={hours:02d}:{mins:02d}:00"
                 f" --partition={shlex.quote(partition)} --output={shlex.quote(name + '_%j.out')}"
                 f" --wrap={shlex.quote(sbatch)}"
             )
@@ -153,7 +166,7 @@ class HPCConnector:
                 remote_path = f"/tmp/{os.path.basename(fname)}"
                 scp_args += [fname, f"{self.host}:{remote_path}"]
                 subprocess.run(scp_args, check=True, timeout=30)
-                out = self._run_remote(f"qsub {remote_path}; rm -f {remote_path}")
+                out = self._run_remote(f"qsub {shlex.quote(remote_path)}; rm -f {shlex.quote(remote_path)}")
             finally:
                 if fname and os.path.exists(fname):
                     os.unlink(fname)
@@ -168,10 +181,12 @@ class HPCConnector:
     def get_job_status(self, job_id: str) -> JobStatus:
         """Query job status."""
         try:
+            _validate_job_id(job_id)
+            safe_id = shlex.quote(job_id)
             if self.scheduler == "slurm":
-                out = self._run_remote(f"squeue -j {job_id} -h -o %T 2>/dev/null || sacct -j {job_id} -n -o State%20")
+                out = self._run_remote(f"squeue -j {safe_id} -h -o %T 2>/dev/null || sacct -j {safe_id} -n -o State%20")
             else:
-                out = self._run_remote(f"qstat -f {job_id} | grep job_state")
+                out = self._run_remote(f"qstat -f {safe_id} | grep job_state")
             out = out.strip().upper()
             for status in JobStatus:
                 if status.value in out:
@@ -183,7 +198,9 @@ class HPCConnector:
     def cancel_job(self, job_id: str) -> bool:
         """Cancel a running or pending job."""
         try:
-            cmd = f"scancel {job_id}" if self.scheduler == "slurm" else f"qdel {job_id}"
+            _validate_job_id(job_id)
+            safe_id = shlex.quote(job_id)
+            cmd = f"scancel {safe_id}" if self.scheduler == "slurm" else f"qdel {safe_id}"
             self._run_remote(cmd)
             return True
         except Exception as e:
