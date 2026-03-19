@@ -5,6 +5,7 @@ Submits and monitors jobs on SLURM/PBS HPC clusters.
 """
 import os
 import logging
+import shlex
 import subprocess
 import tempfile
 from typing import Optional, Dict, List
@@ -113,7 +114,7 @@ class HPCConnector:
                 f"sbatch --job-name={name} --nodes={nodes} --ntasks-per-node={cpus}"
                 f" --mem={memory_gb}G --time={hours:02d}:{mins:02d}:00"
                 f" --partition={partition} --output={name}_%j.out"
-                f" --wrap={sbatch!r}"
+                f" --wrap={shlex.quote(sbatch)}"
             )
             job_id = out.split()[-1]  # "Submitted batch job 12345"
             return HPCJob(job_id=job_id, name=name, status=JobStatus.PENDING,
