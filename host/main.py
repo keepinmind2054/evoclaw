@@ -751,9 +751,8 @@ async def main() -> None:
     if _PHASE1_AVAILABLE:
         try:
             import sqlite3 as _sqlite3
-            from pathlib import Path as _Path
-            _db_conn = _sqlite3.connect("evoclaw.db", check_same_thread=False)
-            _memory_bus = _MemoryBus(_db_conn, _Path("groups"))
+            _db_conn = _sqlite3.connect(str(config.STORE_DIR / "evoclaw.db"), check_same_thread=False)
+            _memory_bus = _MemoryBus(_db_conn, config.GROUPS_DIR)
             _identity_store = _AgentIdentityStore(_db_conn)
             _ws_bridge = _WSBridge(_memory_bus)
 
