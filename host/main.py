@@ -143,33 +143,38 @@ async def _store_bot_reply(jid: str, text: str) -> None:
         log.error("Failed to store bot response in DB for %s: %s", jid, e)
 
 
-def _configure_logging() -> None:
-    """Configure logging format based on LOG_FORMAT env var.
+def _setup_logging() -> None:
+    """Configure root logger based on LOG_FORMAT and LOG_LEVEL env vars.
 
     LOG_FORMAT=json  → emit newline-delimited JSON (compatible with Loki/Datadog/CloudWatch)
     LOG_FORMAT=text  → human-readable text (default)
+    LOG_LEVEL        → logging level (default: INFO)
     """
-    level = getattr(logging, config.LOG_LEVEL, logging.INFO)
-    if config.LOG_FORMAT == "json":
-        try:
-            from pythonjsonlogger import jsonlogger  # type: ignore
-            handler = logging.StreamHandler()
-            handler.setFormatter(
-                jsonlogger.JsonFormatter(
-                    "%(asctime)s %(levelname)s %(name)s %(message)s"
-                )
-            )
-            logging.root.setLevel(level)
-            logging.root.addHandler(handler)
-            return
-        except ImportError:
-            pass  # python-json-logger not installed — fall back to text
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+    import os
+    from host.log_formatter import JsonFormatter
 
-_configure_logging()
+    level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    log_format = os.environ.get("LOG_FORMAT", "text").lower()
+
+    handler = logging.StreamHandler()
+
+    if log_format == "json":
+        handler.setFormatter(JsonFormatter())
+    else:
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)-8s %(name)s — %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+
+    root = logging.getLogger()
+    root.setLevel(level)
+    # Remove any existing handlers to avoid duplicate output
+    root.handlers.clear()
+    root.addHandler(handler)
+
+
+_setup_logging()
 log = logging.getLogger("evoclaw")
 
 # ── State ─────────────────────────────────────────────────────────────────────
