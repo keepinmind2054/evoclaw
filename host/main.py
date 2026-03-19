@@ -1079,16 +1079,18 @@ async def main() -> None:
         # - start_ipc_watcher: 監控 IPC 目錄，處理 container 發出的指令
         # - start_scheduler_loop: 檢查排程任務是否到期並觸發執行
         # - evolution_loop: 每 24 小時執行一次演化週期，調整群組基因組
-        await asyncio.gather(
+        _gather_tasks = [
             _message_loop(),
             start_ipc_watcher(_get_groups, _ipc_route_fn, _stop_event),
             start_scheduler_loop(_get_group_by_jid, run_container_agent, _stop_event, _group_queue),
             evolution_loop(_stop_event),
             health_monitor_loop(_stop_event),
             _orphan_cleanup_loop(_stop_event),
-            # Phase 1 (UnifiedClaw): WebSocket bridge — coexists with file IPC
-            _ws_bridge.start(),
-        )
+        ]
+        # Phase 1 (UnifiedClaw): WebSocket bridge — coexists with file IPC
+        if _ws_bridge is not None:
+            _gather_tasks.append(_ws_bridge.start())
+        await asyncio.gather(*_gather_tasks)
     finally:
         # Fix #135: disconnect channels FIRST so Telegram's update_fetcher_task can stop cleanly
         # before we bulk-cancel tasks — prevents the misleading CRITICAL CancelledError log.

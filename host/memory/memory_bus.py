@@ -358,8 +358,8 @@ class VectorStore:
         """Remove a memory from the vector index."""
         with self._lock:
             try:
-                self._conn.execute("DELETE FROM vec_memories WHERE id = ?", (memory_id,))
-                self._conn.execute("DELETE FROM vec_index WHERE id = ?", (memory_id,))
+                self._conn.execute("DELETE FROM vec_memories WHERE memory_id = ?", (memory_id,))
+                self._conn.execute("DELETE FROM vec_index WHERE memory_id = ?", (memory_id,))
                 self._conn.commit()
                 return True
             except Exception as exc:
@@ -473,7 +473,11 @@ class MemoryBus:
         # 0. Hot memory from MEMORY.md
         if "hot" in include_sources:
             try:
-                hot_path = self._groups_dir / agent_id / "MEMORY.md"
+                # Prevent path traversal
+                safe_id = Path(agent_id).name  # strips any ../ components
+                if not safe_id or safe_id != agent_id:
+                    raise ValueError(f"Invalid agent_id: {agent_id!r}")
+                hot_path = self._groups_dir / safe_id / "MEMORY.md"
                 if hot_path.exists():
                     content = hot_path.read_text(encoding="utf-8", errors="ignore")
                     if content.strip():
@@ -546,9 +550,13 @@ class MemoryBus:
             patch:      Text to append to MEMORY.md
             max_bytes:  Maximum file size (default 8KB)
         """
-        lock = self._hot_memory_locks.setdefault(agent_id, asyncio.Lock())
+        # Prevent path traversal
+        safe_id = Path(agent_id).name  # strips any ../ components
+        if not safe_id or safe_id != agent_id:
+            raise ValueError(f"Invalid agent_id: {agent_id!r}")
+        lock = self._hot_memory_locks.setdefault(safe_id, asyncio.Lock())
         async with lock:
-            memory_file = self._groups_dir / agent_id / "MEMORY.md"
+            memory_file = self._groups_dir / safe_id / "MEMORY.md"
             try:
                 memory_file.parent.mkdir(parents=True, exist_ok=True)
                 current = memory_file.read_text(encoding="utf-8") if memory_file.exists() else ""
