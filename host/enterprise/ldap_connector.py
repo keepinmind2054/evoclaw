@@ -12,9 +12,11 @@ logger = logging.getLogger(__name__)
 
 try:
     import ldap3
+    from ldap3.utils.conv import escape_filter_chars
     _LDAP3_AVAILABLE = True
 except ImportError:
     ldap3 = None
+    escape_filter_chars = None
     _LDAP3_AVAILABLE = False
 
 
@@ -76,7 +78,7 @@ class LDAPConnector:
         try:
             self._conn.search(
                 self.base_dn,
-                f"(sAMAccountName={username})",
+                f"(sAMAccountName={escape_filter_chars(username)})",
                 attributes=["cn", "mail", "memberOf", "department"]
             )
             if not self._conn.entries:
@@ -105,7 +107,7 @@ class LDAPConnector:
         try:
             self._conn.search(
                 self.base_dn,
-                f"(&(objectClass=group)(cn={group_cn}))",
+                f"(&(objectClass=group)(cn={escape_filter_chars(group_cn)}))",
                 attributes=["member"]
             )
             if not self._conn.entries:

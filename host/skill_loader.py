@@ -37,6 +37,9 @@ class SkillLoader:
 
     def load(self, name: str) -> Optional[str]:
         """Return the SKILL.md content for a skill, or None if not found."""
+        resolved = (self._dir / name).resolve()
+        if not str(resolved).startswith(str(self._dir.resolve())):
+            raise ValueError(f"Path traversal attempt: {name}")
         skill_file = self._dir / name / "SKILL.md"
         if not skill_file.exists():
             logger.warning("skill_loader: skill not found: %s", name)
@@ -58,6 +61,9 @@ class SkillLoader:
         The agent calls this to teach itself new capabilities.
         Returns True if created, False if already exists and overwrite=False.
         """
+        resolved = (self._dir / name).resolve()
+        if not str(resolved).startswith(str(self._dir.resolve())):
+            raise ValueError(f"Path traversal attempt: {name}")
         skill_dir = self._dir / name
         skill_file = skill_dir / "SKILL.md"
         if skill_file.exists() and not overwrite:
@@ -71,6 +77,9 @@ class SkillLoader:
     def delete(self, name: str) -> bool:
         """Remove a skill."""
         import shutil
+        resolved = (self._dir / name).resolve()
+        if not str(resolved).startswith(str(self._dir.resolve())):
+            raise ValueError(f"Path traversal attempt: {name}")
         skill_dir = self._dir / name
         if not skill_dir.exists():
             return False
