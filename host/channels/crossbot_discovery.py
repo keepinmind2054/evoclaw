@@ -54,6 +54,12 @@ class CrossbotDiscovery:
             msg = CrossBotMessage.from_json(payload)
             if msg.type not in _ALLOWED_HELLO_TYPES:
                 return True  # consumed but ignored
+            if self._protocol.secret and not msg.verify(self._protocol.secret):
+                logger.warning("CrossbotDiscovery: invalid signature from %s", msg.from_bot_id)
+                return True
+            if self._protocol.registry and not self._protocol.registry.lookup(msg.from_bot_id):
+                logger.warning("CrossbotDiscovery: unknown bot %s", msg.from_bot_id)
+                return True
             if msg.type == "hello":
                 # Respond with ack using the original message for context
                 ack = self._protocol.make_ack(msg)
