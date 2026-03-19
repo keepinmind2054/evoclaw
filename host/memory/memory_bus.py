@@ -97,6 +97,16 @@ class SharedMemoryStore:
         ON shared_memories(agent_id);
     CREATE VIRTUAL TABLE IF NOT EXISTS shared_memories_fts
         USING fts5(content, content='shared_memories', content_rowid='rowid');
+    CREATE TRIGGER IF NOT EXISTS shared_memories_fts_insert AFTER INSERT ON shared_memories BEGIN
+      INSERT INTO shared_memories_fts(rowid, content) VALUES (new.rowid, new.content);
+    END;
+    CREATE TRIGGER IF NOT EXISTS shared_memories_fts_update AFTER UPDATE ON shared_memories BEGIN
+      INSERT INTO shared_memories_fts(shared_memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+      INSERT INTO shared_memories_fts(rowid, content) VALUES (new.rowid, new.content);
+    END;
+    CREATE TRIGGER IF NOT EXISTS shared_memories_fts_delete AFTER DELETE ON shared_memories BEGIN
+      INSERT INTO shared_memories_fts(shared_memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+    END;
     """
 
     def __init__(self, conn: sqlite3.Connection):
@@ -343,6 +353,15 @@ class VectorStore:
             logger.debug(f"VectorStore.search error: {e}")
             return []
 
+    def delete(self, memory_id: str) -> None:
+        """Delete a memory from both vec_memories and vec_index."""
+        with self._conn:
+            self._conn.execute("DELETE FROM vec_memories WHERE memory_id = ?", (memory_id,))
+            try:
+                self._conn.execute("DELETE FROM vec_index WHERE id = ?", (memory_id,))
+            except Exception:
+                pass
+
     @property
     def available(self) -> bool:
         return self._available
@@ -447,6 +466,26 @@ class MemoryBus:
         results: list[Memory] = []
         seen_ids: set[str] = set()
 
+        # 0. Hot memory from MEMORY.md
+        if "hot" in include_sources:
+            # Read hot memory from MEMORY.md
+            import pathlib
+            memory_path = pathlib.Path(f"MEMORY.md")
+            if memory_path.exists():
+                content = memory_path.read_text()
+                if content.strip():
+                    hot_mem = Memory(
+                        memory_id="hot_memory",
+                        content=content,
+                        agent_id=agent_id or "global",
+                        scope="private",
+                        score=0.95,
+                        created_at=time.time(),
+                        source="hot",
+                    )
+                    results.append(hot_mem)
+                    seen_ids.add("hot_memory")
+
         # 1. Vector semantic search
         if "vector" in include_sources and self.vector.available:
             vec_results = await self.vector.search(query, agent_id, k=k)
@@ -489,7 +528,10 @@ class MemoryBus:
 
     async def forget(self, memory_id: str, agent_id: str) -> bool:
         """Remove a memory (only owner can delete private memories)."""
-        return self.shared.delete(memory_id, agent_id)
+        result = self.shared.delete(memory_id, agent_id)
+        if hasattr(self, 'vector') and self.vector:
+            self.vector.delete(memory_id)
+        return result
 
     async def patch_hot_memory(self, agent_id: str, patch: str, max_bytes: int = 8192) -> bool:
         """
