@@ -662,7 +662,7 @@ def restore_remote_control() -> None:
 
 async def _run_start_remote_control(jid: str, sender: str, route_fn: Callable) -> None:
     """Spawn `claude remote-control` in the EvoClaw directory, poll for the URL,
-    and deliver it to the originating group. Mirrors nanoclaw's startRemoteControl()."""
+    and deliver it to the originating group."""
     global _rc_active_pid, _rc_active_url
 
     if _rc_active_pid is not None:
