@@ -30,12 +30,6 @@ class SkillLoader:
         self._dir = skills_dir or _SKILLS_DIR
         self._dir.mkdir(parents=True, exist_ok=True)
 
-    def _safe_skill_dir(self, name: str) -> Path:
-        resolved = (self._dir / name).resolve()
-        if not str(resolved).startswith(str(self._dir.resolve())):
-            raise ValueError(f"Path traversal attempt in skill name: {name!r}")
-        return resolved
-
     def list_skills(self) -> list[str]:
         """Return names of all available skills."""
         return sorted(
@@ -46,8 +40,10 @@ class SkillLoader:
 
     def load(self, name: str) -> Optional[str]:
         """Return the SKILL.md content for a skill, or None if not found."""
-        skill_dir = self._safe_skill_dir(name)
-        skill_file = skill_dir / "SKILL.md"
+        resolved = (self._dir / name).resolve()
+        if not str(resolved).startswith(str(self._dir.resolve())):
+            raise ValueError(f"Path traversal attempt: {name}")
+        skill_file = self._dir / name / "SKILL.md"
         if not skill_file.exists():
             logger.warning("skill_loader: skill not found: %s", name)
             return None
@@ -68,7 +64,10 @@ class SkillLoader:
         The agent calls this to teach itself new capabilities.
         Returns True if created, False if already exists and overwrite=False.
         """
-        skill_dir = self._safe_skill_dir(name)
+        resolved = (self._dir / name).resolve()
+        if not str(resolved).startswith(str(self._dir.resolve())):
+            raise ValueError(f"Path traversal attempt: {name}")
+        skill_dir = self._dir / name
         skill_file = skill_dir / "SKILL.md"
         if skill_file.exists() and not overwrite:
             logger.info("skill_loader: skill already exists: %s", name)
@@ -81,7 +80,10 @@ class SkillLoader:
     def delete(self, name: str) -> bool:
         """Remove a skill."""
         import shutil
-        skill_dir = self._safe_skill_dir(name)
+        resolved = (self._dir / name).resolve()
+        if not str(resolved).startswith(str(self._dir.resolve())):
+            raise ValueError(f"Path traversal attempt: {name}")
+        skill_dir = self._dir / name
         if not skill_dir.exists():
             return False
         shutil.rmtree(skill_dir)
@@ -94,8 +96,7 @@ class SkillLoader:
         Hot-swap: each call re-imports the module fresh (no caching in sys.modules).
         Returns the loaded module, or None if no handler.py exists.
         """
-        skill_dir = self._safe_skill_dir(name)
-        handler_path = skill_dir / "handler.py"
+        handler_path = self._dir / name / "handler.py"
         if not handler_path.exists():
             logger.debug("skill_loader: no handler.py for skill: %s", name)
             return None
