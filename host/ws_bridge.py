@@ -86,8 +86,11 @@ class WSBridge:
             return
 
         self._running = True
-        logger.info(f"WSBridge starting on ws://0.0.0.0:{self._port}")
-        async with websockets.serve(self._handle_connection, "0.0.0.0", self._port):
+        _host = os.environ.get("WS_BRIDGE_HOST", "127.0.0.1")
+        if _host not in ("127.0.0.1", "localhost"):
+            logger.warning("WSBridge bound to %s — ensure firewall rules are in place", _host)
+        logger.info(f"WSBridge starting on ws://{_host}:{self._port}")
+        async with websockets.serve(self._handle_connection, _host, self._port):
             while self._running:
                 await asyncio.sleep(1)
 
@@ -119,7 +122,8 @@ class WSBridge:
                     if WS_BRIDGE_TOKEN:
                         token = msg.get("token", "")
                         if token != WS_BRIDGE_TOKEN:
-                            await websocket.close(1008, "Unauthorized")
+                            await websocket.send(json.dumps({"type": "error", "error": "unauthorized"}))
+                            await websocket.close()
                             return
 
                 msg_type = msg.get("type", "")
