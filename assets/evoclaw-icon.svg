@@ -1,96 +1,64 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
   <defs>
-    <radialGradient id="bg" cx="45%" cy="40%" r="70%">
-      <stop offset="0%" stop-color="#162236"/>
+    <radialGradient id="bg" cx="50%" cy="40%" r="70%">
+      <stop offset="0%" stop-color="#162030"/>
       <stop offset="100%" stop-color="#06090f"/>
     </radialGradient>
-    <linearGradient id="claw" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#ff6535"/>
-      <stop offset="55%" stop-color="#dd2a10"/>
-      <stop offset="100%" stop-color="#9b1010"/>
+    <linearGradient id="orange" x1="0%" y1="0%" x2="110%" y2="100%">
+      <stop offset="0%" stop-color="#ff6a30"/>
+      <stop offset="60%" stop-color="#e03010"/>
+      <stop offset="100%" stop-color="#a01808"/>
     </linearGradient>
-    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
-      <feGaussianBlur stdDeviation="5" result="blur"/>
+    <linearGradient id="orangeH" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ff6a30"/>
+      <stop offset="100%" stop-color="#cc2a10"/>
+    </linearGradient>
+    <filter id="bodyGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
-    <filter id="bigGlow" x="-60%" y="-60%" width="220%" height="220%">
-      <feGaussianBlur stdDeviation="14" result="blur"/>
+    <filter id="dotGlow" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
+    <linearGradient id="highlight" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
   </defs>
 
-  <!-- Background -->
-  <rect width="512" height="512" rx="90" fill="url(#bg)"/>
+  <rect width="512" height="512" rx="96" fill="url(#bg)"/>
+  <rect width="512" height="512" rx="96" fill="none" stroke="#00e5ff" stroke-width="1.5" opacity="0.12"/>
 
-  <!-- Subtle grid -->
-  <g opacity="0.04" stroke="#00e5ff" stroke-width="1">
-    <line x1="0" y1="128" x2="512" y2="128"/>
-    <line x1="0" y1="256" x2="512" y2="256"/>
-    <line x1="0" y1="384" x2="512" y2="384"/>
-    <line x1="128" y1="0" x2="128" y2="512"/>
-    <line x1="256" y1="0" x2="256" y2="512"/>
-    <line x1="384" y1="0" x2="384" y2="512"/>
+  <!-- Vertical spine -->
+  <rect x="108" y="96" width="72" height="320" rx="22" fill="url(#orange)" filter="url(#bodyGlow)"/>
+  <!-- Top tine -->
+  <rect x="108" y="96" width="268" height="70" rx="22" fill="url(#orangeH)" filter="url(#bodyGlow)"/>
+  <!-- Middle tine -->
+  <rect x="108" y="221" width="216" height="70" rx="22" fill="url(#orangeH)" filter="url(#bodyGlow)"/>
+  <!-- Bottom tine -->
+  <rect x="108" y="346" width="268" height="70" rx="22" fill="url(#orangeH)" filter="url(#bodyGlow)"/>
+
+  <!-- Highlight sheen -->
+  <rect x="108" y="96" width="72" height="320" rx="22" fill="url(#highlight)"/>
+  <rect x="108" y="96" width="268" height="70" rx="22" fill="url(#highlight)"/>
+  <rect x="108" y="221" width="216" height="70" rx="22" fill="url(#highlight)"/>
+  <rect x="108" y="346" width="268" height="70" rx="22" fill="url(#highlight)"/>
+
+  <!-- Circuit line on spine -->
+  <g opacity="0.7" filter="url(#dotGlow)">
+    <line x1="148" y1="131" x2="148" y2="381" stroke="#00e5ff" stroke-width="2.5" stroke-linecap="round"/>
+    <circle cx="148" cy="131" r="4.5" fill="#00e5ff"/>
+    <circle cx="148" cy="256" r="4.5" fill="#00e5ff"/>
+    <circle cx="148" cy="381" r="4.5" fill="#00e5ff"/>
+    <line x1="148" y1="256" x2="324" y2="256" stroke="#00e5ff" stroke-width="2" stroke-dasharray="6,4"/>
   </g>
 
-  <!-- ── CLAW ── -->
-
-  <!-- Arm (right side, extends off-frame) -->
-  <path d="M 375,238 C 410,232 445,222 472,218"
-        stroke="url(#claw)" stroke-width="58" stroke-linecap="round" fill="none"
-        filter="url(#bigGlow)"/>
-
-  <!-- Main body (propus joint) -->
-  <ellipse cx="310" cy="238" rx="88" ry="65"
-           transform="rotate(-8,310,238)"
-           fill="url(#claw)" filter="url(#bigGlow)"/>
-
-  <!-- Upper finger -->
-  <path d="M 244,192 C 212,168 166,140 110,114"
-        stroke="url(#claw)" stroke-width="54" stroke-linecap="round" fill="none"
-        filter="url(#bigGlow)"/>
-
-  <!-- Lower finger -->
-  <path d="M 244,284 C 208,304 160,330 106,358"
-        stroke="url(#claw)" stroke-width="48" stroke-linecap="round" fill="none"
-        filter="url(#bigGlow)"/>
-
-  <!-- Dark negative space between fingers (the bite) -->
-  <path d="M 186,154 C 154,195 154,280 188,322"
-        stroke="#06090f" stroke-width="30" stroke-linecap="round" fill="none"/>
-
-  <!-- ── Circuit traces ── -->
-  <g filter="url(#glow)" stroke="#00e5ff" stroke-width="2.5" fill="none" opacity="0.85">
-    <line x1="212" y1="238" x2="392" y2="228"/>
-    <line x1="260" y1="220" x2="230" y2="190"/>
-    <line x1="260" y1="256" x2="228" y2="278"/>
-    <line x1="342" y1="233" x2="342" y2="204"/>
-    <circle cx="212" cy="238" r="5" fill="#00e5ff"/>
-    <circle cx="260" cy="220" r="3.5" fill="#00e5ff"/>
-    <circle cx="260" cy="256" r="3.5" fill="#00e5ff"/>
-    <circle cx="342" cy="233" r="4" fill="#00e5ff"/>
-    <circle cx="392" cy="228" r="5" fill="#00e5ff"/>
-    <circle cx="342" cy="204" r="3" fill="#00e5ff"/>
-  </g>
-
-  <!-- Glowing claw tips (cyan) -->
-  <circle cx="110" cy="114" r="11" fill="#00e5ff" filter="url(#glow)" opacity="0.9"/>
-  <circle cx="106" cy="358" r="10" fill="#00e5ff" filter="url(#glow)" opacity="0.9"/>
-
-  <!-- ── DNA helix (bottom, subtle) ── -->
-  <g transform="translate(162,432)" opacity="0.42" filter="url(#glow)">
-    <path d="M0,0 C14,16 28,16 42,0 C56,-16 70,-16 84,0 C98,16 112,16 126,0 C140,-16 154,-16 168,0"
-          stroke="#00e5ff" stroke-width="1.8" fill="none"/>
-    <path d="M0,24 C14,8 28,8 42,24 C56,40 70,40 84,24 C98,8 112,8 126,24 C140,40 154,40 168,24"
-          stroke="#4fc3f7" stroke-width="1.8" fill="none"/>
-    <line x1="21" y1="5" x2="21" y2="19" stroke="#7ec8e3" stroke-width="1.2"/>
-    <line x1="42" y1="0" x2="42" y2="24" stroke="#7ec8e3" stroke-width="1.2"/>
-    <line x1="63" y1="5" x2="63" y2="19" stroke="#7ec8e3" stroke-width="1.2"/>
-    <line x1="84" y1="0" x2="84" y2="24" stroke="#7ec8e3" stroke-width="1.2"/>
-    <line x1="105" y1="5" x2="105" y2="19" stroke="#7ec8e3" stroke-width="1.2"/>
-    <line x1="126" y1="0" x2="126" y2="24" stroke="#7ec8e3" stroke-width="1.2"/>
-    <line x1="147" y1="5" x2="147" y2="19" stroke="#7ec8e3" stroke-width="1.2"/>
-  </g>
-
-  <!-- Border -->
-  <rect width="512" height="512" rx="90" fill="none" stroke="#00e5ff" stroke-width="2" opacity="0.18"/>
+  <!-- Glowing claw tips -->
+  <circle cx="376" cy="131" r="18" fill="#00e5ff" filter="url(#dotGlow)" opacity="0.95"/>
+  <circle cx="376" cy="131" r="10" fill="#ffffff" opacity="0.7"/>
+  <circle cx="324" cy="256" r="16" fill="#00e5ff" filter="url(#dotGlow)" opacity="0.95"/>
+  <circle cx="324" cy="256" r="9" fill="#ffffff" opacity="0.6"/>
+  <circle cx="376" cy="381" r="18" fill="#00e5ff" filter="url(#dotGlow)" opacity="0.95"/>
+  <circle cx="376" cy="381" r="10" fill="#ffffff" opacity="0.7"/>
 </svg>
