@@ -80,12 +80,13 @@ except ImportError as _e2:
 # Phase 3: Bot Registry + RBAC
 try:
     from .identity.bot_registry import BotRegistry as _BotRegistry, bootstrap_known_bots as _bootstrap_bots
-    from .rbac.roles import RBACStore as _RBACStore
+    from .rbac.roles import Permission as _Permission, RBACStore as _RBACStore
     _PHASE3_AVAILABLE = True
 except ImportError as _e3p:
     _PHASE3_AVAILABLE = False
     _BotRegistry = None
     _bootstrap_bots = None
+    _Permission = None
     _RBACStore = None
     print(f"[Phase3] Components not available: {_e3p}")
 
@@ -417,15 +418,15 @@ async def _on_message(jid: str, sender: str, sender_name: str, content: str,
     # so the system degrades gracefully rather than blocking all traffic.
     if _rbac_store is not None:
         try:
-            from .rbac.roles import Permission as _Permission
             if not _rbac_store.has_permission(sender, _Permission.TASK_SUBMIT):
                 log.warning(
                     "RBAC: sender %s lacks task:submit permission — message rejected (jid=%s)",
                     sender, jid,
                 )
                 return
-        except Exception as _rbac_exc:
-            log.debug("RBAC check failed (non-fatal, allowing message): %s", _rbac_exc)
+        except (AttributeError, TypeError) as _rbac_exc:
+            log.error("RBAC check error — rejecting message for safety: %s", _rbac_exc)
+            return
 
     # Per-group rate limit: drop excess messages to prevent one group from
     # starving others.  Logged at DEBUG to avoid log spam under sustained load.
@@ -681,12 +682,18 @@ async def _message_loop() -> None:
             # Leader-gate: skip message processing when another instance holds the lock.
             # If _leader is None, leader election is disabled and we always process.
             if _leader is not None and not _leader.is_leader:
-                log.debug("Not leader, skipping message poll cycle")
+                if not getattr(_message_loop, "_logged_not_leader", False):
+                    log.info("Not leader — message processing paused until leadership acquired")
+                    _message_loop._logged_not_leader = True  # type: ignore[attr-defined]
                 try:
                     await asyncio.wait_for(_stop_event.wait(), timeout=config.POLL_INTERVAL)
                 except asyncio.TimeoutError:
                     pass
                 continue
+            # Reset flag when we ARE leader (so next leadership loss is logged)
+            if getattr(_message_loop, "_logged_not_leader", False):
+                log.info("Leadership acquired — resuming message processing")
+                _message_loop._logged_not_leader = False  # type: ignore[attr-defined]
 
             # 偵測是否有 refresh_groups.flag 旗標檔，有的話重新從 DB 載入群組清單
             # 這讓 IPC watcher 可以在不重啟程序的情況下動態新增群組
