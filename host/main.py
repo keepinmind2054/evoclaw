@@ -493,7 +493,14 @@ async def _process_group_messages(group: dict, messages: list[dict],
     prompt = format_messages(messages, config.TIMEZONE)
     session_id = db.get_session(folder)
 
-    log.info(f"Processing {len(messages)} message(s) for {folder}")
+    # Generate a short run_id so all log lines for this agent invocation can be correlated
+    run_id = str(uuid.uuid4())[:8]
+
+    log.info(
+        "Processing %d message(s) for %s",
+        len(messages), folder,
+        extra={"run_id": run_id, "jid": jid, "folder": folder},
+    )
 
     # Capture prompt text for warm memory logging (join all new message contents)
     _user_prompt_text = " ".join(m.get("content", "") for m in messages if m.get("content", "").strip())
@@ -567,6 +574,10 @@ async def _process_group_messages(group: dict, messages: list[dict],
         if on_success:
             await on_success()
 
+    log.debug(
+        "Invoking container agent",
+        extra={"run_id": run_id, "jid": jid, "folder": folder, "session_id": session_id},
+    )
     try:
         result = await asyncio.wait_for(
             run_container_agent(
@@ -582,13 +593,19 @@ async def _process_group_messages(group: dict, messages: list[dict],
         )
         # run_container_agent returns {"status": "error", ...} when no output markers found
         if not _run_succeeded and isinstance(result, dict) and result.get("status") == "error":
+            log.warning(
+                "Agent run ended with error status",
+                extra={"run_id": run_id, "jid": jid, "folder": folder},
+            )
             async with _group_fail_lock:
                 _group_fail_counts[jid] = _group_fail_counts.get(jid, 0) + 1
                 _group_fail_timestamps[jid] = time.time()
     except asyncio.TimeoutError:
         log.error(
             "Container run timed out after %ds for group %s — message NOT dropped, "
-            "will be retried on next poll cycle", int(config.CONTAINER_TIMEOUT), jid
+            "will be retried on next poll cycle",
+            int(config.CONTAINER_TIMEOUT), jid,
+            extra={"run_id": run_id, "jid": jid, "folder": folder},
         )
         async with _group_fail_lock:
             _group_fail_counts[jid] = _group_fail_counts.get(jid, 0) + 1
