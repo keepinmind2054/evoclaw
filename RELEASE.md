@@ -81,4 +81,4 @@ Web portal authentication added, improved channel stability.
 
 ---
 
-*NanoClaw → EvoClaw → UnifiedClaw*
+*EvoClaw → UnifiedClaw*

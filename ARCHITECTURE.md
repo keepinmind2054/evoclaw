@@ -208,7 +208,7 @@ Agent ←──── task_payload ──────── Gateway
   - `host/identity/bot_registry.py` — BotRegistry (SQLite-backed), BotIdentity dataclass
   - `host/identity/cross_bot_protocol.py` — CrossBotProtocol, CrossBotMessage (`crossbot/1.0`)
   - Handshake protocol: nonce-based cross-system recognition
-  - Pre-registered known bots: 小白 (NanoClaw/Telegram) and 小Eve (EvoClaw/Discord)
+  - Pre-registered known bots: 小白 (Telegram) and 小Eve (EvoClaw/Discord)
   - Bot registry endpoints exposed via SDK API WebSocket: `bot_register`, `bot_lookup`, `bot_list`, `bot_handshake`
 - [x] **RBAC — Role-Based Access Control**
   - `host/rbac/roles.py` — Role enum (admin/operator/agent/viewer), Permission enum, RBACStore
@@ -235,4 +235,4 @@ Agent ←──── task_payload ──────── Gateway
 
 ---
 
-*NanoClaw → EvoClaw → UnifiedClaw lineage*
+*EvoClaw → UnifiedClaw*

@@ -8,8 +8,6 @@
 
 A lightweight, Python-based multi-model AI agent framework designed for personal use. Built with transparency and security in mind — you can understand the entire codebase in half a day.
 
-> **NanoClaw -> EvoClaw**: EvoClaw was developed from NanoClaw and powers the 小Evo AI assistant.
-
 ---
 
 ## Table of Contents
@@ -140,7 +138,7 @@ Coordinate specialized agent teams for complex tasks using the built-in swarm or
 
 ### Scheduled Tasks
 
-Support for `cron`, `interval`, and one-time (`once`) execution via NanoClaw's scheduler integration.
+Support for `cron`, `interval`, and one-time (`once`) execution via the built-in scheduler.
 
 ---
 
@@ -367,4 +365,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
 
 ---
 
-*Built with care by NanoClaw -> EvoClaw lineage*
+*Built with care by the EvoClaw team*

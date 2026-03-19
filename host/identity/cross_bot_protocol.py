@@ -97,7 +97,7 @@ class CrossBotMessage:
 
 
 class CrossBotProtocol:
-    """Handles cross-bot communication for NanoClaw <-> EvoClaw."""
+    """Handles cross-bot communication between external bots and EvoClaw."""
 
     def __init__(self, my_bot_id: str, registry=None, secret: Optional[str] = None):
         self.my_bot_id = my_bot_id

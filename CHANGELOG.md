@@ -4,10 +4,10 @@
 
 ### Added (Phase 3: Cross-bot Identity + RBAC Foundation)
 - `host/identity/bot_registry.py` -- BotRegistry: SQLite-backed cross-framework bot identity store
-  - Stable `bot_id = SHA-256(name:framework:channel)[:16]` format shared across NanoClaw/EvoClaw
+  - Stable `bot_id = SHA-256(name:framework:channel)[:16]` format for cross-framework bot identity
   - BotIdentity dataclass with capabilities, endpoints, trust status
   - Nonce-based handshake protocol for cross-system bot recognition
-  - Pre-registered known bots: 小白 (NanoClaw/Telegram) and 小Eve (EvoClaw/Discord)
+  - Pre-registered known bots: 小白 (Telegram) and 小Eve (EvoClaw/Discord)
   - `bootstrap_known_bots()` pre-registers and trusts known bots on startup
 - `host/identity/cross_bot_protocol.py` -- CrossBotProtocol: `crossbot/1.0` message envelope
   - Message types: hello, ack, memory_share, task_delegate, status, ping, pong
@@ -40,7 +40,7 @@ Gateway (main.py)
 +-- RBACStore          (Phase 3) OK  <- NEW  role-based access control
         |
         v crossbot/1.0
-NanoClaw (小白) <--> EvoClaw (小Eve)
+外部框架 (小白) <--> EvoClaw (小Eve)
 ```
 
 ## [1.12.0-phase2] -- 2026-03-18
@@ -132,7 +132,7 @@ Agent Runtime
 - `reset_group` IPC command: monitor agent can unfreeze stuck groups without human intervention
 - `mcp__evoclaw__reset_group` tool available to agents in Gemini, OpenAI-compat, and Claude modes
 - `groups/telegram_monitor/MEMORY.md` template: watchdog agent persona pre-configured
-- Nanoclaw independent watchdog scheduled task: checks EvoClaw DB every 5 minutes as backup
+- Independent watchdog scheduled task: checks EvoClaw DB every 5 minutes as backup
 
 ## [1.11.31] - 2026-03-17
 ### Added

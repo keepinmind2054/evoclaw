@@ -1,6 +1,6 @@
 """
 Cross-bot Identity Registry — Phase 3
-Enables NanoClaw <-> EvoClaw bot recognition via shared identity protocol.
+Enables cross-framework bot recognition via shared identity protocol.
 
 Protocol:
   1. Each bot has stable bot_id = SHA-256(name:framework:channel)[:16]
@@ -29,7 +29,7 @@ class BotIdentity:
     bot_id: str
     name: str
     display_name: str
-    framework: str        # "nanoclaw" | "evoclaw"
+    framework: str        # "external" | "evoclaw"
     channel: str          # "telegram" | "discord"
     capabilities: List[str] = field(default_factory=list)
     ws_endpoint: Optional[str] = None
@@ -223,7 +223,7 @@ KNOWN_BOTS: Dict[str, dict] = {
     "xiao_bai": {
         "name": "\u5c0f\u767d",
         "display_name": "Andy",
-        "framework": "nanoclaw",
+        "framework": "external",
         "channel": "telegram",
         "capabilities": ["memory", "code", "analysis", "multi-channel"],
     },

@@ -1,7 +1,7 @@
 # Cross-bot Identity Protocol v1.0
 
 ## Overview
-Enables stable identity recognition between NanoClaw-hosted (小白/Andy) and
+Enables stable identity recognition between external bots (小白/Andy) and
 EvoClaw-hosted (小Eve) bots across framework boundaries.
 
 ## Bot ID Generation
@@ -10,7 +10,7 @@ bot_id = SHA-256("{name}:{framework}:{channel}")[:16]
 ```
 
 Examples:
-- 小白: `SHA-256("小白:nanoclaw:telegram")[:16]`
+- 小白: `SHA-256("小白:external:telegram")[:16]`
 - 小Eve: `SHA-256("小eve:evoclaw:discord")[:16]`
 
 ## Message Envelope (crossbot/1.0)
