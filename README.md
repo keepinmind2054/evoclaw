@@ -6,6 +6,8 @@
 [![Docker](https://img.shields.io/badge/docker-required-blue)](https://www.docker.com/)
 [![Security Issues](https://img.shields.io/badge/security%20issues-tracked-orange)](https://github.com/KeithKeepGoing/evoclaw/issues?q=label%3Asecurity)
 
+> **Fork origin**: EvoClaw is forked from [NanoClaw](https://github.com/qwibitai/nanoclaw-discord). Core messaging infrastructure, IPC watcher, and scheduler patterns originate from NanoClaw. EvoClaw extends the foundation with a Python-based AI agent layer, multi-layer memory, skill system, workflow engine, and enterprise connectors.
+
 A lightweight, Python-based multi-model AI agent framework designed for personal use. Built with transparency and security in mind — you can understand the entire codebase in half a day.
 
 ---
@@ -366,3 +368,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
 ---
 
 *Built with care by the EvoClaw team*
+
+---
+*EvoClaw is built on the foundation of [NanoClaw](https://github.com/qwibitai/nanoclaw-discord).*
