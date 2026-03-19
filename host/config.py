@@ -121,6 +121,10 @@ EDITABLE_ENV_KEYS: frozenset = frozenset({
 })
 
 
+# Database (optional — defaults to SQLite)
+DATABASE_URL: str = os.environ.get("DATABASE_URL", "")  # e.g. postgresql://user:pass@host:5432/dbname
+
+
 def get_secrets() -> dict:
     return read_env_file([
         "GOOGLE_API_KEY",
