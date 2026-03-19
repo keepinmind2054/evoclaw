@@ -46,6 +46,8 @@ from typing import TYPE_CHECKING, Optional
 
 logger = logging.getLogger(__name__)
 
+WS_BRIDGE_TOKEN = os.environ.get("WS_BRIDGE_TOKEN", "")
+
 if TYPE_CHECKING:
     from .memory.memory_bus import MemoryBus
 
@@ -103,6 +105,7 @@ class WSBridge:
     async def _handle_connection(self, websocket, path: str = "/"):
         """Handle incoming WebSocket connection from Agent Runtime."""
         agent_id = None
+        _first_message = True
         try:
             async for raw_message in websocket:
                 try:
@@ -110,6 +113,14 @@ class WSBridge:
                 except json.JSONDecodeError:
                     logger.warning(f"WSBridge: invalid JSON from {websocket.remote_address}")
                     continue
+
+                if _first_message:
+                    _first_message = False
+                    if WS_BRIDGE_TOKEN:
+                        token = msg.get("token", "")
+                        if token != WS_BRIDGE_TOKEN:
+                            await websocket.close(1008, "Unauthorized")
+                            return
 
                 msg_type = msg.get("type", "")
                 agent_id = msg.get("agent_id", agent_id)

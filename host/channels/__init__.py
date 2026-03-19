@@ -35,6 +35,7 @@ def get_registered_channel_names() -> list[str]:
 # Phase 3: Matrix channel support
 try:
     from .matrix_channel import MatrixChannel, MatrixMessage, MatrixRoom
+    register_channel_class("matrix", MatrixChannel)
 except ImportError:
     pass
 
