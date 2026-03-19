@@ -87,11 +87,13 @@ class MatrixChannel:
 
     async def send_message(
         self,
-        body: str,
-        room_id: Optional[str] = None,
+        jid: str,
+        text: str,
         formatted: Optional[str] = None,
     ) -> Optional[str]:
         """Send a message to a Matrix room. Returns event_id."""
+        body = text
+        room_id = jid if jid else None
         room = room_id or self.default_room
         if not room:
             logger.error("No Matrix room configured")

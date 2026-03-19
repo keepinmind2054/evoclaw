@@ -115,10 +115,11 @@ class SdkApi:
             return
 
         self._running = True
-        logger.info(f"SdkApi starting on ws://0.0.0.0:{self._port}")
+        _host = os.environ.get("SDK_API_HOST", "127.0.0.1")
+        logger.info(f"SdkApi starting on ws://{_host}:{self._port}")
         async with websockets.serve(
             self._handle_connection,
-            "0.0.0.0",
+            _host,
             self._port,
             max_size=1_048_576,  # 1MB max message
         ):

@@ -87,7 +87,7 @@ DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "admin")
 WEBPORTAL_ENABLED = os.environ.get("WEBPORTAL_ENABLED", "false").lower() == "true"
 WEBPORTAL_PORT = _env_int("WEBPORTAL_PORT", 8766)
 WEBPORTAL_HOST = os.environ.get("WEBPORTAL_HOST", "127.0.0.1")
-HEALTH_PORT = _env_int("HEALTH_PORT", 8767)
+HEALTH_PORT = _env_int("HEALTH_PORT", 8769)
 
 # Channels to load (comma-separated, default: telegram)
 # env var takes priority; fall back to .env file so operators can set it there
