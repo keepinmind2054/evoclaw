@@ -35,12 +35,18 @@ def get_registered_channel_names() -> list[str]:
 # Phase 3: Matrix channel support
 try:
     from .matrix_channel import MatrixChannel, MatrixMessage, MatrixRoom
-    register_channel_class("matrix", MatrixChannel)
+    try:
+        register_channel_class("matrix", MatrixChannel)
+    except Exception:
+        pass
 except ImportError:
     pass
 
 # Phase 3: CrossbotDiscovery — zero-config bot-to-bot auto-trust
-from .crossbot_discovery import CrossbotDiscovery
+try:
+    from .crossbot_discovery import CrossbotDiscovery
+except ImportError:
+    CrossbotDiscovery = None
 
 __all__ = [
     "Channel",
