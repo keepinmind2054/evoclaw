@@ -6,6 +6,10 @@
 [![Docker](https://img.shields.io/badge/docker-required-blue)](https://www.docker.com/)
 [![Security Issues](https://img.shields.io/badge/security%20issues-tracked-orange)](https://github.com/KeithKeepGoing/evoclaw/issues?q=label%3Asecurity)
 
+<p align="center">
+  <img src="assets/evoclaw-logo.svg" alt="EvoClaw Banner" width="100%"/>
+</p>
+
 > **Fork 來源**：EvoClaw 是從 [NanoClaw](https://github.com/qwibitai/nanoclaw-discord) fork 而來。核心訊息基礎架構、IPC watcher 及排程器模式源自 NanoClaw。EvoClaw 在此基礎上擴展了 Python AI 代理層、多層記憶系統、技能系統、工作流程引擎及企業連接器。
 
 ---
