@@ -37,3 +37,14 @@ try:
     from .matrix_channel import MatrixChannel, MatrixMessage, MatrixRoom
 except ImportError:
     pass
+
+# Phase 3: CrossbotDiscovery — zero-config bot-to-bot auto-trust
+from .crossbot_discovery import CrossbotDiscovery
+
+__all__ = [
+    "Channel",
+    "register_channel_class",
+    "get_channel_class",
+    "get_registered_channel_names",
+    "CrossbotDiscovery",
+]
