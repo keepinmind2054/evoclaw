@@ -211,15 +211,16 @@ class AgentIdentityStore:
     def list_agents(self, project: str = "") -> list[AgentIdentity]:
         """List all known agents, optionally filtered by project."""
         try:
-            if project:
-                rows = self._conn.execute(
-                    "SELECT * FROM agent_identities WHERE project = ? ORDER BY last_active DESC",
-                    (project,)
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    "SELECT * FROM agent_identities ORDER BY last_active DESC"
-                ).fetchall()
+            with self._lock:
+                if project:
+                    rows = self._conn.execute(
+                        "SELECT * FROM agent_identities WHERE project = ? ORDER BY last_active DESC",
+                        (project,)
+                    ).fetchall()
+                else:
+                    rows = self._conn.execute(
+                        "SELECT * FROM agent_identities ORDER BY last_active DESC"
+                    ).fetchall()
             return [self._row_to_identity(r) for r in rows]
         except sqlite3.Error as e:
             logger.error(f"AgentIdentity list_agents error: {e}")
