@@ -27,11 +27,10 @@ _SKILLS_DIR = Path(__file__).parent / "skills"
 class SkillLoader:
     """Load and manage natural language skills from SKILL.md files."""
 
-    _skill_locks: dict[str, asyncio.Lock] = {}
-
     def __init__(self, skills_dir: Path | None = None):
         self._dir = skills_dir or _SKILLS_DIR
         self._dir.mkdir(parents=True, exist_ok=True)
+        self._skill_locks: dict[str, asyncio.Lock] = {}
 
     def list_skills(self) -> list[str]:
         """Return names of all available skills."""
@@ -108,9 +107,8 @@ class SkillLoader:
         if not handler_path.exists():
             logger.debug("skill_loader: no handler.py for skill: %s", name)
             return None
-        if name not in self._skill_locks:
-            self._skill_locks[name] = asyncio.Lock()
-        async with self._skill_locks[name]:
+        lock = self._skill_locks.setdefault(name, asyncio.Lock())
+        async with lock:
             module_name = f"_evoclaw_skill_{name}"
             # Remove cached version to force fresh load (hot-swap)
             sys.modules.pop(module_name, None)

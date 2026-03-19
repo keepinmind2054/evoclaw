@@ -31,6 +31,15 @@ _DATA_DIR = os.environ.get("NANOCLAW_DATA_DIR", "")
 _GROUP_FOLDER = os.environ.get("NANOCLAW_GROUP_FOLDER", "")
 _DEFAULT_JID = os.environ.get("NANOCLAW_DISCORD_JID", "")
 
+# Pre-compute the IPC directory path (components are module-level constants).
+# The directory is created lazily on first send(); not at import time, so that
+# a missing NANOCLAW_DATA_DIR at startup does not crash the module.
+_IPC_DIR: Path | None = (
+    Path(_DATA_DIR) / "ipc" / _GROUP_FOLDER / "messages"
+    if _DATA_DIR and _GROUP_FOLDER
+    else None
+)
+
 
 def is_configured() -> bool:
     """Return True when all required env vars are set."""
@@ -45,7 +54,8 @@ def send(text: str, *, chat_jid: Optional[str] = None) -> bool:
     write fails (error is logged but not raised).
     """
     jid = chat_jid or _DEFAULT_JID
-    if not (_DATA_DIR and _GROUP_FOLDER and jid):
+    ipc_dir = _IPC_DIR
+    if not (ipc_dir and jid):
         logger.warning(
             "nanoclaw_bridge: not configured "
             "(NANOCLAW_DATA_DIR=%r NANOCLAW_GROUP_FOLDER=%r NANOCLAW_DISCORD_JID=%r)",
@@ -53,18 +63,12 @@ def send(text: str, *, chat_jid: Optional[str] = None) -> bool:
         )
         return False
 
-    ipc_dir = Path(_DATA_DIR) / "ipc" / _GROUP_FOLDER / "messages"
-    try:
-        ipc_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        logger.error("nanoclaw_bridge: cannot create IPC dir %s: %s", ipc_dir, exc)
-        return False
-
     filename = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}.json"
     payload = json.dumps({"type": "message", "chatJid": jid, "text": text}, ensure_ascii=False)
     tmp_path = ipc_dir / (filename + ".tmp")
     final_path = ipc_dir / filename
     try:
+        ipc_dir.mkdir(parents=True, exist_ok=True)
         tmp_path.write_text(payload, encoding="utf-8")
         tmp_path.rename(final_path)          # atomic on POSIX + same-fs
     except OSError as exc:
