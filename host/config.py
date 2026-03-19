@@ -2,6 +2,7 @@
 import os
 import platform
 import re
+import socket
 from pathlib import Path
 from .env import read_env_file
 
@@ -123,6 +124,12 @@ EDITABLE_ENV_KEYS: frozenset = frozenset({
 
 # Database (optional — defaults to SQLite)
 DATABASE_URL: str = os.environ.get("DATABASE_URL", "")  # e.g. postgresql://user:pass@host:5432/dbname
+
+# Multi-instance Leader Election
+LEADER_ELECTION_ENABLED: bool = os.environ.get("LEADER_ELECTION_ENABLED", "false").lower() == "true"
+LEADER_HEARTBEAT_INTERVAL: int = int(os.environ.get("LEADER_HEARTBEAT_INTERVAL", "10"))
+LEADER_LEASE_TIMEOUT: int = int(os.environ.get("LEADER_LEASE_TIMEOUT", "30"))
+INSTANCE_ID: str = os.environ.get("INSTANCE_ID", f"{socket.gethostname()}:{os.getpid()}")
 
 
 def get_secrets() -> dict:
