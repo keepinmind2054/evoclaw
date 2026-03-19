@@ -10,9 +10,12 @@ New skills can be created dynamically at runtime.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
+import sys
+import types
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +30,12 @@ class SkillLoader:
         self._dir = skills_dir or _SKILLS_DIR
         self._dir.mkdir(parents=True, exist_ok=True)
 
+    def _safe_skill_dir(self, name: str) -> Path:
+        resolved = (self._dir / name).resolve()
+        if not str(resolved).startswith(str(self._dir.resolve())):
+            raise ValueError(f"Path traversal attempt in skill name: {name!r}")
+        return resolved
+
     def list_skills(self) -> list[str]:
         """Return names of all available skills."""
         return sorted(
@@ -37,10 +46,8 @@ class SkillLoader:
 
     def load(self, name: str) -> Optional[str]:
         """Return the SKILL.md content for a skill, or None if not found."""
-        resolved = (self._dir / name).resolve()
-        if not str(resolved).startswith(str(self._dir.resolve())):
-            raise ValueError(f"Path traversal attempt: {name}")
-        skill_file = self._dir / name / "SKILL.md"
+        skill_dir = self._safe_skill_dir(name)
+        skill_file = skill_dir / "SKILL.md"
         if not skill_file.exists():
             logger.warning("skill_loader: skill not found: %s", name)
             return None
@@ -61,10 +68,7 @@ class SkillLoader:
         The agent calls this to teach itself new capabilities.
         Returns True if created, False if already exists and overwrite=False.
         """
-        resolved = (self._dir / name).resolve()
-        if not str(resolved).startswith(str(self._dir.resolve())):
-            raise ValueError(f"Path traversal attempt: {name}")
-        skill_dir = self._dir / name
+        skill_dir = self._safe_skill_dir(name)
         skill_file = skill_dir / "SKILL.md"
         if skill_file.exists() and not overwrite:
             logger.info("skill_loader: skill already exists: %s", name)
@@ -77,15 +81,65 @@ class SkillLoader:
     def delete(self, name: str) -> bool:
         """Remove a skill."""
         import shutil
-        resolved = (self._dir / name).resolve()
-        if not str(resolved).startswith(str(self._dir.resolve())):
-            raise ValueError(f"Path traversal attempt: {name}")
-        skill_dir = self._dir / name
+        skill_dir = self._safe_skill_dir(name)
         if not skill_dir.exists():
             return False
         shutil.rmtree(skill_dir)
         logger.info("skill_loader: deleted skill: %s", name)
         return True
+
+    def exec_skill(self, name: str) -> types.ModuleType | None:
+        """
+        Dynamically load and execute host/skills/{name}/handler.py if it exists.
+        Hot-swap: each call re-imports the module fresh (no caching in sys.modules).
+        Returns the loaded module, or None if no handler.py exists.
+        """
+        skill_dir = self._safe_skill_dir(name)
+        handler_path = skill_dir / "handler.py"
+        if not handler_path.exists():
+            logger.debug("skill_loader: no handler.py for skill: %s", name)
+            return None
+        module_name = f"_evoclaw_skill_{name}"
+        # Remove cached version to force fresh load (hot-swap)
+        sys.modules.pop(module_name, None)
+        spec = importlib.util.spec_from_file_location(module_name, handler_path)
+        if spec is None or spec.loader is None:
+            logger.error("skill_loader: cannot load handler for skill: %s", name)
+            return None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)  # type: ignore[union-attr]
+            logger.info("skill_loader: loaded handler for skill: %s", name)
+            return module
+        except Exception as exc:
+            sys.modules.pop(module_name, None)
+            logger.error("skill_loader: failed to load handler for skill %s: %s", name, exc)
+            return None
+
+    def reload_skill(self, name: str) -> types.ModuleType | None:
+        """
+        Hot-swap: reload an already-loaded skill handler without restarting EvoClaw.
+        Equivalent to exec_skill() but makes the intent explicit.
+        """
+        logger.info("skill_loader: hot-reloading skill: %s", name)
+        return self.exec_skill(name)
+
+    def call_skill(self, name: str, fn: str = "run", **kwargs: Any) -> Any:
+        """
+        Load skill handler and call a specific function within it.
+        Useful for skills that expose a `run(**kwargs)` entry point.
+
+        Example:
+            result = loader.call_skill("weekly-report", fn="run", agent_id="andy")
+        """
+        module = self.exec_skill(name)
+        if module is None:
+            raise FileNotFoundError(f"No handler.py found for skill: {name}")
+        func = getattr(module, fn, None)
+        if func is None:
+            raise AttributeError(f"Skill '{name}' handler has no function '{fn}'")
+        return func(**kwargs)
 
     def skill_summary(self) -> str:
         """Return a human-readable summary of all available skills for agent context."""
@@ -95,11 +149,11 @@ class SkillLoader:
         lines = ["Available skills:"]
         for name in skills:
             content = self.load(name)
-            # Extract first non-empty line as description
+            has_handler = (self._dir / name / "handler.py").exists()
+            handler_tag = " [handler]" if has_handler else ""
             first_line = next(
                 (l.strip() for l in (content or "").splitlines() if l.strip() and not l.startswith("#")),
                 "(no description)"
             )
-            lines.append(f"  - {name}: {first_line}")
-        return "
-".join(lines)
+            lines.append(f"  - {name}{handler_tag}: {first_line}")
+        return "\n".join(lines)
