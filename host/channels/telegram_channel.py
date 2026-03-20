@@ -143,8 +143,12 @@ class TelegramChannel:
                 )
                 await self._app.initialize()
                 await self._app.start()
-                await self._app.updater.start_polling()
-                log.info("Telegram channel connected")
+                # drop_pending_updates=True: flush all messages that accumulated
+                # while the bot was offline or blocked (e.g. during RBAC lockout,
+                # restart, maintenance). Without this, every restart re-processes
+                # all queued messages from Telegram's server-side buffer.
+                await self._app.updater.start_polling(drop_pending_updates=True)
+                log.info("Telegram channel connected (pending updates dropped)")
                 return  # success
             except Exception as e:
                 err_str = str(e).lower()
