@@ -1,3 +1,63 @@
+## [1.17.0-phase10] — 2026-03-20
+
+### Fixed (Phase 10: 全面深度修復 — 30+ 個問題)
+
+第五輪 4 個 agent 並行深度分析並直接修復，務必每個 code 都仔細檢查。涵蓋 agent loop、host 層、安裝體驗、架構比較。
+
+#### container/agent-runner/agent.py — Phase 10A (Agent Loop 8 個 Bug)
+
+- **Gemini TOOL_DECLARATIONS 型別錯誤（CRITICAL）** — 最後 3 個工具被錯誤包裝在 `types.Tool()` 內，放入 `function_declarations` 時類型不符，導致每個 Gemini session 的工具呼叫 runtime crash；修復：全部解包為 `types.FunctionDeclaration`
+- **Gemini loop 缺少假狀態偵測** — Gemini text-only 回覆直接 break，沒有檢查 `✅ Done`、`*(正在執行...)*` 等幻覺模式；修復：加入 `_FAKE_STATUS_RE_G` regex + 連續 3 次 no-tool 硬上限
+- **Gemini loop 缺少 MEMORY.md 強制更新** — 沒有 `_memory_written` 追蹤、倒數第二輪提醒；修復：完整移植 OpenAI loop 的 MEMORY 強制機制
+- **Gemini loop 缺少 milestone enforcer** — 可以無限用 `send_message` 製造假進度；修復：加入完整 milestone enforcer v2
+- **Claude loop 缺少 milestone enforcer** — 只有 `end_turn` 假狀態偵測，缺少 `_turns_since_notify`、中文幻覺模式、MEMORY 提醒；修復：完整補齊
+- **Claude loop 非預期 stop_reason 靜默失敗** — `max_tokens`/`stop_sequence`/`error` 時 `final_response` 為空，用戶收不到任何回覆；修復：加入明確分支擷取部分回覆並記錄 stop_reason
+- **OpenAI loop execute_tool 未包裝** — Phase 9 漏修 OpenAI loop；修復：加入 try/except
+- **OpenAI loop Qwen fallback call 未捕捉** — `tool_choice` 降級的第二次呼叫若 timeout 會 crash；修復：加入 try/except + 友好中文錯誤訊息
+- **`evolution_hints` soul.md 繞過防護** — 加入 regex 檢查惡意 hints，偵測到時整體清除並記錄 SECURITY
+
+#### host/ — Phase 10B (Host Layer 8 個 Bug)
+
+- **stdout 無上限讀取 OOM（CRITICAL）** — `proc.stdout.read()` 無大小限制，失控容器可耗盡主機記憶體；修復：64 KiB chunk 讀取，上限 2 MB
+- **`_identity_store` NameError 靜默吞噬** — Phase 1 身份追蹤完全失效，每條訊息都在靜默出錯；修復：升級為模組層級 global
+- **`_dedup_lock`/`_group_fail_lock` None 值** — main() 執行前若被呼叫會 TypeError crash；修復：加入 None guard
+- **雙重 timeout 干擾 docker cleanup** — 內外兩層 wait_for 互相觸發，orphan containers；修復：外層改為 CONTAINER_TIMEOUT + 30s backstop
+- **Telegram send_message 例外傳播** — 網路錯誤/403 被誤判為容器執行失敗，觸發重試；修復：加入 try/except
+- **JID 格式錯誤導致 ValueError crash** — malformed JID 在 send_message 中 crash；修復：加入型別驗證
+- **Discord `import re` 在熱路徑中** — 每條訊息都執行 import；修復：移至模組層級
+- **Discord 2000 字元訊息靜默消失** — 超長回覆觸發 Discord API 400，整條訊息丟失；修復：自動分割成 2000 字元片段送出
+- **scheduled_tasks 缺少索引** — 全表掃描；修復：加入 `idx_scheduled_tasks_status_next_run`
+- **RBAC `_is_empty()` 無快取** — 每次 permission check 觸發兩次 DB 查詢；修復：加入 60s TTL 快取
+
+#### host/main.py + host/container_runner.py — Phase 10D (架構修復)
+
+- **Docker image 啟動預熱** — 首次請求不再付 docker pull 代價，加入背景 `_prepull_image()` task
+- **Circuit breaker 顯示實際剩餘秒數** — 不再永遠說「約 60 秒」，改為顯示真實剩餘時間
+- **錯誤訊息分類改善** — OOM/timeout/crash/格式錯誤分別有不同的中文提示
+
+#### setup/ docs/ — Phase 10C (安裝體驗 11 個問題)
+
+- **`QWEN_API_KEY` 根本不存在（CRITICAL）** — 文件和 setup.py 全部錯誤；修復：改為正確的 `NIM_API_KEY`
+- **`setup.sh` 在檢查 Node.js** — EvoClaw 是 Python 專案；修復：完整重寫，檢查 Python 3.11+ 和 Docker
+- **`scripts/evoclaw.service` 不存在** — 文件說要 cp 這個檔案但根本沒有；修復：新增完整 systemd unit file
+- **QUICK_START.md / TROUBLESHOOTING.md** — 大量錯誤資訊、缺少 OWNER_IDS、缺少部署說明；全部重寫
+- **`OWNER_IDS` 只讀 os.environ** — `.env` 檔案裡設定的值不生效；修復：同時從 read_env_file 讀取
+- **setup/setup.py 只支援 Gemini** — 新增 4 個 LLM provider 選單
+
+### 今日緊急修復（部署中發現）
+
+- **PR #344** — Discord @mention 正規化（`<@BOT_ID>` → `@Eve`）
+- **PR #345** — OWNER_IDS env var 啟動時自動授權
+- **PR #346** — RBAC 空白時 fail-open
+- **PR #347** — `proc is None` guard（AttributeError 修復）
+- **PR #348** — Qwen API httpx.Timeout（防止無限卡死）
+- **PR #349** — Telegram `drop_pending_updates=True`（防止重啟後重播舊訊息）
+
+### Issues Addressed
+#350 #351 #352 #353
+
+---
+
 ## [1.16.0-phase9] — 2026-03-20
 
 ### Fixed (Phase 9: 穩定性全面修復 — 12 個問題)

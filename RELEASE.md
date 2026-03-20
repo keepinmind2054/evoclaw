@@ -1,5 +1,42 @@
 # Release Notes
 
+## EvoClaw v1.17.0 — Phase 10 全面深度修復 — 2026-03-20
+
+### 概述
+
+第五輪深度分析，4 個 agent 仔細讀過每一行 code，發現並修復 30+ 個問題。本版本是迄今最全面的一次修復，涵蓋 agent loop、host 層、安裝體驗、以及 NanoClaw vs EvoClaw 架構差距分析。
+
+### 最重要的修復
+
+| 問題 | 嚴重程度 | 影響 |
+|------|---------|------|
+| Gemini TOOL_DECLARATIONS 型別錯誤 | CRITICAL | 每個 Gemini session 的工具呼叫全部崩潰 |
+| stdout 無上限讀取 | CRITICAL | 惡意/失控容器可耗盡主機記憶體 |
+| `QWEN_API_KEY` 根本不存在 | CRITICAL | 文件誤導用戶，Qwen 永遠無法設定成功 |
+| `_identity_store` NameError | HIGH | Phase 1 身份追蹤功能完全失效 |
+| Discord 2000 字元靜默消失 | HIGH | 長回覆整條訊息丟失 |
+| 雙重 timeout orphan containers | HIGH | 殭屍容器無限累積 |
+| Gemini/Claude 缺少假狀態防護 | HIGH | 兩個 provider 可產生虛假回應 |
+
+### 核心改變
+
+| 項目 | 修改前 | 修改後 |
+|------|--------|--------|
+| Gemini 工具宣告 | 型別錯誤（crash） | 正確的 FunctionDeclaration |
+| 3 個 provider 假狀態防護 | 只有 OpenAI | 全部 3 個 provider 一致 |
+| stdout 讀取上限 | 無限制 | 2 MB 硬上限 |
+| Discord 長訊息 | 靜默消失 | 自動分割 2000 字元 |
+| Docker image 預熱 | 無 | 啟動時背景 pull |
+| Circuit breaker 等待提示 | 永遠「約 60 秒」 | 實際剩餘秒數 |
+| setup.sh | 檢查 Node.js（錯誤！） | 正確檢查 Python 3.11+ + Docker |
+| LLM 環境變數 | `QWEN_API_KEY`（不存在） | `NIM_API_KEY`（正確） |
+
+### 今日緊急修復（部署中即時發現修復）
+
+在你部署時我們即時發現並修復了 6 個問題：RBAC 鎖死所有人、Discord @mention 無效、proc.returncode AttributeError、Qwen API 無限卡死、重啟後重播舊訊息。
+
+---
+
 ## EvoClaw v1.16.0 — Phase 9 穩定性全面修復 — 2026-03-20
 
 ### 概述
