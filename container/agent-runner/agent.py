@@ -76,6 +76,10 @@ _ALLOWED_PATH_PREFIXES = (
 # Module-level chat JID — populated from input JSON so tool_send_file can auto-detect it
 _input_chat_jid: str = ""
 
+# History / tool-result size limits (P9A)
+_MAX_TOOL_RESULT_CHARS = 4000  # ~4KB per tool result
+_MAX_HISTORY_MESSAGES = 40     # max messages in history
+
 
 def _log(tag: str, msg: str = "") -> None:
     """Structured stderr logging with millisecond timestamps."""
@@ -964,14 +968,16 @@ CLAUDE_TOOL_DECLARATIONS = [
 ]
 
 
-def run_agent_claude(client_holder, model: str, system_instruction: str, user_message: str, chat_jid: str, conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None, max_iter: int = 20) -> str:
+def run_agent_claude(client_holder, model: str, system_instruction: str, user_message: str, chat_jid: str, conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None, max_iter: int = 20, group_folder: str = "") -> str:
     """
     Anthropic Claude agentic loop.
     client_holder: a one-element list [client] so key rotation can swap the client mid-loop.
     conversation_history: 最近的對話記錄，以原生 multi-turn 格式注入。
     pool/apply_key_fn: optional key pool for automatic rotation on rate-limit errors.
     max_iter: maximum number of agentic loop iterations (default 20; caller sets based on task complexity).
+    group_folder: path to the group folder (used for MEMORY.md tracking).
     """
+    import re as _re_claude
     messages = []
     # 注入對話歷史（原生 multi-turn 格式）
     if conversation_history:
@@ -983,6 +989,8 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
     messages.append({"role": "user", "content": user_message})
     MAX_ITER = max_iter
     final_response = ""
+    _memory_written = False  # True once agent writes to MEMORY.md this session
+    _memory_path_str = str(Path(group_folder) / "MEMORY.md") if group_folder else "MEMORY.md"
 
     for n in range(MAX_ITER):
         _log("🧠 LLM →", f"turn={n} provider=claude")
@@ -1005,6 +1013,20 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
                 block.text for block in response.content
                 if hasattr(block, "text")
             )
+            # ── Fake status detection on end_turn (no tool calls made) ─────────
+            _FAKE_STATUS_RE = _re_claude.compile(r'\*\([^)]*\)\*|\*\[[^\]]*\]\*|✅\s*Done|✅\s*完成', _re_claude.DOTALL)
+            _fake_hits = _FAKE_STATUS_RE.findall(final_response)
+            if _fake_hits and n < MAX_ITER - 1:
+                _log("⚠️ FAKE-STATUS", f"Claude wrote {len(_fake_hits)} fake status indicator(s) without tool calls")
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "【系統警告】你剛才的回覆包含假狀態指示（例如 ✅ Done 或 *(正在執行...)* ），但沒有呼叫任何工具。"
+                        "請立刻使用 Bash tool 或其他工具實際執行所需命令，不要只是描述或假裝完成。"
+                    ),
+                })
+                final_response = ""
+                continue
             break
 
         if response.stop_reason != "tool_use":
@@ -1014,17 +1036,50 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
         tool_results = []
         for block in response.content:
             if block.type == "tool_use":
-                result = execute_tool(block.name, block.input, chat_jid)
+                try:
+                    result = execute_tool(block.name, block.input, chat_jid)
+                except Exception as e:
+                    result = f"[Tool error: {e}]"
+                    _log("❌ TOOL-EXC", f"Tool {block.name} raised exception: {e}")
+                # Truncate large tool results before adding to history
+                result_str = str(result)
+                if len(result_str) > _MAX_TOOL_RESULT_CHARS:
+                    result_str = result_str[:_MAX_TOOL_RESULT_CHARS] + f"\n[... truncated {len(result_str) - _MAX_TOOL_RESULT_CHARS} chars]"
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
-                    "content": result,
+                    "content": result_str,
                 })
+                # Track MEMORY.md writes
+                if not _memory_written and block.name in {"Write", "Edit", "Bash"}:
+                    _block_args = str(block.input) if block.input else ""
+                    if "MEMORY.md" in _block_args or _memory_path_str in _block_args:
+                        _memory_written = True
+                        _log("🧠 MEMORY-WRITE", f"Claude updated MEMORY.md via {block.name} on turn {n}")
 
         if not tool_results:
             break
 
         messages.append({"role": "user", "content": tool_results})
+
+        # Trim history to prevent unbounded growth (keep index 0 = first user msg)
+        if len(messages) > _MAX_HISTORY_MESSAGES:
+            messages = messages[:1] + messages[-(  _MAX_HISTORY_MESSAGES - 1):]
+
+        # ── MEMORY.md reminder on penultimate turn ───────────────────────────
+        if not _memory_written and n == MAX_ITER - 2:
+            _log("⚠️ MEMORY-REMIND", f"MEMORY.md not updated by turn {n} — injecting CRITICAL reminder")
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"【CRITICAL 系統警告】你在本 session 中尚未更新 MEMORY.md（{_memory_path_str}）。\n"
+                    "這是倒數第二輪。你必須在結束前執行以下操作：\n"
+                    "1. 使用 Write/Edit 工具更新 MEMORY.md\n"
+                    "2. 在 `## 任務記錄 (Task Log)` 區段追加今日任務摘要\n"
+                    "3. 若 `## 身份 (Identity)` 有新發現（弱點、原則），同步更新\n"
+                    "格式：`[YYYY-MM-DD] <做了什麼、關鍵決策、解決方法>`"
+                ),
+            })
 
     # If the loop exhausted MAX_ITER without an end_turn, return whatever we have.
     # Avoids returning silent empty string to the host.
@@ -1377,11 +1432,19 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                     })
                     continue
             result = execute_tool(tc.function.name, args, chat_jid)
+            # Truncate large tool results before adding to history
+            result_str = str(result)
+            if len(result_str) > _MAX_TOOL_RESULT_CHARS:
+                result_str = result_str[:_MAX_TOOL_RESULT_CHARS] + f"\n[... truncated {len(result_str) - _MAX_TOOL_RESULT_CHARS} chars]"
             history.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
-                "content": result,
+                "content": result_str,
             })
+
+        # Trim history to prevent unbounded growth (keep system msg at index 0)
+        if len(history) > _MAX_HISTORY_MESSAGES:
+            history = history[:1] + history[-(  _MAX_HISTORY_MESSAGES - 1):]
 
     if not final_response:
         _log("⚠️ LOOP-EXHAUST", f"OpenAI agent loop hit MAX_ITER={MAX_ITER} without finish_reason=stop — no final text collected")
@@ -1463,16 +1526,27 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
         fn_responses = []
         for part in fn_calls:
             fc = part.function_call
-            result = execute_tool(fc.name, dict(fc.args), chat_jid)
+            try:
+                result = execute_tool(fc.name, dict(fc.args), chat_jid)
+            except Exception as e:
+                result = f"[Tool error: {e}]"
+                _log("❌ TOOL-EXC", f"Tool {fc.name} raised exception: {e}")
+            # Truncate large tool results before adding to history
+            result_str = str(result)
+            if len(result_str) > _MAX_TOOL_RESULT_CHARS:
+                result_str = result_str[:_MAX_TOOL_RESULT_CHARS] + f"\n[... truncated {len(result_str) - _MAX_TOOL_RESULT_CHARS} chars]"
             # 將工具結果包裝成 FunctionResponse 格式，Gemini 要求此格式
             fn_responses.append(
                 types.Part(function_response=types.FunctionResponse(
                     name=fc.name,
-                    response={"result": result},
+                    response={"result": result_str},
                 ))
             )
         # 工具結果以 user role 加回 history（Gemini function calling 協議要求）
         history.append(types.Content(role="user", parts=fn_responses))
+        # Trim history to prevent unbounded growth
+        if len(history) > _MAX_HISTORY_MESSAGES:
+            history = history[:2] + history[-(  _MAX_HISTORY_MESSAGES - 2):]
 
     if not final_response:
         _log("⚠️ LOOP-EXHAUST", f"Gemini agent loop hit MAX_ITER={MAX_ITER} without text response — no final text collected")
