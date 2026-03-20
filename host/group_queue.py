@@ -286,8 +286,19 @@ class GroupQueue:
         """
         state.retry_count += 1
         if state.retry_count > MAX_RETRIES:
-            log.error(f"[{group_jid}] Max retries exceeded — dropping (will retry on next message)")
+            log.error(f"[{group_jid}] Max retries exceeded — dropping message (will retry on next new message)")
             state.retry_count = 0
+            # Notify user so they are not left with a silent non-response
+            try:
+                from . import main as _main_mod
+                _route = getattr(_main_mod, "route_outbound", None)
+                if _route and asyncio.get_event_loop().is_running():
+                    asyncio.create_task(
+                        _route(group_jid, "⚠️ 系統暫時無法處理訊息，請稍後重新傳送。"),
+                        name=f"retry-exceeded-notify-{group_jid}"
+                    )
+            except Exception as _ne:
+                log.warning("Failed to send retry-exceeded notification to %s: %s", group_jid, _ne)
             return
 
         delay = BASE_RETRY_SECS * (2 ** (state.retry_count - 1))
