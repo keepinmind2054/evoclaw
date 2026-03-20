@@ -1,6 +1,6 @@
 # EvoClaw
 
-[![Version](https://img.shields.io/badge/version-v1.13.1-blue)](https://github.com/KeithKeepGoing/evoclaw/blob/main/CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v1.15.0-blue)](https://github.com/KeithKeepGoing/evoclaw/blob/main/CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Docker](https://img.shields.io/badge/docker-required-blue)](https://www.docker.com/)
@@ -329,6 +329,10 @@ groups/
 ## 進化引擎
 
 EvoClaw 內建受生物學啟發的自我適應系統，助手會隨著時間自動改進，無需手動調整。
+
+<p align="center">
+  <img src="assets/evoclaw-architecture.png" alt="EvoClaw Evolution Engine Architecture Overview" width="100%"/>
+</p>
 
 ### 五大機制
 
