@@ -133,22 +133,28 @@ def _record_docker_failure(group_folder: str = "_global") -> None:
         log.warning("[%s] Docker failure recorded (count=%d)", group_folder, _docker_failures[group_folder])
 
 
-def _docker_circuit_open(group_folder: str = "_global") -> bool:
-    """Per-group circuit breaker：每個群組獨立追蹤，互不干擾。"""
+def _docker_circuit_open(group_folder: str = "_global") -> float:
+    """Per-group circuit breaker：每個群組獨立追蹤，互不干擾。
+
+    Returns 0.0 when the circuit is closed (requests allowed).
+    Returns the remaining cooldown seconds (> 0) when the circuit is open.
+    Callers should treat any non-zero return as "circuit open".
+    """
     global _docker_failures, _docker_failure_time
     with _docker_failure_lock:
         failures = _docker_failures.get(group_folder, 0)
         if failures < _DOCKER_CIRCUIT_THRESHOLD:
-            return False
+            return 0.0
         last_failure = _docker_failure_time.get(group_folder, 0.0)
         elapsed = time.time() - last_failure
         if elapsed >= _DOCKER_HALF_OPEN_SECS:
             _docker_failures[group_folder] = 0  # Reset counter when half-open
             log.info("[%s] Docker circuit half-open after %.0fs", group_folder, elapsed)
-            return False
+            return 0.0
+        remaining = _DOCKER_HALF_OPEN_SECS - elapsed
         log.warning("[%s] Docker circuit OPEN (failures=%d, retry in %.0fs)",
-                    group_folder, failures, _DOCKER_HALF_OPEN_SECS - elapsed)
-        return True
+                    group_folder, failures, remaining)
+        return remaining
 
 
 def get_active_containers() -> list[dict]:
@@ -342,10 +348,12 @@ async def run_container_agent(
 
     folder = group["folder"]
 
-    if _docker_circuit_open(folder):
+    _circuit_remaining = _docker_circuit_open(folder)
+    if _circuit_remaining:
+        _wait_secs = int(_circuit_remaining) + 1  # round up so user isn't surprised by early retry
         await _notify_error(
             f"⚠️ 此群組 Docker 暫時受阻（連續失敗 {_DOCKER_CIRCUIT_THRESHOLD} 次），"
-            f"約 {_DOCKER_HALF_OPEN_SECS} 秒後自動恢復。其他群組不受影響。"
+            f"請等待約 {_wait_secs} 秒後再試，屆時將自動恢復。其他群組不受影響。"
         )
         return {"status": "error", "error": f"Docker circuit breaker open for {folder}"}
     jid = group["jid"]

@@ -655,9 +655,18 @@ async def _process_group_messages(group: dict, messages: list[dict],
             async with _group_fail_lock:
                 _group_fail_counts[jid] = _group_fail_counts.get(jid, 0) + 1
                 _group_fail_timestamps[jid] = time.time()
-            # Notify user so they know something went wrong instead of seeing silence
+            # Notify user so they know something went wrong instead of seeing silence.
+            # Show a brief, user-friendly hint based on the error category so the user
+            # understands what happened and what to do next (P10D improvement).
+            _err_lower = _err_detail.lower()
+            if "json" in _err_lower or "parse" in _err_lower:
+                _user_hint = "⚠️ AI 回應格式異常，將自動重試，無需任何操作。"
+            elif "no output" in _err_lower or "marker" in _err_lower:
+                _user_hint = "⚠️ AI 執行時中斷，將自動重試，無需任何操作。"
+            else:
+                _user_hint = "⚠️ 系統暫時發生問題，請稍後重新傳送訊息。"
             try:
-                await route_outbound(jid, f"⚠️ 發生錯誤，請稍後再試。(run_id={run_id})")
+                await route_outbound(jid, _user_hint)
             except Exception as _notify_exc:
                 log.warning("Failed to send error notification to %s: %s", jid, _notify_exc)
     except asyncio.TimeoutError:
@@ -671,11 +680,13 @@ async def _process_group_messages(group: dict, messages: list[dict],
             _group_fail_counts[jid] = _group_fail_counts.get(jid, 0) + 1
             _group_fail_timestamps[jid] = time.time()
         # DO NOT call on_success() — cursor stays behind so message is retried
-        # Notify user that we're still working
+        # Notify user with the actual timeout limit so they understand the delay (P10D improvement).
+        _timeout_mins = int(config.CONTAINER_TIMEOUT) // 60
+        _timeout_display = f"{_timeout_mins} 分鐘" if _timeout_mins > 0 else f"{int(config.CONTAINER_TIMEOUT)} 秒"
         try:
             await route_outbound(
                 jid,
-                "⏱️ 請求處理時間過長，將自動重試。"
+                f"⏱️ 請求超過 {_timeout_display} 仍未完成，系統將自動重試，請稍候。"
             )
         except Exception as _tout_exc:
             log.warning("Failed to send timeout notification to %s: %s", jid, _tout_exc)
@@ -1016,6 +1027,36 @@ async def main() -> None:
 
     # 清除上次程序崩潰後遺留的 evoclaw-* container，避免資源洩漏
     await cleanup_orphans()
+
+    # ── Docker image pre-pull at startup (P10D Fix) ───────────────────────────
+    # Pre-pull the container image in the background so the first real request
+    # doesn't pay the 10-30s cold-pull penalty.  If the image is already cached
+    # locally this completes in < 1s.  Runs as a fire-and-forget task so it
+    # never blocks startup or message processing.
+    async def _prepull_image() -> None:
+        img = config.CONTAINER_IMAGE
+        log.info("Pre-pulling container image %r in background…", img)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "pull", img,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr_data = await asyncio.wait_for(proc.communicate(), timeout=300.0)
+            if proc.returncode == 0:
+                log.info("Container image %r is ready (pre-pull complete)", img)
+            else:
+                stderr_text = (stderr_data or b"").decode(errors="replace").strip()
+                log.warning(
+                    "Container image pre-pull exited with code %d: %s",
+                    proc.returncode, stderr_text[-200:],
+                )
+        except asyncio.TimeoutError:
+            log.warning("Container image pre-pull timed out after 300s — will pull on first request")
+        except Exception as exc:
+            log.warning("Container image pre-pull failed (non-fatal): %s", exc)
+
+    asyncio.create_task(_prepull_image(), name="image-prepull")
 
     # ── 將 GroupQueue 與實際的訊息處理邏輯串接 ──────────────────────────────
     async def _process_messages_for_jid(jid: str) -> bool:
