@@ -23,6 +23,7 @@ from host.evolution.fitness import record_run
 from host.evolution.adaptive import get_adaptive_hints, get_genome_style_hints
 from host.evolution.immune import check_message, get_immune_status
 from host.evolution.daemon import evolution_loop
+from host.evolution.genome import is_genome_valid, reset_genome
 
 __all__ = [
     "record_run",
@@ -31,4 +32,6 @@ __all__ = [
     "check_message",
     "get_immune_status",
     "evolution_loop",
+    "is_genome_valid",
+    "reset_genome",
 ]

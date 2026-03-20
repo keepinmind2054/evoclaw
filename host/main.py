@@ -456,6 +456,22 @@ async def _on_message(jid: str, sender: str, sender_name: str, content: str,
     safe, threat_type = immune_check(content, sender)
     if not safe:
         log.warning(f"Immune system blocked message from {sender}: {threat_type}")
+        # Fix p11d: inform the user so they don't silently wonder why they got no reply.
+        # Use a brief, non-revealing message to avoid giving attackers feedback about
+        # which specific pattern triggered the block.
+        try:
+            from .router import route_outbound
+            if threat_type == "blocked":
+                reply = "⚠️ 您的帳號已被系統暫時限制，請聯繫管理員。"
+            elif threat_type == "injection":
+                reply = "⚠️ 偵測到不允許的指令格式，訊息未被處理。"
+            elif threat_type == "spam":
+                reply = "⚠️ 偵測到重複訊息，請稍後再試。"
+            else:
+                reply = "⚠️ 訊息未被處理。"
+            await route_outbound(jid, reply)
+        except Exception as _immune_reply_exc:
+            log.debug("immune: failed to send block notification: %s", _immune_reply_exc)
         return
 
     ts = int(time.time() * 1000)

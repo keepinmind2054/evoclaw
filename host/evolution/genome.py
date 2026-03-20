@@ -99,6 +99,61 @@ def upsert_genome(jid: str, **kwargs) -> None:
         log.error("upsert_genome failed (jid=%s): %s", jid, exc)
 
 
+def is_genome_valid(genome: dict) -> bool:
+    """
+    Validate that a genome dict has sane values.
+
+    Returns False (bad genome) if:
+      - formality or technical_depth is outside [0, 1]
+      - response_style is not one of the allowed values
+      - generation is negative
+    """
+    valid_styles = {"concise", "balanced", "detailed"}
+    try:
+        formality = float(genome.get("formality", 0.5))
+        tech_depth = float(genome.get("technical_depth", 0.5))
+        if not (0.0 <= formality <= 1.0):
+            return False
+        if not (0.0 <= tech_depth <= 1.0):
+            return False
+        if genome.get("response_style", "balanced") not in valid_styles:
+            return False
+        if int(genome.get("generation", 0)) < 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def reset_genome(jid: str) -> None:
+    """
+    Reset a group's genome to defaults (used when a bad/corrupted genome is detected).
+
+    Logs a warning and writes DEFAULT_GENOME values back to the DB, preserving the
+    existing generation counter so evolution history is not lost.
+    """
+    from host import db
+    try:
+        existing = db.get_group_genome(jid)
+        gen = 0
+        if existing:
+            try:
+                gen = max(0, int(existing.get("generation", 0)))
+            except (TypeError, ValueError):
+                gen = 0
+        log.warning("reset_genome: resetting bad genome for jid=%s (was: %s)", jid, existing)
+        db.upsert_group_genome(
+            jid,
+            response_style=DEFAULT_GENOME["response_style"],
+            formality=DEFAULT_GENOME["formality"],
+            technical_depth=DEFAULT_GENOME["technical_depth"],
+            generation=gen,
+        )
+        log.info("reset_genome: genome reset to defaults for jid=%s (generation=%d)", jid, gen)
+    except Exception as exc:
+        log.error("reset_genome failed for jid=%s: %s", jid, exc)
+
+
 def evolve_genome_from_fitness(jid: str, fitness: float, avg_response_ms: float) -> None:
     """
     根據適應度和回應時間，自動調整群組基因組（全三維演化）。
@@ -130,14 +185,17 @@ def evolve_genome_from_fitness(jid: str, fitness: float, avg_response_ms: float)
     else:
         new_style = response_style
 
-    # Evolve formality: nudge toward 0.5 baseline, adjust based on fitness
-    # High fitness + fast responses → slightly more formal (confidence)
-    # Low fitness → nudge toward neutral (0.5) using convergence-stop helper
-    FORMALITY_STEP = 0.05
+    # Evolve formality: nudge toward target based on fitness.
+    # Fix p11d: both upward (target=0.7) and downward (target=0.5) nudges now use
+    # update_formality() which applies a proportional step with convergence-stop.
+    # Previously the upward path used a fixed +0.05 step while the downward path used
+    # a proportional step, causing asymmetric pressure that made formality creep to 1.0
+    # whenever fitness alternated around the 0.7/0.4 thresholds over many cycles.
     if fitness > 0.7 and avg_response_ms < 8000:
-        formality = min(1.0, formality + FORMALITY_STEP)
+        # Nudge toward 0.7 (confident/formal), with convergence stop
+        formality = update_formality(formality, target=0.7)
     elif fitness < 0.4:
-        # Nudge toward neutral, with convergence stop to prevent infinite oscillation
+        # Nudge toward neutral (0.5), with convergence stop to prevent infinite oscillation
         formality = update_formality(formality, target=0.5)
     formality = round(max(0.0, min(1.0, formality)), 3)
 
