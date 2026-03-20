@@ -78,8 +78,9 @@ _active_containers: dict[str, dict] = {}  # container_name → info dict
 _active_lock = asyncio.Lock()  # asyncio.Lock for use in async coroutines
 
 # ── Docker circuit breaker ─────────────────────────────────────────────────────
-_docker_failures = 0
-_docker_failure_time: float = 0.0   # time.time() of last recorded failure (for half-open)
+# Per-group circuit breaker（每個群組獨立追蹤失敗）
+_docker_failures: dict = {}       # group_folder → int
+_docker_failure_time: dict = {}   # group_folder → float
 _docker_failure_lock = _threading.Lock()
 _DOCKER_CIRCUIT_THRESHOLD = 3   # open circuit after this many consecutive failures
 _DOCKER_HALF_OPEN_SECS = 60     # try ONE request after 60s of open circuit (half-open state)
@@ -115,45 +116,38 @@ def _get_empty_env_file() -> str | None:
             return None
 
 
-def _record_docker_success() -> None:
+def _record_docker_success(group_folder: str = "_global") -> None:
     global _docker_failures, _docker_failure_time
     with _docker_failure_lock:
-        _docker_failures = 0
-        _docker_failure_time = 0.0
+        if group_folder in _docker_failures:
+            del _docker_failures[group_folder]
+        if group_folder in _docker_failure_time:
+            del _docker_failure_time[group_folder]
 
 
-def _record_docker_failure() -> None:
+def _record_docker_failure(group_folder: str = "_global") -> None:
     global _docker_failures, _docker_failure_time
     with _docker_failure_lock:
-        _docker_failures += 1
-        _docker_failure_time = time.time()
+        _docker_failures[group_folder] = _docker_failures.get(group_folder, 0) + 1
+        _docker_failure_time[group_folder] = time.time()
+        log.warning("[%s] Docker failure recorded (count=%d)", group_folder, _docker_failures[group_folder])
 
 
-def _docker_circuit_open() -> bool:
-    """Returns True if the Docker circuit breaker is open (too many consecutive failures).
-
-    Implements a half-open state: after _DOCKER_HALF_OPEN_SECS seconds have passed
-    since the last failure, we reset the counter to THRESHOLD-1 and allow ONE trial
-    request through. If that request succeeds, _record_docker_success() resets to 0.
-    If it fails, _record_docker_failure() pushes it back to THRESHOLD and the circuit
-    re-opens for another _DOCKER_HALF_OPEN_SECS seconds.
-
-    Without this, a permanently-open circuit can never self-heal without a process restart.
-    """
+def _docker_circuit_open(group_folder: str = "_global") -> bool:
+    """Per-group circuit breaker：每個群組獨立追蹤，互不干擾。"""
     global _docker_failures, _docker_failure_time
     with _docker_failure_lock:
-        if _docker_failures < _DOCKER_CIRCUIT_THRESHOLD:
+        failures = _docker_failures.get(group_folder, 0)
+        if failures < _DOCKER_CIRCUIT_THRESHOLD:
             return False
-        # Circuit is open — check if it's time to enter half-open state
-        elapsed = time.time() - _docker_failure_time
+        last_failure = _docker_failure_time.get(group_folder, 0.0)
+        elapsed = time.time() - last_failure
         if elapsed >= _DOCKER_HALF_OPEN_SECS:
-            # Half-open: allow ONE trial request by stepping back to THRESHOLD-1
-            _docker_failures = _DOCKER_CIRCUIT_THRESHOLD - 1
-            log.info(
-                "Docker circuit breaker half-open after %.0fs — allowing one trial request",
-                elapsed,
-            )
+            _docker_failures[group_folder] = _DOCKER_CIRCUIT_THRESHOLD - 1
+            log.info("[%s] Docker circuit half-open after %.0fs", group_folder, elapsed)
             return False
+        log.warning("[%s] Docker circuit OPEN (failures=%d, retry in %.0fs)",
+                    group_folder, failures, _DOCKER_HALF_OPEN_SECS - elapsed)
         return True
 
 
@@ -346,14 +340,14 @@ async def run_container_agent(
             except Exception as _ne:
                 log.debug("on_error callback raised: %s", _ne)
 
-    if _docker_circuit_open():
-        await _notify_error("🔌 Docker 服務暫時無法連線，請確認 Docker Desktop 是否正在執行。")
-        raise RuntimeError(
-            f"Docker circuit breaker open: {_docker_failures} consecutive failures. "
-            "Check Docker daemon status."
-        )
-
     folder = group["folder"]
+
+    if _docker_circuit_open(folder):
+        await _notify_error(
+            f"⚠️ 此群組 Docker 暫時受阻（連續失敗 {_DOCKER_CIRCUIT_THRESHOLD} 次），"
+            f"約 {_DOCKER_HALF_OPEN_SECS} 秒後自動恢復。其他群組不受影響。"
+        )
+        return {"status": "error", "error": f"Docker circuit breaker open for {folder}"}
     jid = group["jid"]
     # 用時間戳記讓 container 名稱唯一，方便 debug 與孤兒清理
     run_id = str(uuid.uuid4())
@@ -596,11 +590,11 @@ async def run_container_agent(
 
             if _container_ran:
                 log.info("Container %s crashed before emit() but Docker is healthy — resetting circuit breaker", container_name)
-                _record_docker_success()
+                _record_docker_success(folder)
             else:
                 # 只有在沒有 EvoClaw 輸出時才判定 Docker 異常
                 log.warning("Container produced no EvoClaw markers in stderr — possible Docker daemon issue or crash before init")
-                _record_docker_failure()
+                _record_docker_failure(folder)
             # Bundle stderr context for monitor channel (separator parsed by on_error in main.py)
             _stderr_ctx_lines = [_redact_secrets(l) for l in (stderr_lines or [])[-15:]]
             _stderr_ctx = (
@@ -626,7 +620,7 @@ async def run_container_agent(
             response_ms = int((time.time() - t0) * 1000)
             record_run(jid, run_id, response_ms, retry_count=0, success=False)
             db.log_container_finish(run_id, time.time(), "error", _redact_secrets(stderr) if stderr else "", stdout[:200] if stdout else "", response_ms)
-            _record_docker_failure()
+            _record_docker_failure(folder)
             _json_ctx = (
                 f"container: {container_name}\n"
                 f"json_error: {e}\n"
@@ -663,7 +657,7 @@ async def run_container_agent(
         safe_stderr = _redact_secrets(stderr) if stderr else ""
         stdout_preview = stdout[:200] if stdout else ""
         db.log_container_finish(run_id, time.time(), "success", safe_stderr, stdout_preview, response_ms)
-        _record_docker_success()
+        _record_docker_success(folder)
 
         # ── Host Auto-Write Fallback：確保 MEMORY.md 每次 session 都有記錄 ────
         # 若 agent 在本次執行中沒有更新 MEMORY.md（mtime < t0），
@@ -698,7 +692,7 @@ async def run_container_agent(
         _timeout_ms = int(config.CONTAINER_TIMEOUT * 1000)
         record_run(jid, run_id, _timeout_ms, retry_count=0, success=False)
         db.log_container_finish(run_id, time.time(), "timeout", "Container timed out", "", _timeout_ms)
-        _record_docker_failure()
+        _record_docker_failure(folder)
         await _notify_error(f"⏱️ 這個請求超過 {config.CONTAINER_TIMEOUT}s 未完成，會在下次自動重試。")
         return {"status": "error", "result": None, "error": "Container timed out"}
     except asyncio.CancelledError:
@@ -722,7 +716,7 @@ async def run_container_agent(
         # 記錄異常失敗數據
         record_run(jid, run_id, response_ms, retry_count=0, success=False)
         db.log_container_finish(run_id, time.time(), "error", str(e), "", response_ms)
-        _record_docker_failure()
+        _record_docker_failure(folder)
         _exc_ctx = (
             f"container: {container_name}\n"
             f"exception: {type(e).__name__}: {e}"
