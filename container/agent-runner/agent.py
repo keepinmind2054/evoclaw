@@ -45,9 +45,11 @@ except ImportError:
     _GOOGLE_AVAILABLE = False
 try:
     from openai import OpenAI as OpenAIClient
+    import httpx
     _OPENAI_AVAILABLE = True
 except ImportError:
     _OPENAI_AVAILABLE = False
+    httpx = None  # type: ignore
 try:
     import anthropic
     _ANTHROPIC_AVAILABLE = True
@@ -1721,11 +1723,17 @@ def main():
         _base_url = os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1") if nim_api_key else os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
         # Use a holder list so the lambda in run_agent_openai always dereferences
         # the latest client after a key rotation swap.
-        _openai_client_holder: list = [OpenAIClient(base_url=_base_url, api_key=_api_key)]
+        # Set explicit timeouts to prevent infinite hangs on slow/unresponsive APIs.
+        # connect=15s: time to establish TCP connection
+        # read=120s:   time to wait for first byte of response (LLM can be slow)
+        # write=30s:   time to send the request body
+        # pool=10s:    time to acquire a connection from the pool
+        _openai_timeout = httpx.Timeout(connect=15.0, read=120.0, write=30.0, pool=10.0)
+        _openai_client_holder: list = [OpenAIClient(base_url=_base_url, api_key=_api_key, timeout=_openai_timeout)]
 
         def _apply_openai_key(new_key: str) -> None:
             """Swap the OpenAI-compat client to use the rotated key."""
-            _openai_client_holder[0] = OpenAIClient(base_url=_base_url, api_key=new_key)
+            _openai_client_holder[0] = OpenAIClient(base_url=_base_url, api_key=new_key, timeout=_openai_timeout)
     elif not use_claude:
         # Use a holder list so the lambda in run_agent always dereferences
         # the latest Gemini client after a key rotation swap.
