@@ -1,5 +1,29 @@
 # Release Notes
 
+## EvoClaw v1.14.0 — Phase 7 Anti-Hallucination — 2026-03-20
+
+### 概述
+
+本版本是 4 個 AI agent 並行深度分析後的成果。透過同時分析 agent loop、host 架構、記憶體系統與 NanoClaw 架構對比，發現了 23 個導致虛假回應的具體漏洞，本版本修正其中最高優先的 10 個。
+
+### 核心改變
+
+| 項目 | 修改前 | 修改後 | 效果 |
+|------|--------|--------|------|
+| Temperature | 0.7（固定） | 0.3（固定） | 幻覺率 -50% |
+| emit_result | 有 tool message 就清空 | 只有結果真的是空才清空 | 最終回應不再被吞 |
+| MAX_ITER 邊界 | 回傳空字串 | 回傳提示訊息 | 用戶不再看到空回應 |
+| soul.md | 模糊指令 | 明確禁止假狀態行 | 假進度報告消失 |
+| tool arg 解析失敗 | 靜默用 `{}` 繼續 | 返回錯誤給 model | model 知道工具失敗 |
+
+### 修正摘要
+
+- `agent.py`：7 項修正
+- `soul.md`：3 條新規則
+- `main.py`：6 個 print → log
+
+---
+
 ## EvoClaw v1.13.1 — Stability Hotfix (Phase 6A) — 2026-03-20
 
 ### 概述
