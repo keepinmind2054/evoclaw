@@ -90,6 +90,7 @@ class GroupQueue:
         self._waiting_groups: list[str] = []        # 等待 concurrency 槽位的群組 JID 清單（FIFO）
         self._process_messages_fn: Optional[Callable[[str], Awaitable[bool]]] = None
         self._shutting_down: bool = False
+        self._retry_tasks: set = set()
 
     def set_process_messages_fn(self, fn: Callable[[str], Awaitable[bool]]) -> None:
         """
@@ -188,6 +189,18 @@ class GroupQueue:
                     "[%s] pending_tasks full (%d/%d), dropping task %s",
                     group_jid, len(state.pending_tasks), MAX_PENDING_TASKS_PER_GROUP, task_id,
                 )
+                try:
+                    from . import main as _main_mod
+                    _route = getattr(_main_mod, "route_outbound", None)
+                    if _route:
+                        import asyncio as _asyncio_notify
+                        if _asyncio_notify.get_event_loop().is_running():
+                            _asyncio_notify.create_task(
+                                _route(group_jid, "⚠️ 排程任務佇列已滿，此任務無法執行，請稍後再試。"),
+                                name=f"task-queue-full-notify-{group_jid}"
+                            )
+                except Exception as _ne:
+                    log.warning("Failed to send task-queue-full notification to %s: %s", group_jid, _ne)
                 return
             state.pending_tasks.append(task)
             log.debug(f"[{group_jid}] Container active — task {task_id} queued")
@@ -310,6 +323,8 @@ class GroupQueue:
                 self.enqueue_message_check(group_jid)
 
         t = asyncio.create_task(_retry(), name=f"retry-{group_jid}")
+        self._retry_tasks.add(t)
+        t.add_done_callback(self._retry_tasks.discard)
         t.add_done_callback(_task_done_callback)
 
     def _drain_group(self, group_jid: str) -> None:
@@ -401,6 +416,9 @@ class GroupQueue:
         """Signal shutdown — no new tasks will be started."""
         self._shutting_down = True
         log.info(f"GroupQueue shutting down (active containers: {self._active_count})")
+        for task in list(self._retry_tasks):
+            task.cancel()
+        self._retry_tasks.clear()
 
     async def wait_for_active(self, timeout: float = 30.0) -> None:
         """Wait until all in-flight containers finish, or until timeout expires.
