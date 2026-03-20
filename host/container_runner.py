@@ -586,7 +586,8 @@ async def run_container_agent(
             #   125, 126, 127 = Docker itself failed (image not found, permission, etc.)
             #   other non-zero = likely Docker/container issue
             _AGENT_EXIT_CODES = {0, 124, 137, 143}  # exit codes where container itself ran fine
-            _container_ran = proc.returncode in _AGENT_EXIT_CODES
+            # Guard against proc being None (Docker failed to spawn at OS level)
+            _container_ran = proc is not None and proc.returncode in _AGENT_EXIT_CODES
 
             if _container_ran:
                 log.info("Container %s crashed before emit() but Docker is healthy — resetting circuit breaker", container_name)
