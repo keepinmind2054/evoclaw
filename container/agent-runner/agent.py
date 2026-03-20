@@ -203,10 +203,44 @@ def tool_bash(command: str) -> str:
     """
     在 /workspace/group 目錄中執行 bash 指令，回傳 stdout + stderr 輸出。
 
-    timeout=60 秒：防止指令無限期阻塞（例如 git clone 或 npm install 過慢）。
-    shell=True：讓指令支援管線（|）、重導向（>）等 shell 特性。
-    同時回傳 stderr 讓 Gemini 能看到錯誤訊息並自行修正。
+    timeout=300 秒：防止指令無限期阻塞（例如 git clone 或 npm install 過慢）。
+    shell=False：exec bash directly，避免雙層 shell 解析風險。
+    同時回傳 stderr 讓 agent 能看到錯誤訊息並自行修正。
+    輸出限制 50KB：防止大量輸出撐爆 LLM context window。
+    危險指令封鎖：防止 prompt-injection 攻擊執行破壞性指令。
     """
+    # ── Dangerous command blocklist ───────────────────────────────────────────
+    # Block commands that could destroy the container filesystem or host mounts.
+    # Uses a whitespace/flag-aware pattern to catch common variants.
+    import re as _re_bash
+    _DANGEROUS_PATTERNS = [
+        # rm -rf / and variants (rm -rf /*, rm --no-preserve-root /, etc.)
+        r'\brm\s+.*-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+[/~]',
+        r'\brm\s+.*-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*\s+[/~]',
+        r'\brm\s+.*--no-preserve-root',
+        # dd writing to block devices or /dev/
+        r'\bdd\b.*\bof\s*=\s*/dev/',
+        # mkfs — format a filesystem
+        r'\bmkfs\b',
+        # fork bomb
+        r':\s*\(\s*\)\s*\{.*:\|:.*\}',
+        # writing directly to /dev/sda, /dev/nvme, etc.
+        r'>\s*/dev/[sh]d[a-z]',
+        r'>\s*/dev/nvme',
+        # chmod/chown 777 on / or /etc
+        r'\bchmod\s+.*777\s+/',
+        r'\bchown\s+.*\s+/',
+        # shred /dev/* or critical paths
+        r'\bshred\s+.*/dev/',
+    ]
+    _cmd_strip = command.strip()
+    for _pat in _DANGEROUS_PATTERNS:
+        if _re_bash.search(_pat, _cmd_strip, _re_bash.IGNORECASE | _re_bash.DOTALL):
+            _log("🚨 SECURITY", f"Bash: blocked dangerous command pattern: {_cmd_strip[:200]}")
+            return "Error: command blocked — matches dangerous command pattern (rm -rf /, dd to block device, mkfs, etc.)"
+
+    _BASH_OUTPUT_LIMIT = 50 * 1024  # 50 KB
+
     try:
         result = subprocess.run(
             ["bash", "-c", command],
@@ -217,6 +251,8 @@ def tool_bash(command: str) -> str:
         out = result.stdout
         if result.stderr:
             out += f"\nSTDERR:\n{result.stderr}"
+        if len(out) > _BASH_OUTPUT_LIMIT:
+            out = out[:_BASH_OUTPUT_LIMIT] + f"\n... (output truncated at 50KB, total {len(out)} bytes)"
         return out or "(no output)"
     except subprocess.TimeoutExpired:
         return "Error: command timed out after 300s"
@@ -225,12 +261,24 @@ def tool_bash(command: str) -> str:
 
 
 def tool_read(file_path: str) -> str:
-    """讀取指定路徑的文字檔案內容，讓 agent 可以檢視檔案。"""
+    """讀取指定路徑的文字檔案內容，讓 agent 可以檢視檔案。
+    檔案大小限制 512KB：防止讀取巨大檔案導致 OOM 或 context 爆炸。
+    """
+    _READ_SIZE_LIMIT = 512 * 1024  # 512 KB
+
     err = _check_path_allowed(file_path)
     if err:
         return err
     try:
-        return Path(file_path).read_text(encoding="utf-8")
+        p = Path(file_path)
+        file_size = p.stat().st_size
+        if file_size > _READ_SIZE_LIMIT:
+            # Read only the first 512KB and warn
+            with p.open("rb") as fh:
+                raw = fh.read(_READ_SIZE_LIMIT)
+            text = raw.decode("utf-8", errors="replace")
+            return text + f"\n\n... (file truncated: read {_READ_SIZE_LIMIT} of {file_size} bytes)"
+        return p.read_text(encoding="utf-8")
     except Exception as e:
         return f"Error reading file: {e}"
 
@@ -239,14 +287,23 @@ def tool_write(file_path: str, content: str) -> str:
     """
     將內容寫入指定路徑的檔案。
     自動建立不存在的父目錄（mkdir -p），簡化 agent 的操作步驟。
+    寫入大小限制 10MB：防止寫入過大檔案耗盡磁碟。
+    原子寫入：先寫入 .tmp 再 rename，防止部分寫入導致檔案損毀。
     """
+    _WRITE_SIZE_LIMIT = 10 * 1024 * 1024  # 10 MB
+
     err = _check_path_allowed(file_path)
     if err:
         return err
+    if len(content.encode("utf-8")) > _WRITE_SIZE_LIMIT:
+        return f"Error: content too large ({len(content.encode('utf-8'))} bytes > 10MB limit)"
     try:
         p = Path(file_path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
+        # Atomic write: write to .tmp then rename to avoid partial-write corruption
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(content, encoding="utf-8")
+        tmp.rename(p)  # POSIX rename() is atomic
         return f"Written: {file_path}"
     except Exception as e:
         return f"Error writing file: {e}"
@@ -255,8 +312,11 @@ def tool_write(file_path: str, content: str) -> str:
 def tool_edit(file_path: str, old_string: str, new_string: str) -> str:
     """
     在檔案中找到 old_string 並替換為 new_string（只替換第一個出現的位置）。
-    若 old_string 不存在則回傳錯誤，讓 Gemini 知道需要先確認內容再修改。
+    若 old_string 不存在則回傳錯誤，讓 agent 知道需要先確認內容再修改。
+    原子寫入：先寫入 .tmp 再 rename，防止部分寫入導致檔案損毀。
     """
+    _WRITE_SIZE_LIMIT = 10 * 1024 * 1024  # 10 MB
+
     err = _check_path_allowed(file_path)
     if err:
         return err
@@ -266,7 +326,13 @@ def tool_edit(file_path: str, old_string: str, new_string: str) -> str:
         if old_string not in content:
             return f"Error: old_string not found in {file_path}"
         # replace(..., 1) 確保只替換第一個出現的位置，避免意外修改多處
-        p.write_text(content.replace(old_string, new_string, 1), encoding="utf-8")
+        new_content = content.replace(old_string, new_string, 1)
+        if len(new_content.encode("utf-8")) > _WRITE_SIZE_LIMIT:
+            return f"Error: resulting file too large (> 10MB limit)"
+        # Atomic write: write to .tmp then rename
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(new_content, encoding="utf-8")
+        tmp.rename(p)  # POSIX rename() is atomic
         return f"Edited: {file_path}"
     except Exception as e:
         return f"Error editing file: {e}"
@@ -279,7 +345,15 @@ def tool_send_message(chat_jid: str, text: str, sender: str = None) -> str:
     檔名格式：{timestamp_ms}-{random_8_chars}.json
     使用時間戳記前綴確保 ipc_watcher 按 FIFO 順序處理；
     加入隨機後綴避免同一毫秒內產生多個檔案時發生名稱衝突。
+    空訊息檢查：拒絕空白訊息，避免發送無效 IPC 檔案。
+    長度限制 32KB：防止超大訊息被傳送或破壞 IPC JSON。
     """
+    _MSG_MAX_LEN = 32 * 1024  # 32 KB
+
+    if not text or not text.strip():
+        return "Error: message text cannot be empty"
+    if len(text) > _MSG_MAX_LEN:
+        text = text[:_MSG_MAX_LEN] + f"\n... (message truncated at 32KB)"
     try:
         ipc_dir = Path(IPC_MESSAGES_DIR)
         ipc_dir.mkdir(parents=True, exist_ok=True)
@@ -342,48 +416,53 @@ def tool_cancel_task(task_id: str) -> str:
     """
     透過 IPC 機制取消（刪除）指定 ID 的排程任務。
     寫入 JSON 檔案到 tasks/ 子目錄，host 的 ipc_watcher 讀取後呼叫 db.delete_task。
+    原子寫入：先寫入 .tmp 再 rename，防止 host 讀到半寫的 JSON。
     """
     if not task_id:
         return "Error: task_id is required."
     try:
         Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
         fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-cancel.json"
-        fname.write_text(json.dumps({
-            "type": "cancel_task",
-            "task_id": task_id,
-        }), encoding="utf-8")
+        payload = json.dumps({"type": "cancel_task", "task_id": task_id})
+        tmp = fname.with_suffix(".tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.rename(fname)  # POSIX rename() is atomic
         return f"Task {task_id} cancellation request sent."
     except Exception as e:
         return f"Error: {e}"
 
 
 def tool_pause_task(task_id: str) -> str:
-    """透過 IPC 暫停指定 ID 的排程任務（status 改為 paused）。"""
+    """透過 IPC 暫停指定 ID 的排程任務（status 改為 paused）。
+    原子寫入：先寫入 .tmp 再 rename，防止 host 讀到半寫的 JSON。
+    """
     if not task_id:
         return "Error: task_id is required."
     try:
         Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
         fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-pause.json"
-        fname.write_text(json.dumps({
-            "type": "pause_task",
-            "task_id": task_id,
-        }), encoding="utf-8")
+        payload = json.dumps({"type": "pause_task", "task_id": task_id})
+        tmp = fname.with_suffix(".tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.rename(fname)  # POSIX rename() is atomic
         return f"Task {task_id} pause request sent."
     except Exception as e:
         return f"Error: {e}"
 
 
 def tool_resume_task(task_id: str) -> str:
-    """透過 IPC 恢復指定 ID 的已暫停排程任務（status 改回 active）。"""
+    """透過 IPC 恢復指定 ID 的已暫停排程任務（status 改回 active）。
+    原子寫入：先寫入 .tmp 再 rename，防止 host 讀到半寫的 JSON。
+    """
     if not task_id:
         return "Error: task_id is required."
     try:
         Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
         fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-resume.json"
-        fname.write_text(json.dumps({
-            "type": "resume_task",
-            "task_id": task_id,
-        }), encoding="utf-8")
+        payload = json.dumps({"type": "resume_task", "task_id": task_id})
+        tmp = fname.with_suffix(".tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.rename(fname)  # POSIX rename() is atomic
         return f"Task {task_id} resume request sent."
     except Exception as e:
         return f"Error: {e}"
@@ -453,7 +532,10 @@ def tool_send_file(chat_jid: str = "", file_path: str = "", caption: str = "") -
     }
     Path(IPC_MESSAGES_DIR).mkdir(parents=True, exist_ok=True)
     msg_file = Path(IPC_MESSAGES_DIR) / f"file_{int(time.time()*1000)}_{os.getpid()}.json"
-    msg_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    # Atomic write: write to .tmp then rename to avoid host reading partial JSON
+    tmp_msg = msg_file.with_suffix(".tmp")
+    tmp_msg.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    tmp_msg.rename(msg_file)  # POSIX rename() is atomic
     _log("📎 FILE", f"path={file_path} exists={os.path.exists(file_path)}")
     _log("📨 IPC", f"type=send_file → {msg_file.name}")
     return f"✅ File queued: {os.path.basename(file_path)}"
@@ -505,13 +587,20 @@ def tool_glob(pattern: str, path: str = WORKSPACE) -> str:
     """
     在指定目錄下尋找符合 glob 模式的檔案（支援 ** 遞迴搜尋）。
     例如 pattern="**/*.py" 可找出所有 Python 檔案。
+    結果最多回傳 1000 個，超過部分截斷並警告。
     """
+    _GLOB_MAX_RESULTS = 1000
+
     try:
         search_path = os.path.join(path, pattern)
         matches = _glob_module.glob(search_path, recursive=True)
         if not matches:
             return f"No files found matching: {pattern} in {path}"
-        return "\n".join(sorted(matches))
+        matches_sorted = sorted(matches)
+        if len(matches_sorted) > _GLOB_MAX_RESULTS:
+            truncated = len(matches_sorted) - _GLOB_MAX_RESULTS
+            return "\n".join(matches_sorted[:_GLOB_MAX_RESULTS]) + f"\n... ({truncated} more results not shown — refine your pattern)"
+        return "\n".join(matches_sorted)
     except Exception as e:
         return f"Error: {e}"
 
@@ -567,9 +656,100 @@ def tool_web_fetch(url: str) -> str:
     """
     從指定 URL 抓取網頁內容，自動將 HTML 轉換為純文字。
     適合查閱文件、新聞、GitHub README 等網頁資料。
-    結果最多回傳 12000 字元，超過部分截斷。
+    結果最多回傳 50KB（文字），超過部分截斷。
+
+    安全限制：
+    - SSRF 防護：封鎖私有/迴環/雲端 metadata IP 範圍
+    - 回應大小限制：最多讀取 2MB raw bytes（防止超大下載）
+    - 二進位內容偵測：拒絕非文字回應
+    - 重導向限制：最多追蹤 5 次重導向
+    - HTTP timeout：30 秒
     """
+    import socket as _socket
+    import ipaddress as _ipaddress
+    import re as _re_url
+
+    _WEB_FETCH_TEXT_LIMIT = 50 * 1024    # 50 KB returned to LLM
+    _WEB_FETCH_RAW_LIMIT  = 2 * 1024 * 1024  # 2 MB raw download cap
+
+    # ── SSRF prevention ───────────────────────────────────────────────────────
+    # Parse the URL and resolve the hostname to an IP, then reject private ranges.
+    _BLOCKED_HOSTS = {"localhost", "metadata.google.internal"}
+    _BLOCKED_HOST_RE = _re_url.compile(
+        r'^(?:169\.254\.|metadata\.google\.internal|instance-data)',
+        _re_url.IGNORECASE,
+    )
+
+    def _is_ssrf_target(hostname: str) -> bool:
+        """Return True if the hostname resolves to a private/reserved address."""
+        if not hostname:
+            return True
+        hostname_lower = hostname.lower()
+        if hostname_lower in _BLOCKED_HOSTS:
+            return True
+        if _BLOCKED_HOST_RE.match(hostname_lower):
+            return True
+        try:
+            # Resolve all A/AAAA records and check each
+            infos = _socket.getaddrinfo(hostname, None)
+            for info in infos:
+                ip_str = info[4][0]
+                try:
+                    ip = _ipaddress.ip_address(ip_str)
+                    if (ip.is_private or ip.is_loopback or ip.is_link_local or
+                            ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+                        return True
+                    # Explicitly block 169.254.x.x (AWS/GCP/Azure metadata)
+                    if ip_str.startswith("169.254."):
+                        return True
+                except ValueError:
+                    pass
+        except Exception:
+            # DNS resolution failed — treat as safe (will fail at fetch time)
+            pass
+        return False
+
+    # Parse URL to extract hostname
     try:
+        import urllib.parse as _urlparse
+        parsed = _urlparse.urlparse(url)
+        _scheme = parsed.scheme.lower()
+        if _scheme not in ("http", "https"):
+            return f"Error: unsupported URL scheme '{_scheme}' — only http/https are allowed"
+        _hostname = parsed.hostname or ""
+    except Exception as _parse_err:
+        return f"Error: invalid URL: {_parse_err}"
+
+    if _is_ssrf_target(_hostname):
+        _log("🚨 SECURITY", f"WebFetch: SSRF blocked — host {_hostname!r} resolves to private/reserved address")
+        return f"Error: access denied — URL targets a private or reserved address (SSRF protection)"
+
+    # ── Fetch with redirect limit ─────────────────────────────────────────────
+    try:
+        # Build an opener that limits redirects (default urllib follows up to 10)
+        _redirect_count = 0
+        _MAX_REDIRECTS = 5
+
+        class _LimitedRedirectHandler(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                nonlocal _redirect_count
+                _redirect_count += 1
+                if _redirect_count > _MAX_REDIRECTS:
+                    raise urllib.error.URLError(f"Too many redirects (> {_MAX_REDIRECTS})")
+                # SSRF-check the redirect target too
+                try:
+                    _rp = __import__("urllib.parse", fromlist=["urlparse"]).urlparse(newurl)
+                    _rh = _rp.hostname or ""
+                    if _is_ssrf_target(_rh):
+                        raise urllib.error.URLError(f"Redirect to private address blocked (SSRF): {_rh}")
+                except urllib.error.URLError:
+                    raise
+                except Exception:
+                    pass
+                return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+        _opener = urllib.request.build_opener(_LimitedRedirectHandler)
+
         req = urllib.request.Request(
             url,
             headers={
@@ -577,11 +757,29 @@ def tool_web_fetch(url: str) -> str:
                 "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
             }
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with _opener.open(req, timeout=30) as resp:
             content_type = resp.headers.get("Content-Type", "")
-            raw = resp.read().decode("utf-8", errors="replace")
 
-        if "html" in content_type.lower() or raw.lstrip().startswith("<"):
+            # ── Binary content detection ──────────────────────────────────────
+            _ct_lower = content_type.lower()
+            _BINARY_TYPES = (
+                "application/octet-stream", "application/zip", "application/gzip",
+                "application/x-tar", "application/pdf", "application/msword",
+                "application/vnd.", "image/", "audio/", "video/",
+            )
+            if any(_ct_lower.startswith(bt) for bt in _BINARY_TYPES):
+                return f"Error: binary content type '{content_type}' — WebFetch only supports text content"
+
+            # ── Cap raw download size ─────────────────────────────────────────
+            raw_bytes = resp.read(_WEB_FETCH_RAW_LIMIT)
+            # Check for binary bytes in first 512 bytes (null bytes etc.)
+            _sample = raw_bytes[:512]
+            if b"\x00" in _sample or sum(b > 127 for b in _sample) > len(_sample) * 0.3:
+                return "Error: response appears to be binary content — WebFetch only supports text"
+
+        raw = raw_bytes.decode("utf-8", errors="replace")
+
+        if "html" in _ct_lower or raw.lstrip().startswith("<"):
             extractor = _HTMLTextExtractor()
             try:
                 extractor.feed(raw)
@@ -593,8 +791,8 @@ def tool_web_fetch(url: str) -> str:
         else:
             text = raw
 
-        if len(text) > 12000:
-            text = text[:12000] + "\n\n... (content truncated)"
+        if len(text) > _WEB_FETCH_TEXT_LIMIT:
+            text = text[:_WEB_FETCH_TEXT_LIMIT] + "\n\n... (content truncated at 50KB)"
         return text or "(empty response)"
     except urllib.error.HTTPError as e:
         return f"HTTP {e.code} error fetching {url}: {e.reason}"
@@ -2005,8 +2203,20 @@ def main():
     _memory_path = Path(group_folder) / "MEMORY.md"
     _IDENTITY_MARKER = "## 身份 (Identity)"
     _TASK_MARKER = "## 任務記錄 (Task Log)"
+    _MEMORY_READ_LIMIT = 512 * 1024  # 512 KB — prevent huge MEMORY.md from blowing context window
     if _memory_path.exists():
-        _memory_content = _memory_path.read_text(encoding="utf-8").strip()
+        try:
+            _mem_size = _memory_path.stat().st_size
+            if _mem_size > _MEMORY_READ_LIMIT:
+                _log("⚠️ MEMORY", f"MEMORY.md is large ({_mem_size} bytes) — reading only last {_MEMORY_READ_LIMIT} bytes")
+                with _memory_path.open("rb") as _mf:
+                    _mf.seek(max(0, _mem_size - _MEMORY_READ_LIMIT))
+                    _memory_content = _mf.read().decode("utf-8", errors="replace").strip()
+            else:
+                _memory_content = _memory_path.read_text(encoding="utf-8").strip()
+        except Exception as _mem_read_err:
+            _log("⚠️ MEMORY", f"Failed to read MEMORY.md: {_mem_read_err}")
+            _memory_content = ""
         if _memory_content:
             # 智慧分割：保留完整身份 + task log 最後 3000 字元
             if _IDENTITY_MARKER in _memory_content and _TASK_MARKER in _memory_content:
