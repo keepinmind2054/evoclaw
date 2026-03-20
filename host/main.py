@@ -1160,10 +1160,11 @@ async def main() -> None:
             except Exception:
                 pass
 
-        # 等待所有進行中的 container 完成（最多 10 秒，從 30s 縮短），避免截斷回覆或損毀 IPC 狀態
-        await _group_queue.wait_for_active(timeout=10.0)
+        # 等待所有進行中的 container 完成（最多 30 秒），避免截斷回覆或損毀 IPC 狀態
+        log.info("Waiting up to 30s for active tasks to complete before shutdown...")
+        await _group_queue.wait_for_active(timeout=30.0)  # was 10.0 — increased for long-running tasks
 
-        # 若 10 秒後仍有 container 在跑，強制 kill 全部（Fix #164）
+        # 若 30 秒後仍有 container 在跑，強制 kill 全部（Fix #164）
         if _group_queue._active_count > 0:
             log.warning("Containers still active after timeout, force-killing all...")
             from .container_runner import kill_all_containers

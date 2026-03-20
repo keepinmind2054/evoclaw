@@ -37,11 +37,18 @@ def compute_next_run(schedule_type: str, schedule_value: str, last_run: int | No
     elif schedule_type == "cron":
         try:
             from croniter import croniter
-            import zoneinfo
+            from datetime import datetime
+            import pytz
             # 帶入設定的時區，確保 cron 表達式依本地時間解讀（例如「每天早上9點」）
-            tz = zoneinfo.ZoneInfo(config.TIMEZONE)
-            c = croniter(schedule_value, now)
-            return int(c.get_next() * 1000)
+            timezone_str = getattr(config, 'TIMEZONE', None)
+            tz = pytz.timezone(timezone_str) if timezone_str else pytz.UTC
+            # Use timezone-aware start time so croniter resolves cron in local timezone
+            start_time = datetime.fromtimestamp(now, tz=tz)
+            c = croniter(schedule_value, start_time, hash_use_datetime=True)
+            next_run = c.get_next(datetime)
+            if tz != pytz.UTC:
+                next_run = tz.localize(next_run.replace(tzinfo=None)) if next_run.tzinfo is None else next_run.astimezone(tz)
+            return int(next_run.timestamp() * 1000)
         except Exception as e:
             log.warning(f"Invalid cron: {schedule_value}: {e}")
             return None
@@ -88,8 +95,13 @@ async def run_task(task: dict, get_group_fn: Callable, run_agent_fn: Callable) -
         status = result.get("status", "error")
         # 記錄本次執行結果（供監控與除錯用）
         db.log_task_run(task_id, start, duration, status, result.get("result"), result.get("error"))
+        # For interval tasks, use the scheduled run time (task["next_run"]) as the base for
+        # computing the next interval — prevents cumulative drift caused by long execution times.
+        # For cron/once tasks, use start time as before.
+        scheduled_time = task.get("next_run") or start
+        last_run_base = scheduled_time if task.get("schedule_type") == "interval" else start
         # 更新任務狀態：記錄最後執行時間、結果摘要，並計算下次執行時間
-        next_run_ts = compute_next_run(task["schedule_type"], task["schedule_value"], start)
+        next_run_ts = compute_next_run(task["schedule_type"], task["schedule_value"], last_run_base)
         db.update_task(task_id,
                        last_run=start,
                        last_result=result.get("result", "")[:500],  # 只存前 500 字，節省空間
@@ -101,7 +113,10 @@ async def run_task(task: dict, get_group_fn: Callable, run_agent_fn: Callable) -
         db.log_task_run(task_id, start, 0, "error", None, str(e))
         # Compute a backoff next_run so the task retries after a normal cycle,
         # not immediately on every scheduler poll.
-        next_run_ts = compute_next_run(task["schedule_type"], task["schedule_value"], start)
+        # For interval tasks, use the scheduled run time to avoid drift on error paths too.
+        _err_scheduled_time = task.get("next_run") or start
+        _err_last_run_base = _err_scheduled_time if task.get("schedule_type") == "interval" else start
+        next_run_ts = compute_next_run(task["schedule_type"], task["schedule_value"], _err_last_run_base)
     finally:
         # Fix #122: if next_run_ts is None (invalid schedule expression), mark the task
         # as "paused" so it doesn't linger silently with next_run=NULL.  Users can

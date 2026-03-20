@@ -1099,8 +1099,23 @@ async def _start_ipc_watcher_inotify(get_groups_fn: Callable, route_fn: Callable
                         )
                         watch_map[wd] = (folder, is_main)
                         watched_dirs.add(dir_str)
+                    except OSError as _we:
+                        # Check if this is an inotify watch limit error (errno 28 = ENOSPC)
+                        if hasattr(_we, 'errno') and _we.errno == 28:
+                            log.warning(
+                                "inotify watch limit exceeded — falling back to polling. "
+                                "Fix: sudo sysctl fs.inotify.max_user_watches=65536 "
+                                "or add to /etc/sysctl.conf: fs.inotify.max_user_watches=65536"
+                            )
+                            # Clean up any partially-initialized inotify watches before failing
+                            try:
+                                inotify.close()
+                            except Exception:
+                                pass
+                            raise
+                        log.warning("inotify: cannot watch %s: %s", dir_str, _we)
                     except Exception as _we:
-                        log.debug("inotify: cannot watch %s: %s", dir_str, _we)
+                        log.warning("inotify: cannot watch %s: %s", dir_str, _we)
 
     _refresh_watches()
     log.info("IPC watcher (inotify): watching %d directories", len(watch_map))
