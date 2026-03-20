@@ -870,45 +870,39 @@ TOOL_DECLARATIONS = [
             required=["file_path"],
         ),
     ),
-    types.Tool(
-        function_declarations=[types.FunctionDeclaration(
-            name="mcp__evoclaw__reset_group",
-            description="Clear the failure counter for a group, unfreezing it if it was locked in cooldown. Use this when a group is stuck and not responding. Only callable from monitor group.",
-            parameters=types.Schema(
-                type=types.Type.OBJECT,
-                properties={
-                    "jid": types.Schema(type=types.Type.STRING, description="The JID of the group to reset, e.g. tg:8259652816"),
-                },
-                required=["jid"],
-            ),
-        )]
+    types.FunctionDeclaration(
+        name="mcp__evoclaw__reset_group",
+        description="Clear the failure counter for a group, unfreezing it if it was locked in cooldown. Use this when a group is stuck and not responding. Only callable from monitor group.",
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "jid": types.Schema(type=types.Type.STRING, description="The JID of the group to reset, e.g. tg:8259652816"),
+            },
+            required=["jid"],
+        ),
     ),
-    types.Tool(
-        function_declarations=[types.FunctionDeclaration(
-            name="mcp__evoclaw__start_remote_control",
-            description="Start a Claude Code remote-control session on the host. The host spawns `claude remote-control` in the EvoClaw directory and sends the resulting URL back to this chat. Use when the user wants to update code, restart EvoClaw, or open a live coding session.",
-            parameters=types.Schema(
-                type=types.Type.OBJECT,
-                properties={
-                    "chat_jid": types.Schema(type=types.Type.STRING, description="The chat JID to send the URL to (auto-detected if omitted)"),
-                    "sender": types.Schema(type=types.Type.STRING, description="Optional sender name for logging"),
-                },
-                required=[],
-            ),
-        )]
+    types.FunctionDeclaration(
+        name="mcp__evoclaw__start_remote_control",
+        description="Start a Claude Code remote-control session on the host. The host spawns `claude remote-control` in the EvoClaw directory and sends the resulting URL back to this chat. Use when the user wants to update code, restart EvoClaw, or open a live coding session.",
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "chat_jid": types.Schema(type=types.Type.STRING, description="The chat JID to send the URL to (auto-detected if omitted)"),
+                "sender": types.Schema(type=types.Type.STRING, description="Optional sender name for logging"),
+            },
+            required=[],
+        ),
     ),
-    types.Tool(
-        function_declarations=[types.FunctionDeclaration(
-            name="mcp__evoclaw__self_update",
-            description="Pull the latest EvoClaw code from git and restart the host process. Use when the user asks to update, upgrade, or restart EvoClaw.",
-            parameters=types.Schema(
-                type=types.Type.OBJECT,
-                properties={
-                    "chat_jid": types.Schema(type=types.Type.STRING, description="The chat JID to notify when update is done (auto-detected if omitted)"),
-                },
-                required=[],
-            ),
-        )]
+    types.FunctionDeclaration(
+        name="mcp__evoclaw__self_update",
+        description="Pull the latest EvoClaw code from git and restart the host process. Use when the user asks to update, upgrade, or restart EvoClaw.",
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "chat_jid": types.Schema(type=types.Type.STRING, description="The chat JID to notify when update is done (auto-detected if omitted)"),
+            },
+            required=[],
+        ),
     ),
 ]
 
@@ -992,7 +986,24 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
     MAX_ITER = max_iter
     final_response = ""
     _memory_written = False  # True once agent writes to MEMORY.md this session
-    _memory_path_str = str(Path(group_folder) / "MEMORY.md") if group_folder else "MEMORY.md"
+    _memory_path_str = str(Path(group_folder) / "MEMORY.md") if group_folder else "/workspace/group/MEMORY.md"
+    _turns_since_notify = 0   # turns since last mcp__evoclaw__send_message call
+    _only_notify_turns = 0    # consecutive turns with ONLY send_message (no real work)
+    # Tools that represent actual work (not just reporting)
+    _SUBSTANTIVE_TOOLS_CLAUDE = frozenset([
+        "Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch",
+        "mcp__evoclaw__run_agent",
+    ])
+    # Extended fake-status regex covering Claude's common hallucination patterns
+    _FAKE_STATUS_RE = _re_claude.compile(
+        r'\*\([^)]*\)\*'           # *(正在執行...)*
+        r'|\*\[[^\]]*\]\*'          # *[running...]*
+        r'|✅\s*Done'              # ✅ Done
+        r'|✅\s*完成'              # ✅ 完成
+        r'|【[^】]*(?:已|正在|將|完成|處理|執行)[^】]*】'   # 【已完成】
+        r'|（[^）]{2,30}(?:已|正在|處理|執行)[^）]{0,20}）', # （已完成）
+        _re_claude.DOTALL,
+    )
 
     for n in range(MAX_ITER):
         _log("🧠 LLM →", f"turn={n} provider=claude")
@@ -1016,7 +1027,6 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
                 if hasattr(block, "text")
             )
             # ── Fake status detection on end_turn (no tool calls made) ─────────
-            _FAKE_STATUS_RE = _re_claude.compile(r'\*\([^)]*\)\*|\*\[[^\]]*\]\*|✅\s*Done|✅\s*完成', _re_claude.DOTALL)
             _fake_hits = _FAKE_STATUS_RE.findall(final_response)
             if _fake_hits and n < MAX_ITER - 1:
                 _log("⚠️ FAKE-STATUS", f"Claude wrote {len(_fake_hits)} fake status indicator(s) without tool calls")
@@ -1032,12 +1042,20 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
             break
 
         if response.stop_reason != "tool_use":
+            # Unexpected stop reason (e.g. max_tokens, stop_sequence) — collect text and exit
+            final_response = " ".join(
+                block.text for block in response.content
+                if hasattr(block, "text")
+            )
+            _log("⚠️ UNEXPECTED-STOP", f"Claude stop_reason={response.stop_reason} — exiting loop")
             break
 
         # Execute all tool calls
         tool_results = []
+        _tool_names_this_turn: set = set()
         for block in response.content:
             if block.type == "tool_use":
+                _tool_names_this_turn.add(block.name)
                 try:
                     result = execute_tool(block.name, block.input, chat_jid)
                 except Exception as e:
@@ -1062,11 +1080,47 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
         if not tool_results:
             break
 
+        # ── Milestone Enforcer: anti-fabrication (same logic as OpenAI loop) ──
+        _sent_message_this_turn = "mcp__evoclaw__send_message" in _tool_names_this_turn
+        _did_real_work = bool(_tool_names_this_turn & _SUBSTANTIVE_TOOLS_CLAUDE)
+
+        if _sent_message_this_turn and _did_real_work:
+            _turns_since_notify = 0
+            _only_notify_turns = 0
+        elif _sent_message_this_turn and not _did_real_work:
+            _only_notify_turns += 1
+            _log("⚠️ FAKE-PROGRESS", f"Claude called only send_message (no real work) — streak={_only_notify_turns}")
+            if _only_notify_turns >= 2 and n < MAX_ITER - 2:
+                _log("🚨 FAKE-PROGRESS", f"Injecting anti-fabrication warning after {_only_notify_turns} fake-report turns")
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": "__system__",
+                    "content": (
+                        "【系統警告】你已連續多輪只呼叫 send_message，沒有呼叫任何實質工具（Bash、Read、Write、run_agent 等）。"
+                        "立刻停止假報告。你的下一步必須是：呼叫 Bash tool 執行指令、Read 讀取檔案、或 mcp__evoclaw__run_agent 委派任務。"
+                    ),
+                })
+        else:
+            _only_notify_turns = 0  # reset streak when doing real work silently
+            _turns_since_notify += 1
+            if _turns_since_notify >= 5 and n < MAX_ITER - 2:
+                _log("⏰ MILESTONE", f"Claude: no send_message for {_turns_since_notify} turns — injecting reminder")
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": "__system_milestone__",
+                    "content": (
+                        f"⏰ 你已執行 {_turns_since_notify} 輪未向用戶回報進度。"
+                        "請在繼續工作的同時，用 mcp__evoclaw__send_message 發送一條簡短的進度更新（1-2 句話）。"
+                        "注意：只有在呼叫了 Bash/Read/Write 等實質工具之後才需要回報，不要虛報進度。"
+                    ),
+                })
+                _turns_since_notify = 0
+
         messages.append({"role": "user", "content": tool_results})
 
         # Trim history to prevent unbounded growth (keep index 0 = first user msg)
         if len(messages) > _MAX_HISTORY_MESSAGES:
-            messages = messages[:1] + messages[-(  _MAX_HISTORY_MESSAGES - 1):]
+            messages = messages[:1] + messages[-(_MAX_HISTORY_MESSAGES - 1):]
 
         # ── MEMORY.md reminder on penultimate turn ───────────────────────────
         if not _memory_written and n == MAX_ITER - 2:
@@ -1240,14 +1294,20 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
             if _tool_choice == "required":
                 # Some providers don't support tool_choice="required" — fall back to "auto"
                 _log("⚠️ FORCE-TOOL", f"tool_choice='required' rejected ({_tc_err}) — retrying with 'auto'")
-                response = _llm_call_with_retry(lambda: client_holder[0].chat.completions.create(
-                    model=model,
-                    messages=_oai_history,
-                    tools=OPENAI_TOOL_DECLARATIONS,
-                    tool_choice="auto",
-                    temperature=0.2 if _is_qwen else 0.3,
-                    max_tokens=4096,
-                ), pool=pool, apply_key_fn=apply_key_fn)
+                try:
+                    response = _llm_call_with_retry(lambda: client_holder[0].chat.completions.create(
+                        model=model,
+                        messages=_oai_history,
+                        tools=OPENAI_TOOL_DECLARATIONS,
+                        tool_choice="auto",
+                        temperature=0.2 if _is_qwen else 0.3,
+                        max_tokens=4096,
+                    ), pool=pool, apply_key_fn=apply_key_fn)
+                except Exception as _fallback_err:
+                    # Fallback also failed (e.g. Qwen timeout) — report cleanly and break
+                    _log("❌ LLM-FALLBACK", f"Fallback API call also failed: {_fallback_err}")
+                    final_response = f"（API 呼叫失敗：{type(_fallback_err).__name__}，請稍後重試。）"
+                    break
             else:
                 raise
         msg = response.choices[0].message
@@ -1363,7 +1423,8 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                     ),
                 })
         else:
-            # No send_message — working silently
+            # No send_message — working silently; reset only_notify streak
+            _only_notify_turns = 0
             _turns_since_notify += 1
             if _turns_since_notify >= 5 and n < MAX_ITER - 2:
                 _log("⏰ MILESTONE", f"No send_message for {_turns_since_notify} turns — injecting reminder")
@@ -1433,7 +1494,11 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                         "content": f"Error: Failed to parse tool arguments: {_arg_err}"
                     })
                     continue
-            result = execute_tool(tc.function.name, args, chat_jid)
+            try:
+                result = execute_tool(tc.function.name, args, chat_jid)
+            except Exception as _tool_exc:
+                result = f"[Tool error: {_tool_exc}]"
+                _log("❌ TOOL-EXC", f"Tool {tc.function.name} raised exception: {_tool_exc}")
             # Truncate large tool results before adding to history
             result_str = str(result)
             if len(result_str) > _MAX_TOOL_RESULT_CHARS:
@@ -1446,7 +1511,7 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
 
         # Trim history to prevent unbounded growth (keep system msg at index 0)
         if len(history) > _MAX_HISTORY_MESSAGES:
-            history = history[:1] + history[-(  _MAX_HISTORY_MESSAGES - 1):]
+            history = history[:1] + history[-(_MAX_HISTORY_MESSAGES - 1):]
 
     if not final_response:
         _log("⚠️ LOOP-EXHAUST", f"OpenAI agent loop hit MAX_ITER={MAX_ITER} without finish_reason=stop — no final text collected")
@@ -1456,7 +1521,7 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
 
 
 
-def run_agent(client_holder, system_instruction: str, user_message: str, chat_jid: str, assistant_name: str = "Eve", conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None, max_iter: int = 20) -> str:
+def run_agent(client_holder, system_instruction: str, user_message: str, chat_jid: str, assistant_name: str = "Eve", conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None, max_iter: int = 20, group_folder: str = "") -> str:
     """
     Gemini function-calling 代理迴圈（agentic loop）。
 
@@ -1492,6 +1557,27 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
 
     MAX_ITER = max_iter  # 由呼叫方動態設定（Level A=6, Level B=20）
     final_response = ""
+    _memory_written = False   # True once agent writes to MEMORY.md this session
+    _memory_path_str = str(Path(group_folder) / "MEMORY.md") if group_folder else "/workspace/group/MEMORY.md"
+    _turns_since_notify = 0   # turns since last mcp__evoclaw__send_message call
+    _only_notify_turns = 0    # consecutive turns with ONLY send_message (no real work)
+    _no_tool_turns = 0        # consecutive turns without any tool call
+    # Tools that represent actual work (not just reporting)
+    _SUBSTANTIVE_TOOLS_GEMINI = frozenset([
+        "Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch",
+        "mcp__evoclaw__run_agent",
+    ])
+    import re as _re_gemini
+    # Fake-status regex: covers both standard and Chinese hallucination patterns
+    _FAKE_STATUS_RE_G = _re_gemini.compile(
+        r'\*\([^)]*\)\*'          # *(正在執行...)*
+        r'|\*\[[^\]]*\]\*'         # *[running...]*
+        r'|✅\s*Done'             # ✅ Done
+        r'|✅\s*完成'             # ✅ 完成
+        r'|【[^】]*(?:已|正在|將|完成|處理|執行)[^】]*】'   # 【已完成】
+        r'|（[^）]{2,30}(?:已|正在|處理|執行)[^）]{0,20}）', # （已完成）
+        _re_gemini.DOTALL,
+    )
 
     for n in range(MAX_ITER):
         _log("🧠 LLM →", f"turn={n} provider=gemini")
@@ -1510,7 +1596,11 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
         stop_reason = str(candidate.finish_reason) if candidate else "none"
         _log("🧠 LLM ←", f"stop={stop_reason}")
         if not candidate or not candidate.content or not candidate.content.parts:
-            break  # Gemini 沒有回傳任何內容，提前結束
+            # Gemini returned empty candidate — check for prompt_feedback (safety block)
+            _feedback = getattr(response, "prompt_feedback", None)
+            if _feedback:
+                _log("⚠️ GEMINI-BLOCK", f"prompt_feedback={_feedback}")
+            break
 
         parts = candidate.content.parts
         # 將 Gemini 的回覆加入 history，讓下一輪能看到完整對話脈絡
@@ -1521,13 +1611,37 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
 
         if not fn_calls:
             # 沒有 function call：agent 完成推理，收集所有文字輸出
-            final_response = "".join(p.text for p in parts if p.text)
+            final_response = "".join(p.text for p in parts if hasattr(p, "text") and p.text)
+            _no_tool_turns += 1
+
+            # ── Fake status detection on text-only turn ──────────────────────
+            _fake_hits = _FAKE_STATUS_RE_G.findall(final_response)
+            if _fake_hits and n < MAX_ITER - 1:
+                _log("⚠️ FAKE-STATUS", f"Gemini wrote {len(_fake_hits)} fake status indicator(s) without tool calls")
+                history.append(types.Content(role="user", parts=[types.Part(text=(
+                    "【系統警告】你剛才的回覆包含假狀態指示（例如 ✅ Done 或 *(正在執行...)* ），但沒有呼叫任何工具。"
+                    "請立刻使用 Bash tool 或其他工具實際執行所需命令，不要只是描述或假裝完成。"
+                ))]))
+                final_response = ""
+                continue
+
+            # ── Hard cap: 3 consecutive no-tool turns → stop ─────────────────
+            if _no_tool_turns >= 3:
+                _log("❌ NO-TOOL", f"Gemini made no tool call for {_no_tool_turns} consecutive turns — breaking")
+                break
+
+            # No fake status and no forced continuation — genuine done
             break
+
+        # Model made tool calls — reset no-tool counter
+        _no_tool_turns = 0
 
         # 執行所有工具呼叫，並收集結果
         fn_responses = []
+        _tool_names_this_turn: set = set()
         for part in fn_calls:
             fc = part.function_call
+            _tool_names_this_turn.add(fc.name)
             try:
                 result = execute_tool(fc.name, dict(fc.args), chat_jid)
             except Exception as e:
@@ -1537,6 +1651,12 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
             result_str = str(result)
             if len(result_str) > _MAX_TOOL_RESULT_CHARS:
                 result_str = result_str[:_MAX_TOOL_RESULT_CHARS] + f"\n[... truncated {len(result_str) - _MAX_TOOL_RESULT_CHARS} chars]"
+            # Track MEMORY.md writes
+            if not _memory_written and fc.name in {"Write", "Edit", "Bash"}:
+                _fc_args_str = str(fc.args) if fc.args else ""
+                if "MEMORY.md" in _fc_args_str or _memory_path_str in _fc_args_str:
+                    _memory_written = True
+                    _log("🧠 MEMORY-WRITE", f"Gemini updated MEMORY.md via {fc.name} on turn {n}")
             # 將工具結果包裝成 FunctionResponse 格式，Gemini 要求此格式
             fn_responses.append(
                 types.Part(function_response=types.FunctionResponse(
@@ -1544,11 +1664,61 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
                     response={"result": result_str},
                 ))
             )
+
+        # ── Milestone Enforcer: anti-fabrication (same logic as OpenAI loop) ──
+        _sent_message_this_turn = "mcp__evoclaw__send_message" in _tool_names_this_turn
+        _did_real_work = bool(_tool_names_this_turn & _SUBSTANTIVE_TOOLS_GEMINI)
+
+        if _sent_message_this_turn and _did_real_work:
+            _turns_since_notify = 0
+            _only_notify_turns = 0
+        elif _sent_message_this_turn and not _did_real_work:
+            _only_notify_turns += 1
+            _log("⚠️ FAKE-PROGRESS", f"Gemini called only send_message (no real work) — streak={_only_notify_turns}")
+            if _only_notify_turns >= 2 and n < MAX_ITER - 2:
+                _log("🚨 FAKE-PROGRESS", f"Injecting anti-fabrication warning after {_only_notify_turns} fake-report turns")
+                fn_responses.append(types.Part(function_response=types.FunctionResponse(
+                    name="mcp__evoclaw__send_message",
+                    response={"result": (
+                        "【系統警告】你已連續多輪只呼叫 send_message，沒有呼叫任何實質工具（Bash、Read、Write、run_agent 等）。"
+                        "立刻停止假報告。你的下一步必須是：呼叫 Bash tool 執行指令、Read 讀取檔案、或 mcp__evoclaw__run_agent 委派任務。"
+                    )},
+                )))
+        else:
+            _only_notify_turns = 0  # reset streak when doing real work silently
+            _turns_since_notify += 1
+            if _turns_since_notify >= 5 and n < MAX_ITER - 2:
+                _log("⏰ MILESTONE", f"Gemini: no send_message for {_turns_since_notify} turns — injecting reminder")
+                # Inject as a pseudo tool response using the last tool's name
+                _last_tool = next(iter(_tool_names_this_turn), "Bash")
+                fn_responses.append(types.Part(function_response=types.FunctionResponse(
+                    name=_last_tool,
+                    response={"result": (
+                        f"⏰ 你已執行 {_turns_since_notify} 輪未向用戶回報進度。"
+                        "請在繼續工作的同時，用 mcp__evoclaw__send_message 發送一條簡短的進度更新（1-2 句話）。"
+                        "注意：只有在呼叫了 Bash/Read/Write 等實質工具之後才需要回報，不要虛報進度。"
+                    )},
+                )))
+                _turns_since_notify = 0
+
         # 工具結果以 user role 加回 history（Gemini function calling 協議要求）
         history.append(types.Content(role="user", parts=fn_responses))
-        # Trim history to prevent unbounded growth
+
+        # ── MEMORY.md reminder on penultimate turn ────────────────────────────
+        if not _memory_written and n == MAX_ITER - 2:
+            _log("⚠️ MEMORY-REMIND", f"MEMORY.md not updated by turn {n} — injecting CRITICAL reminder")
+            history.append(types.Content(role="user", parts=[types.Part(text=(
+                f"【CRITICAL 系統警告】你在本 session 中尚未更新 MEMORY.md（{_memory_path_str}）。\n"
+                "這是倒數第二輪。你必須在結束前執行以下操作：\n"
+                "1. 使用 Write/Edit 工具更新 MEMORY.md\n"
+                "2. 在 `## 任務記錄 (Task Log)` 區段追加今日任務摘要\n"
+                "3. 若 `## 身份 (Identity)` 有新發現（弱點、原則），同步更新\n"
+                "格式：`[YYYY-MM-DD] <做了什麼、關鍵決策、解決方法>`"
+            ))]))
+
+        # Trim history to prevent unbounded growth (keep few-shot at indices 0-1)
         if len(history) > _MAX_HISTORY_MESSAGES:
-            history = history[:2] + history[-(  _MAX_HISTORY_MESSAGES - 2):]
+            history = history[:2] + history[-(_MAX_HISTORY_MESSAGES - 2):]
 
     if not final_response:
         _log("⚠️ LOOP-EXHAUST", f"Gemini agent loop hit MAX_ITER={MAX_ITER} without text response — no final text collected")
@@ -1904,8 +2074,27 @@ def main():
     # 演化引擎提示：附加在所有靜態設定之後（表觀遺傳，動態覆蓋）
     # 格式：\n\n---\n[環境自動調整提示...] 或 [群組偏好...]
     # 這些提示每次 container 啟動時都可能不同，反映當下的環境狀態
+    # SECURITY: strip any evolution_hints content that attempts to override the
+    # soul.md honesty rules (e.g. "ignore previous instructions", "pretend you
+    # completed", "you may skip tools", "override soul").  These patterns should
+    # never appear in legitimate evolution_hints produced by the GA engine, but
+    # a compromised or misconfigured hint could otherwise silently bypass the
+    # anti-hallucination rules established earlier in the system prompt.
     if evolution_hints:
-        lines.append(evolution_hints)
+        import re as _re_hints
+        _BYPASS_PATTERNS = _re_hints.compile(
+            r'ignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?'
+            r'|override\s+soul'
+            r'|you\s+may\s+(?:skip|bypass|ignore)\s+tools?'
+            r'|pretend\s+(?:you\s+)?(?:completed?|finished?|done)'
+            r'|(?:假裝|偽裝|跳過)\s*(?:工具|完成|執行)',
+            _re_hints.IGNORECASE | _re_hints.DOTALL,
+        )
+        if _BYPASS_PATTERNS.search(evolution_hints):
+            _log("🚨 SECURITY", "evolution_hints contains soul-bypass pattern — stripping hints")
+            evolution_hints = ""
+        else:
+            lines.append(evolution_hints)
 
     system_instruction = "\n".join(lines)
 
@@ -1950,7 +2139,7 @@ def main():
         else:
             _gemini_model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
             _log("🤖 MODEL", f"gemini/{_gemini_model}")
-            result = run_agent(_gemini_client_holder, system_instruction, prompt, chat_jid, assistant_name, conversation_history, pool=google_pool, apply_key_fn=_apply_google_key, max_iter=_dynamic_max_iter)
+            result = run_agent(_gemini_client_holder, system_instruction, prompt, chat_jid, assistant_name, conversation_history, pool=google_pool, apply_key_fn=_apply_google_key, max_iter=_dynamic_max_iter, group_folder=group_folder)
         # 若 agent 已透過 mcp__evoclaw__send_message 工具主動發送訊息，
         # 則清空 result 欄位，避免 host 的 container_runner 再次發送（雙重訊息 + 超長訊息 bug）
         # 若 agent 沒有呼叫工具（純文字回覆），則由 host 負責發送 result
