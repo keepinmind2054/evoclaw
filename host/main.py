@@ -519,7 +519,11 @@ async def _process_group_messages(group: dict, messages: list[dict],
 
     # 取得最近 50 條對話歷史，轉為原生 multi-turn 格式（原為 20 ≈ 10 輪，提升至 50 ≈ 25 輪）
     new_ts_set = {m["timestamp"] for m in messages}
-    raw_history = [m for m in db.get_conversation_history(jid, limit=50) if m["timestamp"] not in new_ts_set]
+    try:
+        raw_history = [m for m in db.get_conversation_history(jid, limit=50) if m["timestamp"] not in new_ts_set]
+    except Exception as _hist_exc:
+        log.warning("Failed to fetch conversation history for %s — proceeding without context: %s", jid, _hist_exc)
+        raw_history = []
     conversation_history = [
         {
             "role": "assistant" if m.get("is_bot_message") else "user",
@@ -530,8 +534,16 @@ async def _process_group_messages(group: dict, messages: list[dict],
         if m.get("content", "").strip()
     ]
     # 只把新訊息作為 prompt（XML context），歷史以 multi-turn 傳入
-    prompt = format_messages(messages, config.TIMEZONE)
-    session_id = db.get_session(folder)
+    try:
+        prompt = format_messages(messages, config.TIMEZONE)
+    except Exception as _fmt_exc:
+        log.error("format_messages failed for %s: %s — using raw content fallback", jid, _fmt_exc)
+        prompt = "\n".join(m.get("content", "") for m in messages)
+    try:
+        session_id = db.get_session(folder)
+    except Exception as _sess_exc:
+        log.warning("get_session failed for %s: %s — using new session", folder, _sess_exc)
+        session_id = None
 
     # Generate a short run_id so all log lines for this agent invocation can be correlated
     run_id = str(uuid.uuid4())[:8]
@@ -633,13 +645,20 @@ async def _process_group_messages(group: dict, messages: list[dict],
         )
         # run_container_agent returns {"status": "error", ...} when no output markers found
         if not _run_succeeded and isinstance(result, dict) and result.get("status") == "error":
+            _err_detail = result.get("error", "unknown error")
             log.warning(
-                "Agent run ended with error status",
+                "Agent run ended with error status for %s: %s",
+                jid, _err_detail,
                 extra={"run_id": run_id, "jid": jid, "folder": folder},
             )
             async with _group_fail_lock:
                 _group_fail_counts[jid] = _group_fail_counts.get(jid, 0) + 1
                 _group_fail_timestamps[jid] = time.time()
+            # Notify user so they know something went wrong instead of seeing silence
+            try:
+                await route_outbound(jid, f"⚠️ 發生錯誤，請稍後再試。(run_id={run_id})")
+            except Exception as _notify_exc:
+                log.warning("Failed to send error notification to %s: %s", jid, _notify_exc)
     except asyncio.TimeoutError:
         log.error(
             "Container run timed out after %ds for group %s — message NOT dropped, "
@@ -655,10 +674,10 @@ async def _process_group_messages(group: dict, messages: list[dict],
         try:
             await route_outbound(
                 jid,
-                "⏱️ This request is taking longer than expected. It will be retried automatically."
+                "⏱️ 請求處理時間過長，將自動重試。"
             )
-        except Exception:
-            pass
+        except Exception as _tout_exc:
+            log.warning("Failed to send timeout notification to %s: %s", jid, _tout_exc)
 
 
 async def _message_loop() -> None:
@@ -836,7 +855,7 @@ async def main() -> None:
 
             print(f"[Phase1] MemoryBus | WSBridge (port {_ws_bridge.port}) | AgentIdentityStore initialized")
         except Exception as _e:
-            print(f"[Phase1] Initialization failed (non-fatal): {_e}")
+            log.error("[Phase1] Initialization failed — agent will run WITHOUT long-term memory: %s", _e)
 
     # Phase 2 (UnifiedClaw): SDK API + Memory Summarizer
     _sdk_api = None
@@ -848,7 +867,7 @@ async def main() -> None:
             asyncio.create_task(_sdk_api.start())
             print(f"[Phase2] SdkApi OK (port {_sdk_api.port}) | MemorySummarizer OK")
         except Exception as _e3:
-            print(f"[Phase2] Initialization failed (non-fatal): {_e3}")
+            log.error("[Phase2] Initialization failed — memory summarizer unavailable: %s", _e3)
 
     global _registered_groups, _sender_allowlist, _stop_event, _group_fail_lock, _dedup_lock
     global _startup_time, _HEARTBEAT_INTERVAL, _last_heartbeat, _leader, _rbac_store
@@ -863,7 +882,7 @@ async def main() -> None:
             _rbac_store = _RBACStore()
             print(f"[Phase3] BotRegistry + RBAC initialized")
         except Exception as _e4:
-            print(f"[Phase3] Initialization failed (non-fatal): {_e4}")
+            log.error("[Phase3] Initialization failed — BotRegistry/RBAC unavailable (fail-closed): %s", _e4)
     _stop_event = asyncio.Event()
     _group_fail_lock = asyncio.Lock()
     _dedup_lock = asyncio.Lock()
