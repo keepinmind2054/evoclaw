@@ -950,7 +950,7 @@ CLAUDE_TOOL_DECLARATIONS = [
 ]
 
 
-def run_agent_claude(client_holder, model: str, system_instruction: str, user_message: str, chat_jid: str, conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None) -> str:
+def run_agent_claude(client_holder, model: str, system_instruction: str, user_message: str, chat_jid: str, conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None, max_iter: int = 20) -> str:
     """
     Anthropic Claude agentic loop.
     client_holder: a one-element list [client] so key rotation can swap the client mid-loop.
@@ -966,7 +966,7 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
             if text:
                 messages.append({"role": role, "content": text})
     messages.append({"role": "user", "content": user_message})
-    MAX_ITER = 30
+    MAX_ITER = max_iter
     final_response = ""
 
     for n in range(MAX_ITER):
@@ -1011,6 +1011,8 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
 
         messages.append({"role": "user", "content": tool_results})
 
+    if not final_response or not final_response.strip():
+        final_response = "（處理完成，但未能產生文字回應，請重新詢問。）"
     return final_response
 
 
@@ -1089,7 +1091,7 @@ def _execute_tool_inner(name: str, args: dict, chat_jid: str) -> str:
 
 # ── Agentic loop ──────────────────────────────────────────────────────────────
 
-def run_agent_openai(client_holder, system_instruction: str, user_message: str, chat_jid: str, model: str, conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None, group_folder: str = "") -> str:
+def run_agent_openai(client_holder, system_instruction: str, user_message: str, chat_jid: str, model: str, conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None, group_folder: str = "", max_iter: int = 20) -> str:
     """
     OpenAI-compatible agentic loop (NVIDIA NIM / OpenAI / Groq / etc.)
     Works the same as run_agent but uses OpenAI chat completions API.
@@ -1107,7 +1109,7 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
             if text:
                 history.append({"role": role, "content": text})
     history.append({"role": "user", "content": user_message})
-    MAX_ITER = 30
+    MAX_ITER = max_iter
     final_response = ""
     _no_tool_turns = 0  # consecutive turns without any tool call (Fix #169)
     _turns_since_notify = 0  # turns since last mcp__evoclaw__send_message call (milestone enforcer)
@@ -1135,7 +1137,7 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                 messages=_oai_history,
                 tools=OPENAI_TOOL_DECLARATIONS,
                 tool_choice=_tool_choice,
-                temperature=0.7,
+                temperature=0.3,
                 max_tokens=4096,
             ), pool=pool, apply_key_fn=apply_key_fn)
         except Exception as _tc_err:
@@ -1147,7 +1149,7 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                     messages=_oai_history,
                     tools=OPENAI_TOOL_DECLARATIONS,
                     tool_choice="auto",
-                    temperature=0.7,
+                    temperature=0.3,
                     max_tokens=4096,
                 ), pool=pool, apply_key_fn=apply_key_fn)
             else:
@@ -1297,8 +1299,15 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
         for tc in msg.tool_calls:
             try:
                 args = _json.loads(tc.function.arguments)
-            except Exception:
-                args = {}
+            except Exception as _arg_err:
+                _log("⚠️ TOOL-ARG-PARSE", f"Failed to parse tool args for {tc.function.name}: {_arg_err} — skipping")
+                # 返回解析錯誤給 model，讓它知道失敗了
+                history.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": f"Error: Failed to parse tool arguments: {_arg_err}"
+                })
+                continue
             result = execute_tool(tc.function.name, args, chat_jid)
             history.append({
                 "role": "tool",
@@ -1306,11 +1315,13 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                 "content": result,
             })
 
+    if not final_response or not final_response.strip():
+        final_response = "（處理完成，但未能產生文字回應，請重新詢問。）"
     return final_response
 
 
 
-def run_agent(client_holder, system_instruction: str, user_message: str, chat_jid: str, assistant_name: str = "Eve", conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None) -> str:
+def run_agent(client_holder, system_instruction: str, user_message: str, chat_jid: str, assistant_name: str = "Eve", conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None, max_iter: int = 20) -> str:
     """
     Gemini function-calling 代理迴圈（agentic loop）。
 
@@ -1347,7 +1358,7 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
                 history.append(types.Content(role=role, parts=[types.Part(text=text)]))
     history.append(types.Content(role="user", parts=[types.Part(text=user_message)]))
 
-    MAX_ITER = 30  # 最多迭代次數，防止無限迴圈
+    MAX_ITER = max_iter  # 最多迭代次數，由呼叫方動態設定
     final_response = ""
 
     for n in range(MAX_ITER):
@@ -1359,7 +1370,7 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
                 tools=[types.Tool(function_declarations=TOOL_DECLARATIONS)],
-                temperature=0.7,  # 適中的隨機性，讓回覆自然但不失準確
+                temperature=0.3,  # 降低隨機性以減少幻覺率
             ),
         ), pool=pool, apply_key_fn=apply_key_fn)
 
@@ -1396,6 +1407,8 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
         # 工具結果以 user role 加回 history（Gemini function calling 協議要求）
         history.append(types.Content(role="user", parts=fn_responses))
 
+    if not final_response or not final_response.strip():
+        final_response = "（處理完成，但未能產生文字回應，請重新詢問。）"
     return final_response
 
 
@@ -1644,7 +1657,8 @@ def main():
             lines.append(_soul_text)
             _log("🧠 SOUL", f"Injected soul.md ({len(_soul_text)} chars)")
         except Exception as _soul_err:
-            _log("⚠️ SOUL", f"Failed to read soul.md: {_soul_err}")
+            _log("⚠️ SOUL", f"Failed to read soul.md: {_soul_err} — using minimal fallback")
+            lines.append("\n你是 EvoClaw，一個智能助理。請誠實、準確地回應，不要編造資訊。")
 
     # ── MEMORY.md 啟動注入（長期記憶 + 身份）────────────────────────────────────
     # 每次 session 啟動時讀取 MEMORY.md，注入為「長期記憶」section。
@@ -1694,6 +1708,17 @@ def main():
         len(prompt or "") > 200 or
         any(kw in _prompt_lower for kw in _LEVEL_B_KEYWORDS)
     )
+    # Dynamic MAX_ITER: env override takes priority, then complexity-based default
+    _env_max_iter = os.environ.get("MAX_ITER")
+    if _env_max_iter:
+        try:
+            _dynamic_max_iter = int(_env_max_iter)
+        except ValueError:
+            _log("⚠️ MAX_ITER", f"Invalid MAX_ITER env value '{_env_max_iter}' — using dynamic default")
+            _dynamic_max_iter = 20 if _is_level_b else 6
+    else:
+        _dynamic_max_iter = 20 if _is_level_b else 6
+    _log("🔢 MAX_ITER", f"{_dynamic_max_iter} ({'Level B' if _is_level_b else 'Level A'}, prompt_len={len(prompt or '')})")
     if _is_level_b:
         lines.append("")
         lines.append(
@@ -1706,8 +1731,11 @@ def main():
     # 全域 CLAUDE.md 提供所有群組共用的指令；群組 CLAUDE.md 提供群組專屬設定
     for claude_md in ["/workspace/global/CLAUDE.md", "/workspace/group/CLAUDE.md"]:
         if Path(claude_md).exists():
-            lines.append("")
-            lines.append(Path(claude_md).read_text(encoding="utf-8"))
+            try:
+                lines.append("")
+                lines.append(Path(claude_md).read_text(encoding="utf-8"))
+            except Exception as _cmd_err:
+                _log("⚠️ CLAUDE.MD", f"Failed to read {claude_md}: {_cmd_err} — skipping")
 
     # 演化引擎提示：附加在所有靜態設定之後（表觀遺傳，動態覆蓋）
     # 格式：\n\n---\n[環境自動調整提示...] 或 [群組偏好...]
@@ -1738,18 +1766,18 @@ def main():
         if use_openai_compat:
             _model = os.environ.get("NIM_MODEL") or os.environ.get("OPENAI_MODEL") or os.environ.get("GEMINI_MODEL") or "meta/llama-3.3-70b-instruct"
             _log("🤖 MODEL", f"openai-compat/{_model}")
-            result = run_agent_openai(_openai_client_holder, system_instruction, prompt, chat_jid, _model, conversation_history, pool=_active_pool, apply_key_fn=_apply_openai_key, group_folder=group_folder)
+            result = run_agent_openai(_openai_client_holder, system_instruction, prompt, chat_jid, _model, conversation_history, pool=_active_pool, apply_key_fn=_apply_openai_key, group_folder=group_folder, max_iter=_dynamic_max_iter)
         elif use_claude:
             _log("🤖 MODEL", f"claude/{claude_model}")
-            result = run_agent_claude(_claude_client_holder, claude_model, system_instruction, prompt, chat_jid, conversation_history, pool=claude_pool, apply_key_fn=_apply_claude_key)
+            result = run_agent_claude(_claude_client_holder, claude_model, system_instruction, prompt, chat_jid, conversation_history, pool=claude_pool, apply_key_fn=_apply_claude_key, max_iter=_dynamic_max_iter)
         else:
             _gemini_model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
             _log("🤖 MODEL", f"gemini/{_gemini_model}")
-            result = run_agent(_gemini_client_holder, system_instruction, prompt, chat_jid, assistant_name, conversation_history, pool=google_pool, apply_key_fn=_apply_google_key)
+            result = run_agent(_gemini_client_holder, system_instruction, prompt, chat_jid, assistant_name, conversation_history, pool=google_pool, apply_key_fn=_apply_google_key, max_iter=_dynamic_max_iter)
         # 若 agent 已透過 mcp__evoclaw__send_message 工具主動發送訊息，
         # 則清空 result 欄位，避免 host 的 container_runner 再次發送（雙重訊息 + 超長訊息 bug）
         # 若 agent 沒有呼叫工具（純文字回覆），則由 host 負責發送 result
-        emit_result = "" if _messages_sent_via_tool else result
+        emit_result = result if result and result.strip() else ("" if _messages_sent_via_tool else result)
         # Preserve the incoming sessionId so the host can track conversation continuity.
         # Only fall back to generating a new UUID if no sessionId was provided.
         preserved_session_id = session_id if session_id else str(uuid.uuid4())
