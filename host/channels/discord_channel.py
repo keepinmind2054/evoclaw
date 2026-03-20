@@ -84,6 +84,14 @@ class DiscordChannel:
             is_dm = isinstance(message.channel, discord.DMChannel)
             is_group = not is_dm
 
+            # Normalize Discord @mention of the bot (e.g. <@1234567890> or <@!1234567890>)
+            # to the configured trigger word so that tagging the bot works naturally.
+            # e.g.  "<@1483370646770810881> 哈囉"  →  "@Eve 哈囉"
+            import re as _re
+            if self._client.user and self._client.user in message.mentions:
+                normalized = _re.sub(rf"<@!?{self._client.user.id}>", "", text).strip()
+                text = f"@{config.ASSISTANT_NAME} {normalized}".strip()
+
             groups = {g["jid"]: g for g in registered_groups}
             group = groups.get(jid)
             if group and group.get("requires_trigger", True):
