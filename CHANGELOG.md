@@ -1,3 +1,41 @@
+## [1.18.0] — 2026-03-21
+
+### Fixed (Phase 11: 深度可靠性修復 — 43 個問題)
+
+四個 PR 並行深度分析修復，涵蓋工具安全、容器生命周期、進化穩定性與 soul 品質。
+
+#### Tool Safety & Reliability (PR #356 — 19 fixes)
+
+- **WebFetch SSRF 防護** — DNS 解析 + ipaddress 封鎖清單（127.x、10.x、192.168.x、169.254.x），防止 Server-Side Request Forgery 攻擊
+- **WebFetch 重定向鏈檢查** — 最多 5 次重定向上限，每次重定向都重新驗證目標 IP
+- **WebFetch 原始資料上限** — 2MB 原始內容上限 + 二進位內容偵測，防止記憶體耗盡
+- **Bash 危險指令封鎖清單** — 封鎖 `rm -rf /`、`mkfs`、`dd if=/dev/zero`、fork bomb 等高危指令
+- **Bash 輸出上限** — 50KB 輸出上限，防止記憶體耗盡
+- **Read 檔案大小上限** — 512KB 檔案大小上限
+- **Write/Edit 大小上限** — 10MB 限制 + `tmp + os.replace()` 原子寫入，防止部分寫入損毀
+- **send_message 空內容防護** — 空內容 guard + 32KB 上限
+- **Glob 結果上限** — 1000 結果上限，防止大量匹配拖垮系統
+- **MEMORY.md 讀取上限** — 512KB tail-read 上限
+
+#### Container Lifecycle & Queue Correctness (PR #357 — 12 fixes)
+
+- **輸出解析** — 使用 `rfind` 取最後一個 OUTPUT 區段，加入明確 "output too large" 路徑，JSON schema 驗證
+- **可靠性** — `stderr_lines` 變數遮蔽修復，docker kill 降級為 `docker rm -f`，Windows `TimeoutExpired` 重新拋出為 `asyncio.TimeoutError`
+- **錯誤訊息** — circuit breaker URGENT 繞過 rate limiter，timeout 顯示人類可讀的「30 分鐘」格式
+- **GroupQueue 回調** — 錯誤時回傳 `False` 以啟用退避重試，`_group_fail_lock` 為 None 時不再丟棄訊息
+- **group_queue.py 雙重分發競爭修復** — dispatch 前先清除 `pending_messages`，防止重複發送
+
+#### Evolution Stability (PR #358 — 6 fixes)
+
+- **免疫系統誤報修復** — `忽略你的所有規則` 和 `忘記你的系統提示` 現在能被正確攔截
+- **Genome 不對稱震盪修復** — 正式度升降現在均使用 `update_formality()`，防止單向漂移
+- **Daemon 基因組驗證** — 進化前先檢測無效基因組，若無效則呼叫 `reset_genome()`
+- **靜默攔截通知** — 免疫系統靜默攔截後，現在會向用戶發送具體的中文通知訊息
+
+#### Soul Quality (PR #355)
+
+- **soul.md 反幻覺強化** — 修補 anti-hallucination 漏洞，關閉多個可能導致幻覺回覆的邊緣情況
+
 ## [1.17.0-phase10] — 2026-03-20
 
 ### Fixed (Phase 10: 全面深度修復 — 30+ 個問題)
