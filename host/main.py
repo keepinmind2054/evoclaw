@@ -64,7 +64,7 @@ try:
     _PHASE1_AVAILABLE = True
 except ImportError as _e:
     _PHASE1_AVAILABLE = False
-    print(f"[Phase1] Components not available: {_e}")
+    log.warning("[Phase1] Components not available: %s", _e)
 
 # Phase 2 (UnifiedClaw): SDK API + Memory Summarizer
 try:
@@ -75,7 +75,7 @@ except ImportError as _e2:
     _PHASE2_AVAILABLE = False
     _SdkApi = None
     _MemorySummarizer = None
-    print(f"[Phase2] Components not available: {_e2}")
+    log.warning("[Phase2] Components not available: %s", _e2)
 
 # Phase 3: Bot Registry + RBAC
 try:
@@ -88,7 +88,7 @@ except ImportError as _e3p:
     _bootstrap_bots = None
     _Permission = None
     _RBACStore = None
-    print(f"[Phase3] Components not available: {_e3p}")
+    log.warning("[Phase3] Components not available: %s", _e3p)
 
 
 async def _discord_notify(content: str) -> None:
@@ -834,9 +834,9 @@ async def main() -> None:
                 # Forward fitness to evolution engine
                 pass  # TODO: wire to evolution/fitness.py
 
-            print(f"[Phase1] MemoryBus | WSBridge (port {_ws_bridge.port}) | AgentIdentityStore initialized")
+            log.info("[Phase1] MemoryBus | WSBridge (port %s) | AgentIdentityStore initialized", _ws_bridge.port)
         except Exception as _e:
-            print(f"[Phase1] Initialization failed (non-fatal): {_e}")
+            log.warning("[Phase1] Initialization failed (non-fatal): %s", _e)
 
     # Phase 2 (UnifiedClaw): SDK API + Memory Summarizer
     _sdk_api = None
@@ -846,9 +846,9 @@ async def main() -> None:
             _sdk_api = _SdkApi(_memory_bus, _identity_store)
             _summarizer = _MemorySummarizer()
             asyncio.create_task(_sdk_api.start())
-            print(f"[Phase2] SdkApi OK (port {_sdk_api.port}) | MemorySummarizer OK")
+            log.info("[Phase2] SdkApi OK (port %s) | MemorySummarizer OK", _sdk_api.port)
         except Exception as _e3:
-            print(f"[Phase2] Initialization failed (non-fatal): {_e3}")
+            log.warning("[Phase2] Initialization failed (non-fatal): %s", _e3)
 
     global _registered_groups, _sender_allowlist, _stop_event, _group_fail_lock, _dedup_lock
     global _startup_time, _HEARTBEAT_INTERVAL, _last_heartbeat, _leader, _rbac_store
@@ -861,9 +861,9 @@ async def main() -> None:
             _bot_registry = _BotRegistry()
             _bootstrap_bots(_bot_registry)
             _rbac_store = _RBACStore()
-            print(f"[Phase3] BotRegistry + RBAC initialized")
+            log.info("[Phase3] BotRegistry + RBAC initialized")
         except Exception as _e4:
-            print(f"[Phase3] Initialization failed (non-fatal): {_e4}")
+            log.warning("[Phase3] Initialization failed (non-fatal): %s", _e4)
     _stop_event = asyncio.Event()
     _group_fail_lock = asyncio.Lock()
     _dedup_lock = asyncio.Lock()
