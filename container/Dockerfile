@@ -91,6 +91,7 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     lxml \
     # Image processing (Issue #79)
     Pillow \
+    # Optional heavy data science dependencies (can be removed if not using Excel/chart tools)
     # Data analysis (Issue #80)
     pandas \
     numpy \
