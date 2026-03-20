@@ -1,119 +1,286 @@
-# EvoClaw 故障排除指南
+# EvoClaw Troubleshooting Guide
 
-## 診斷工具
+## Diagnostic tools
 
 ```bash
-# 查看即時日誌
-python run.py 2>&1 | grep -E "ERROR|WARNING|⚠️"
+# View live logs
+python run.py 2>&1 | grep -E "ERROR|WARNING|CRITICAL"
 
-# 查看 Docker 狀態
+# Check Docker status
 docker ps | grep evoclaw
 
-# 測試 API Key
-curl -H "Authorization: Bearer $QWEN_API_KEY" https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation
+# Validate your environment (checks Python, Docker, API keys, image)
+python scripts/validate_env.py
+
+# Test Google Gemini API key
+curl -H "x-goog-api-key: $GOOGLE_API_KEY" \
+  "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1"
+
+# Test OpenAI / NIM API key
+curl -H "Authorization: Bearer $OPENAI_API_KEY" \
+  "${OPENAI_BASE_URL:-https://api.openai.com}/v1/models" | head -5
 ```
 
 ---
 
-## 常見問題
+## Common problems
 
-### ❌ Bot 沒有回覆
+### Bot not responding
 
-**檢查步驟：**
-1. 確認 Docker 正在運行：`docker ps`
-2. 確認 Bot Token 正確：在 Telegram 找 @BotFather 重新確認
-3. 查看錯誤日誌：`python run.py 2>&1 | tail -50`
+**Checklist:**
+1. Confirm Docker is running: `docker ps`
+2. Confirm bot token is correct: check with @BotFather on Telegram
+3. View error logs: `python run.py 2>&1 | tail -50`
+4. Run environment check: `python scripts/validate_env.py`
 
-**常見原因：**
-- `TELEGRAM_BOT_TOKEN` 格式錯誤（應為 `123456:ABC-DEF...`）
-- Docker image 未建置：執行 `make build`
-- LLM API Key 無效：確認 Key 仍有效且有餘額
-
----
-
-### ❌ 回覆很慢（超過 30 秒）
-
-**正常情況：** 首次啟動 Docker 容器需要 8-15 秒是正常的。
-
-**異常情況（>30秒）：**
-- Docker image 太大：執行 `docker images | grep evoclaw` 確認大小
-- 機器資源不足：確認 RAM > 4GB，Docker Desktop 分配 > 2GB
-- LLM API 速度慢：嘗試換用 Gemini（速度較快）
+**Common causes:**
+- `TELEGRAM_BOT_TOKEN` has wrong format (should be `123456:ABC-DEF...`)
+- Docker image not built yet: run `make build`
+- LLM API key invalid or expired: confirm the key and check your quota
+- The group is not registered: send `/monitor` from the group or run `python scripts/register_group.py`
 
 ---
 
-### ❌ `GOOGLE_API_KEY not set` 錯誤
+### `pip install` fails / ModuleNotFoundError on startup
 
-LLM API Key 未設定。在 `.env` 中至少填入一個：
-```
-QWEN_API_KEY=你的key
-```
-或
-```
-GOOGLE_API_KEY=你的key
-```
-
----
-
-### ❌ Docker 建置失敗
+The host dependencies live in `host/requirements.txt`, not a root-level file.
 
 ```bash
-# 清除舊的建置快取
+pip install -r host/requirements.txt
+```
+
+If you see `ModuleNotFoundError` for a specific package, install it directly:
+
+```bash
+pip install python-telegram-bot aiohttp websockets
+```
+
+---
+
+### No LLM API key / wrong key name
+
+EvoClaw supports these LLM providers and their environment variable names:
+
+| Provider | Environment variable | Notes |
+|----------|---------------------|-------|
+| Google Gemini | `GOOGLE_API_KEY` | Free tier at aistudio.google.com |
+| NVIDIA NIM | `NIM_API_KEY` | Supports Qwen, Llama, Mistral, and many others |
+| OpenAI | `OPENAI_API_KEY` | GPT-4 series |
+| Anthropic Claude | `CLAUDE_API_KEY` | Most reliable |
+
+> **Important:** There is no `QWEN_API_KEY`. To use Qwen models, set `NIM_API_KEY`
+> (NVIDIA NIM) or use `OPENAI_API_KEY` + `OPENAI_BASE_URL` pointing at a Qwen-compatible
+> OpenAI-API endpoint.
+
+Set at least one of these in `.env`:
+```
+GOOGLE_API_KEY=your-gemini-key
+```
+
+---
+
+### OWNER_IDS not set — lost admin access
+
+If no one was granted admin and you cannot reach the dashboard, set `OWNER_IDS` in `.env`:
+
+```
+# Telegram user IDs (comma-separated). Use /userinfobot to find yours.
+OWNER_IDS=123456789,987654321
+```
+
+When `OWNER_IDS` is set, those users are automatically granted admin on every startup.
+
+When `OWNER_IDS` is empty and no grants have been made, EvoClaw operates in **fail-open**
+mode: all users can submit messages. This is intentional for fresh installs so you are
+not locked out. Set `OWNER_IDS` to activate RBAC enforcement.
+
+---
+
+### Docker not installed or not running
+
+```bash
+# Check if Docker is available
+docker info
+```
+
+If Docker is missing:
+- **macOS / Windows:** Install Docker Desktop from https://www.docker.com/products/docker-desktop
+- **Linux (Debian/Ubuntu):** `sudo apt-get install docker.io` then `sudo systemctl start docker`
+- **Linux (RHEL/Fedora):** `sudo dnf install docker` then `sudo systemctl start docker`
+
+If your user cannot run Docker without `sudo`:
+```bash
+sudo usermod -aG docker $USER
+# Then log out and back in
+```
+
+---
+
+### `evoclaw-agent` Docker image not found
+
+The image must be built before first run. Run:
+
+```bash
+make build
+# or directly:
+docker build -t evoclaw-agent:latest container/
+```
+
+This takes 5-10 minutes on first build (downloads ~1 GB of layers). Subsequent builds
+are cached and take ~30 seconds.
+
+---
+
+### Docker build failed
+
+```bash
+# Clear stale build cache and retry
 docker builder prune -f
-# 重新建置
 make build
 ```
 
-如果是網路問題（下載 apt 包失敗），嘗試：
+If apt package downloads fail (network/proxy issue):
+
 ```bash
-# 設定 proxy（如果需要）
 export DOCKER_BUILDKIT=1
-export HTTP_PROXY=http://你的proxy:port
+export HTTP_PROXY=http://your-proxy:port
 make build
 ```
 
 ---
 
-### ❌ `Circuit breaker open` 錯誤
+### Slow responses (over 30 seconds)
 
-Docker 連續失敗 3 次，系統暫時停止接受請求。
+**Normal:** First Docker container cold-start takes 8-15 seconds.
 
-**解決：**
-1. 等待 60 秒自動恢復
-2. 或重啟服務：`Ctrl+C` 然後 `python run.py`
-3. 查看失敗原因：`docker logs evoclaw-agent` 最後幾行
+**Abnormal (>30 s):**
+- Check machine resources: need RAM > 4 GB, Docker Desktop allocated > 2 GB
+- Check if the LLM API is slow: try switching to Gemini (`GOOGLE_API_KEY`) which is faster
+- Check Docker image size: `docker images | grep evoclaw`
 
 ---
 
-### ❌ 記憶體不足（OOM）
+### Circuit breaker open
 
-每個 Docker 容器使用約 512MB RAM。5 個並發 = 需要 2.5GB+。
+Docker failed 3 times in a row; the system pauses to protect stability.
 
-**解決：**
+**Fix:**
+1. Wait 60 seconds for automatic recovery
+2. Or restart: `Ctrl+C` then `python run.py`
+3. View the failure reason: `docker logs evoclaw-agent` (last few lines)
+4. Or send SIGUSR1 to reset without restart: `kill -USR1 $(pgrep -f "python.*run.py")`
+
+---
+
+### Out-of-memory (OOM)
+
+Each Docker container uses ~512 MB RAM. 5 concurrent containers = ~2.5 GB needed.
+
+**Fix:**
+
 ```bash
-# 在 .env 中減少並發數
+# In .env — reduce concurrency or per-container memory:
 MAX_CONCURRENT_CONTAINERS=2
-# 或減少每個容器記憶體（謹慎使用）
 CONTAINER_MEMORY=256m
 ```
 
 ---
 
-## 日誌符號說明
+### Wrong Telegram bot token — bot loops or crashes
 
-| 符號 | 意義 |
-|------|------|
-| 🚀 | 容器啟動 |
-| 🧠 | LLM 呼叫 |
-| 🔧 | 工具執行 |
-| ✅ | 成功 |
-| ⚠️ | 警告（非致命） |
-| ❌ | 錯誤 |
-| 🏁 | 容器結束 |
+A wrong token causes Telegram to return `401 Unauthorized`. EvoClaw retries
+5 times with exponential back-off (2, 4, 8, 16, 30 s), then logs an error and
+stops the Telegram channel. The process continues running but Telegram is inactive.
+
+Check the logs for: `Telegram connect failed after 5 attempts`
+
+Fix: correct `TELEGRAM_BOT_TOKEN` in `.env` and restart.
 
 ---
 
-## 取得幫助
+### Bot conflicts (`Conflict: terminated by other getUpdates request`)
+
+Two instances of EvoClaw are running with the same bot token.
+Stop all running instances and start only one.
+
+---
+
+### Logs filling up disk
+
+EvoClaw prunes its internal SQLite log tables at startup (keeps last 30 days by default).
+
+For process stdout/stderr logs, use log rotation:
+
+**With systemd (recommended):**
+journald rotates logs automatically. No action needed.
+
+**Without systemd — set up logrotate:**
+
+```bash
+# /etc/logrotate.d/evoclaw
+/path/to/evoclaw/logs/*.log {
+    daily
+    rotate 7
+    compress
+    missingok
+    notifempty
+}
+```
+
+---
+
+### Running EvoClaw continuously (auto-restart on crash)
+
+`python run.py` does not auto-restart on crash. Use a process supervisor:
+
+**systemd (Linux):**
+
+```bash
+sudo cp scripts/evoclaw.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now evoclaw
+sudo journalctl -u evoclaw -f
+```
+
+**launchd (macOS):**
+
+```bash
+bash scripts/install_launchd.sh
+launchctl list | grep evoclaw
+```
+
+**Manual restart loop (quick test only — not recommended for production):**
+
+```bash
+while true; do python run.py; echo "Crashed, restarting in 5s..."; sleep 5; done
+```
+
+---
+
+### Updating EvoClaw
+
+```bash
+git pull
+pip install -r host/requirements.txt   # pick up new deps
+make build                              # only if container/Dockerfile changed
+# Then restart EvoClaw (systemctl restart evoclaw, or Ctrl+C + python run.py)
+```
+
+---
+
+## Log symbol reference
+
+| Symbol | Meaning |
+|--------|---------|
+| CRITICAL | Fatal startup error (Docker unreachable, no API keys, etc.) |
+| ERROR | Container failure, channel error |
+| WARNING | Non-fatal issue (rate limit, duplicate message, missing optional config) |
+| INFO | Normal operation |
+| DEBUG | Verbose tracing (set `LOG_LEVEL=DEBUG` in `.env`) |
+
+---
+
+## Getting help
 
 - GitHub Issues: https://github.com/KeithKeepGoing/evoclaw/issues
-- 提交 Issue 時請附上：錯誤訊息、`.env` 內容（遮蔽 Key）、`docker version` 輸出
+- When filing an issue, include: error message, `.env` content (mask your keys), `docker version` output, `python --version`

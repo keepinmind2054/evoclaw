@@ -896,7 +896,20 @@ async def main() -> None:
             # Auto-bootstrap: grant admin to all IDs listed in OWNER_IDS env var.
             # Format: OWNER_IDS=123456,987654321  (comma-separated Telegram/Discord user IDs)
             # This ensures the owner always has access even after a fresh install.
+            # Read from os.environ first; fall back to .env file so users who set it
+            # in .env without exporting to the shell environment still get bootstrapped.
             _owner_ids_raw = os.environ.get("OWNER_IDS", "").strip()
+            if not _owner_ids_raw:
+                try:
+                    from .env import read_env_file as _ref_oids
+                    _owner_ids_raw = _ref_oids(["OWNER_IDS"]).get("OWNER_IDS", "").strip()
+                except Exception:
+                    pass
+            if not _owner_ids_raw:
+                log.info(
+                    "[Phase3] OWNER_IDS not set — RBAC is in fail-open mode (all users allowed). "
+                    "Set OWNER_IDS=<your-user-id> in .env to enable access control."
+                )
             if _owner_ids_raw:
                 for _oid in [x.strip() for x in _owner_ids_raw.split(",") if x.strip()]:
                     try:

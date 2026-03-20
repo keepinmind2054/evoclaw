@@ -1,0 +1,35 @@
+# EvoClaw systemd service file
+#
+# Install:
+#   sudo cp scripts/evoclaw.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now evoclaw
+#
+# Update PROJECT_DIR and User below to match your setup.
+# The ExecStart path assumes python3 is on PATH; adjust if using a virtualenv:
+#   ExecStart=/path/to/venv/bin/python /path/to/evoclaw/run.py
+
+[Unit]
+Description=EvoClaw AI Agent
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+# Update these two lines:
+User=YOUR_USERNAME
+WorkingDirectory=/path/to/evoclaw
+
+ExecStart=/usr/bin/python3 /path/to/evoclaw/run.py
+Restart=on-failure
+RestartSec=5s
+
+# Log to journald (view with: journalctl -u evoclaw -f)
+StandardOutput=journal
+StandardError=journal
+
+# Give containers time to finish before forceful kill
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target

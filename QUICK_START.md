@@ -1,68 +1,129 @@
-# EvoClaw 快速開始
+# EvoClaw Quick Start
 
-5 分鐘內啟動 EvoClaw 的最小配置。
+Get EvoClaw running in under 10 minutes.
 
-## 最小需求
+## Requirements
 
-- Docker（已安裝並運行）
+- Docker (installed and running)
 - Python 3.11+
-- 至少一個 LLM API Key（Qwen / Gemini / OpenAI / Claude 擇一）
-- 至少一個聊天頻道 Token（Telegram 最簡單）
+- At least one LLM API key (Gemini / NIM / OpenAI / Claude — pick one)
+- At least one chat channel token (Telegram is easiest)
 
-## 步驟
+## Steps
 
-### 1. 安裝
+### 1. Install
 
 ```bash
 git clone https://github.com/KeithKeepGoing/evoclaw.git
 cd evoclaw
-pip install -r requirements.txt
+pip install -r host/requirements.txt
 ```
 
-### 2. 最小配置
+### 2. Configure
 
-複製最小設定檔：
+Copy the minimal config template:
 
 ```bash
 cp .env.minimal .env
 ```
 
-編輯 `.env`，填入你的 API Key（只需填這幾個）：
+Edit `.env` and fill in your keys (only the ones you have):
 
 ```bash
-# LLM（選一個）
-QWEN_API_KEY=你的-qwen-key          # 推薦：便宜且中文最好
-# GOOGLE_API_KEY=你的-gemini-key    # 免費 tier 可用
-# CLAUDE_API_KEY=你的-claude-key    # 最穩定
+# LLM — pick ONE of the following:
+GOOGLE_API_KEY=your-gemini-key        # Recommended: free tier at aistudio.google.com
+# NIM_API_KEY=your-nim-key            # NVIDIA NIM (supports Qwen, Llama, Mistral, etc.)
+# OPENAI_API_KEY=your-openai-key      # GPT-4 series
+# CLAUDE_API_KEY=your-claude-key      # Most reliable, but costs more
 
-# 頻道（選一個）
-TELEGRAM_BOT_TOKEN=你的-telegram-token   # 最容易取得
+# Channel — pick ONE:
+TELEGRAM_BOT_TOKEN=your-telegram-token  # Easiest to obtain via @BotFather
+
+# Owner — strongly recommended:
+# Your Telegram user ID. Use /userinfobot to find it.
+# These users get automatic admin rights.
+OWNER_IDS=123456789
 ```
 
-### 3. 建置 Docker 並啟動
+> **Note on Qwen:** Qwen models are accessed via `NIM_API_KEY` (NVIDIA NIM) or `OPENAI_API_KEY`
+> (with `OPENAI_BASE_URL` pointed at the Qwen endpoint). There is no separate `QWEN_API_KEY`.
+
+### 3. Build the Docker image and start
 
 ```bash
-# 建置 agent 容器（第一次約 5-10 分鐘）
+# Build the agent container (first time takes 5-10 minutes)
 make build
 
-# 啟動
+# Verify your environment
+python scripts/validate_env.py
+
+# Start EvoClaw
 python run.py
 ```
 
-### 4. 測試
+### 4. Register a group
 
-在 Telegram 找到你的 bot，傳送任意訊息，看到回覆就成功了！
+After starting, send `/monitor` from your Telegram group to register it as the main group.
+This registers the group in EvoClaw's database and enables error alerts there.
+
+Alternatively, use the interactive script:
+
+```bash
+python scripts/register_group.py
+```
+
+### 5. Test
+
+Find your bot on Telegram and send a message. If you get a reply, setup is complete.
 
 ---
 
-## 常見問題
+## Common problems
 
-| 問題 | 解決方式 |
-|------|---------|
-| Docker 未運行 | 啟動 Docker Desktop 或 `sudo systemctl start docker` |
-| 回應很慢（15-30秒）| 正常，第一次 Docker 容器冷啟動需要時間 |
-| 沒有回應 | 查看 `TROUBLESHOOTING.md` |
-| API Key 錯誤 | 檢查 `.env` 格式，Key 前後不要有空格 |
+| Problem | Fix |
+|---------|-----|
+| `pip install` fails | Make sure you are running `pip install -r host/requirements.txt` (not a root-level file) |
+| Docker not running | Start Docker Desktop or run `sudo systemctl start docker` |
+| No reply from bot | Check `TROUBLESHOOTING.md` |
+| Wrong API key format | Check `.env` — no spaces around the `=` sign, no quotes |
+| Slow response (15-30 s) | Normal — first Docker container cold-start takes time |
+| `evoclaw-agent image not found` | Run `make build` first |
+| No admin access | Set `OWNER_IDS` in `.env` with your Telegram user ID |
 
-詳細設定請參考 [README.md](README.md)。
-詳細故障排除請參考 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
+---
+
+## Running continuously (production)
+
+### Linux (systemd)
+
+```bash
+# Install the systemd service
+sudo cp scripts/evoclaw.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable evoclaw
+sudo systemctl start evoclaw
+
+# View logs
+sudo journalctl -u evoclaw -f
+```
+
+### macOS (launchd)
+
+```bash
+# Install the launchd plist (fills in PROJECT_ROOT and HOME automatically)
+bash scripts/install_launchd.sh
+```
+
+### Updating EvoClaw
+
+```bash
+git pull
+pip install -r host/requirements.txt
+make build        # only needed if container changed
+sudo systemctl restart evoclaw   # or restart however you run it
+```
+
+---
+
+For detailed configuration see [README.md](README.md).
+For troubleshooting see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
