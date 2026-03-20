@@ -143,7 +143,7 @@ def _docker_circuit_open(group_folder: str = "_global") -> bool:
         last_failure = _docker_failure_time.get(group_folder, 0.0)
         elapsed = time.time() - last_failure
         if elapsed >= _DOCKER_HALF_OPEN_SECS:
-            _docker_failures[group_folder] = _DOCKER_CIRCUIT_THRESHOLD - 1
+            _docker_failures[group_folder] = 0  # Reset counter when half-open
             log.info("[%s] Docker circuit half-open after %.0fs", group_folder, elapsed)
             return False
         log.warning("[%s] Docker circuit OPEN (failures=%d, retry in %.0fs)",
@@ -577,23 +577,23 @@ async def run_container_agent(
             record_run(jid, run_id, response_ms, retry_count=0, success=False)
             db.log_container_finish(run_id, time.time(), "error", _redact_secrets(stderr) if stderr else "", stdout[:200] if stdout else "", response_ms)
             # ── 區分「Docker daemon 失敗」vs「container agent 崩潰」────────────
-            # 若 stderr 有實質內容（> 200 chars），代表 Docker 成功啟動了 container，
-            # 只是 agent process 在 emit() 前崩潰（OOM、unhandled exception 等）。
-            # 這種情況 Docker 本身是正常的 → 呼叫 _record_docker_success() 歸零 circuit。
-            # 若 stderr 幾乎為空，才代表 Docker daemon 層面的失敗 → 計入 circuit breaker。
-            # 更可靠的 Docker 健康判斷：
-            # 1. 有任何 stderr 輸出（容器確實啟動了）
-            # 2. 且包含 EvoClaw 的日誌標記（說明 Python 程序有執行）
-            _EVOCLAW_STARTED_MARKERS = ("🚀", "📥", "🧠", "Agent started", "agent.py")
-            _has_evoclaw_output = any(marker in (stderr or "") for marker in _EVOCLAW_STARTED_MARKERS)
-            _container_ran = bool(stderr and len(stderr.strip()) > _STDERR_DOCKER_OK_THRESHOLD) and _has_evoclaw_output
+            # Use exit code to determine failure type (not stderr heuristic).
+            # Docker exit codes:
+            #   0   = success (agent ran and exited cleanly)
+            #   124 = timeout (agent ran but timed out — agent issue)
+            #   137 = OOM killed (agent issue)
+            #   143 = SIGTERM (agent issue)
+            #   125, 126, 127 = Docker itself failed (image not found, permission, etc.)
+            #   other non-zero = likely Docker/container issue
+            _AGENT_EXIT_CODES = {0, 124, 137, 143}  # exit codes where container itself ran fine
+            _container_ran = proc.returncode in _AGENT_EXIT_CODES
 
             if _container_ran:
                 log.info("Container %s crashed before emit() but Docker is healthy — resetting circuit breaker", container_name)
                 _record_docker_success(folder)
             else:
-                # 只有在沒有 EvoClaw 輸出時才判定 Docker 異常
-                log.warning("Container produced no EvoClaw markers in stderr — possible Docker daemon issue or crash before init")
+                # Exit code indicates Docker itself failed (not an agent-level issue)
+                log.warning("Container exit code %s indicates Docker daemon issue — recording failure", proc.returncode if proc else '?')
                 _record_docker_failure(folder)
             # Bundle stderr context for monitor channel (separator parsed by on_error in main.py)
             _stderr_ctx_lines = [_redact_secrets(l) for l in (stderr_lines or [])[-15:]]
