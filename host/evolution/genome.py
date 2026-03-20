@@ -22,6 +22,33 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
+# 收斂停止閾值：若正式程度已在目標值的 1% 以內，停止更新（避免無限振盪）
+_CONVERGENCE_EPSILON = 0.01
+
+
+def _safe_float(value, default: float, min_val: float = 0.0, max_val: float = 1.0) -> float:
+    """
+    安全地將資料庫讀取的值轉換為 float，並限制在合法範圍內。
+    若值為 None 或無法轉換，回傳預設值。
+    """
+    try:
+        result = float(value)
+        return max(min_val, min(max_val, result))
+    except (TypeError, ValueError):
+        return default
+
+
+def update_formality(formality: float, target: float = 0.5) -> float:
+    """
+    將正式程度向目標值靠攏一步。
+    若已在目標值的 _CONVERGENCE_EPSILON 以內，直接回傳（停止振盪）。
+    """
+    FORMALITY_STEP = 0.05
+    if abs(formality - target) < _CONVERGENCE_EPSILON:
+        return formality  # Already converged, don't oscillate
+    return formality + FORMALITY_STEP * (target - formality)
+
+
 # 基因組預設值：中立起點，不偏向任何風格
 DEFAULT_GENOME = {
     "response_style": "balanced",   # concise / balanced / detailed
@@ -42,7 +69,13 @@ def get_genome(jid: str) -> dict:
     try:
         genome = db.get_group_genome(jid)
         if genome:
-            return genome
+            # Validate and clamp float values read from DB to prevent crashes on NULL/invalid data
+            return {
+                "response_style": genome.get("response_style", DEFAULT_GENOME["response_style"]),
+                "formality": _safe_float(genome.get("formality"), default=0.5),
+                "technical_depth": _safe_float(genome.get("technical_depth"), default=0.5),
+                "generation": genome.get("generation", 0),
+            }
     except Exception as e:
         log.warning(f"Failed to get genome for {jid}: {e}")
     return dict(DEFAULT_GENOME)
@@ -99,13 +132,13 @@ def evolve_genome_from_fitness(jid: str, fitness: float, avg_response_ms: float)
 
     # Evolve formality: nudge toward 0.5 baseline, adjust based on fitness
     # High fitness + fast responses → slightly more formal (confidence)
-    # Low fitness → nudge toward neutral (0.5)
+    # Low fitness → nudge toward neutral (0.5) using convergence-stop helper
     FORMALITY_STEP = 0.05
     if fitness > 0.7 and avg_response_ms < 8000:
         formality = min(1.0, formality + FORMALITY_STEP)
     elif fitness < 0.4:
-        # Nudge toward neutral
-        formality = formality + FORMALITY_STEP * (0.5 - formality)
+        # Nudge toward neutral, with convergence stop to prevent infinite oscillation
+        formality = update_formality(formality, target=0.5)
     formality = round(max(0.0, min(1.0, formality)), 3)
 
     # Evolve technical_depth: increase when responses are fast and successful
