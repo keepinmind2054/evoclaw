@@ -165,7 +165,7 @@ def _sync_evolve() -> None:
     """
     from host import db
     from host.evolution.fitness import compute_fitness
-    from host.evolution.genome import evolve_genome_from_fitness
+    from host.evolution.genome import evolve_genome_from_fitness, get_genome, is_genome_valid, reset_genome
 
     # 取得所有在過去 FITNESS_WINDOW_DAYS 天內有執行記錄的群組
     try:
@@ -206,6 +206,20 @@ def _sync_evolve() -> None:
                 except Exception:
                     pass
                 continue
+
+            # Fix p11d: detect and reset bad/corrupted genomes before evolving.
+            current_genome = get_genome(jid)
+            if not is_genome_valid(current_genome):
+                log.warning("Evolution: bad genome detected for %s — resetting to defaults", jid)
+                reset_genome(jid)
+                try:
+                    db.log_evolution_event(
+                        jid=jid,
+                        event_type="genome_reset",
+                        notes="Bad genome detected and reset to defaults before evolution cycle",
+                    )
+                except Exception:
+                    pass
 
             # 計算綜合適應度分數
             fitness = compute_fitness(jid, FITNESS_WINDOW_DAYS)
