@@ -501,8 +501,13 @@ async def _process_group_messages(group: dict, messages: list[dict],
 
     # ── Consecutive failure guard: prevent infinite retry loops ───────────────
     if _group_fail_lock is None:
-        log.warning("_group_fail_lock not initialized — skipping consecutive failure guard")
-        return
+        # Fix: previously returned immediately here, which caused the message to
+        # be silently dropped — GroupQueue had already cleared pending_messages
+        # before calling this function so the message would never be retried.
+        # Instead, skip the guard and proceed with processing.  This can only
+        # happen during the brief window between process start and main() init,
+        # so the risk of infinite loops is negligible.
+        log.warning("_group_fail_lock not initialized — skipping consecutive failure guard and proceeding")
     async with _group_fail_lock:
         fail_count = _group_fail_counts.get(jid, 0)
         last_fail = _group_fail_timestamps.get(jid, 0.0)
@@ -590,11 +595,19 @@ async def _process_group_messages(group: dict, messages: list[dict],
     # on_error shows only the user part to the originating group;
     # the monitor group receives the full context so Eve can diagnose the issue.
     _MONITOR_CTX_SEP = "|||MONITOR_CONTEXT|||"
+    _URGENT_PREFIX = "|||URGENT|||"
 
     async def on_error(msg: str):
+        # Fix: URGENT-prefixed messages (e.g. circuit breaker) bypass the rate
+        # limiter so the user always receives critical status messages even during
+        # a failure storm.  Strip the prefix before delivering to the user.
+        is_urgent = msg.startswith(_URGENT_PREFIX)
+        if is_urgent:
+            msg = msg[len(_URGENT_PREFIX):]
+
         now = time.time()
         last = _error_notify_times.get(jid, 0.0)
-        if now - last < _ERROR_NOTIFY_COOLDOWN:
+        if not is_urgent and now - last < _ERROR_NOTIFY_COOLDOWN:
             log.debug("on_error rate-limited for %s (%.0fs remaining)", jid, _ERROR_NOTIFY_COOLDOWN - (now - last))
             return
         _error_notify_times[jid] = now
@@ -1100,6 +1113,7 @@ async def main() -> None:
         從 DB 取得該群組的待處理訊息，執行 container，
         成功後推進此群組的 per-JID 游標（Issue #52）。
         回傳 True 代表成功（GroupQueue 會重置 retry 計數）。
+        回傳 False 代表失敗（GroupQueue 會安排指數退避重試）。
         """
         group = _get_group_by_jid(jid)
         if not group:
@@ -1109,7 +1123,11 @@ async def main() -> None:
         if not msgs:
             return True
         ts = max(m["timestamp"] for m in msgs)
+        _success_flag = False
+
         async def advance(ts=ts, jid=jid):
+            nonlocal _success_flag
+            _success_flag = True
             # Advance only this group's cursor — does not affect other groups
             _per_jid_cursors[jid] = max(_per_jid_cursors.get(jid, 0), ts)
             db.set_state(f"cursorJID:{jid}", str(_per_jid_cursors[jid]))
@@ -1118,8 +1136,13 @@ async def main() -> None:
             if ts > _last_timestamp:
                 _last_timestamp = ts
                 db.set_state("lastTimestamp", str(_last_timestamp))
+
         await _process_group_messages(group, msgs, on_success=advance)
-        return True
+        # Fix: return actual success/failure so GroupQueue can schedule retries.
+        # Previously always returned True, meaning GroupQueue never retried after
+        # a container error — the message would only be retried on the next poll
+        # cycle (POLL_INTERVAL seconds later) rather than via exponential backoff.
+        return _success_flag
 
     _group_queue.set_process_messages_fn(_process_messages_for_jid)
 

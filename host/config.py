@@ -44,6 +44,11 @@ IPC_POLL_INTERVAL = _env_int("IPC_POLL_INTERVAL", 1000) / 1000
 
 # Container
 CONTAINER_IMAGE = os.environ.get("CONTAINER_IMAGE", "evoclaw-agent:latest")
+# CONTAINER_TIMEOUT: maximum wall-clock seconds a single container run may take before
+# it is force-killed.  Configured as milliseconds in the env var for consistency with
+# other interval vars (e.g. POLL_INTERVAL), then divided by 1000 for runtime use.
+# Default: 1 800 000 ms = 1800 s = 30 minutes.
+# Override via env: CONTAINER_TIMEOUT=60000  (60 s, useful for fast-response groups)
 CONTAINER_TIMEOUT = _env_int("CONTAINER_TIMEOUT", 30 * 60 * 1000) / 1000
 IDLE_TIMEOUT = _env_int("IDLE_TIMEOUT", 30 * 60 * 1000) / 1000
 MAX_CONCURRENT_CONTAINERS = _env_int("MAX_CONCURRENT_CONTAINERS", 5)

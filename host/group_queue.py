@@ -397,6 +397,11 @@ class GroupQueue:
                 )
                 t.add_done_callback(_task_done_callback)
             elif state.pending_messages:
+                # Fix: _run_for_group clears pending_messages at the start of its
+                # execution, but between here and there another call could observe
+                # pending_messages=True and enqueue a duplicate run.  Clear it now
+                # (synchronously, before creating the task) to prevent double-dispatch.
+                state.pending_messages = False
                 state.active = True
                 self._active_count += 1
                 t = asyncio.create_task(
