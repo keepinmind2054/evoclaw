@@ -1,5 +1,58 @@
 # Changelog
 
+## [1.13.1-phase6a] — 2026-03-20
+
+### Fixed (Phase 6A: Stability & False-Response Root Causes)
+
+這個版本針對深度程式碼審查後發現的穩定性問題進行系統性修正，
+解決了導致 EvoClaw 靜默無回應和虛假回應的核心 bug。
+
+#### host/main.py
+
+- **修正 db.get_conversation_history() 無保護** — DB 失敗時整個訊息 handler
+  崩潰並靜默丟棄訊息；現在改為 try/except，失敗時用空 history 繼續處理
+  (Issue #304)
+- **修正 format_messages() 無保護** — 格式化失敗時 prompt 遺失；
+  加 try/except，fallback 用原始訊息內容拼接 (Issue #305)
+- **修正 db.get_session() 無保護** — 異常直接傳播；
+  加 try/except，fallback 用 None（新 session）(Issue #305)
+- **Container error status 改為通知使用者** — 原本靜默更新計數器；
+  現在主動發送 `⚠️ 發生錯誤，請稍後再試。` 並附 run_id 方便追蹤 (Issue #306)
+- **Timeout 通知不再吞錯** — `except: pass` 改為 `log.warning`，
+  錯誤進入結構化 log 系統 (Issue #307)
+- **Phase 1/2/3 init 失敗改用 log.error** — 從 `print()` 改為
+  `log.error()`，確保初始化失敗進入監控系統 (Issue #307)
+
+#### container/agent-runner/agent.py
+
+- **Agent loop 空白回應 fallback** — loop 結束時若無輸出且無 tool 訊息，
+  emit `「系統：處理完成，但未產生回應，請重試。」` 取代靜默 (Issue #308)
+- **LOOP-EXHAUST 警告 log** — Claude、OpenAI、Gemini 三個 provider 的
+  agent loop 在 MAX_ITER 耗盡時均加入 `⚠️ LOOP-EXHAUST` log，
+  方便診斷無限迴圈問題 (Issue #308)
+
+### GitHub Issues Created (Phase 6A)
+
+| Issue | 標題 | 狀態 |
+|-------|------|------|
+| #304 | [stability] db.get_conversation_history() has no error handling | ✅ Fixed |
+| #305 | [stability] format_messages() and db.get_session() have no error handling | ✅ Fixed |
+| #306 | [stability] Container error status causes silent failure | ✅ Fixed |
+| #307 | [stability] Timeout and exception notifications silently swallow errors | ✅ Fixed |
+| #308 | [stability] Agent loop produces empty output without user-visible fallback | ✅ Fixed |
+| #309 | [stability] MAX_ITER=30 too high — allows excessive hallucination loops | 🔲 Planned |
+| #310 | [stability] Default LLM (Gemini) has weaker tool-calling reliability than Claude | 🔲 Planned |
+| #311 | [stability] IPC file-based communication has no atomic write protection | 🔲 Planned |
+| #312 | [stability] Docker circuit breaker blocks ALL groups for 60s on any failure | 🔲 Planned |
+| #313 | [stability] GroupQueue silently drops messages after 5 consecutive failures | 🔲 Planned |
+| #314 | [stability] System prompt injection too complex — 3000+ tokens per request | 🔲 Planned |
+| #315 | [cleanup] 41 stale branches cannot be deleted — need admin access | 🔲 Pending |
+| #316 | [stability] IPC watcher polling interval too coarse for real-time feel | 🔲 Planned |
+
+---
+
+# Changelog
+
 ## [1.13.0-phase3] -- 2026-03-18
 
 ### Added (Phase 3: Cross-bot Identity + RBAC Foundation)
