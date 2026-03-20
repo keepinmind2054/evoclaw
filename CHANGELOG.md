@@ -1,3 +1,51 @@
+## [1.16.0-phase9] — 2026-03-20
+
+### Fixed (Phase 9: 穩定性全面修復 — 12 個問題)
+
+4 個 agent 並行修復分析報告中發現的所有 P0/P1/P2 問題，大幅提升 EvoClaw 穩定性與可靠性。
+
+#### container/agent-runner/agent.py — Phase 9A (Agent Loop 修復)
+
+- **工具例外捕捉（P0）** — Gemini 與 Claude loop 的 `execute_tool()` 呼叫現在包裝於 try/except；工具出錯時回傳 `[Tool error: ...]` 而非整個 agent 崩潰
+- **History 大小限制（P0）** — 新增 `_MAX_TOOL_RESULT_CHARS = 4000`（截斷過大的工具結果）與 `_MAX_HISTORY_MESSAGES = 40`（修剪舊訊息）；防止長對話 OOM
+- **Claude loop 功能補齊（P0）** — Claude loop 新增假狀態偵測（`✅ Done`、`*(正在...)*` 等）、MEMORY.md 寫入追蹤、倒數第二輪 CRITICAL 提醒注入；與 OpenAI/Gemini loop 功能對齊
+
+#### host/container_runner.py — Phase 9B (Container Runner 修復)
+
+- **Exit code 故障判斷（P0）** — 移除不可靠的 stderr emoji marker 偵測（`"🚀"`, `"📥"`, `"🧠"`）；改用 `proc.returncode` 判斷：0/124/137/143 = agent 問題（不觸發 circuit breaker），其他 = Docker 問題
+- **Circuit breaker half-open 修正（P1）** — 進入 half-open 時將失敗計數重設為 0（原本設為 threshold-1=2），讓 circuit breaker 真正有機會恢復
+
+#### host/ipc_watcher.py — Phase 9C (Host Layer 修復)
+
+- **inotify 靜默失敗→WARNING（P1）** — inotify watch 超限時從 DEBUG 升級為 WARNING，並附上 `sysctl fs.inotify.max_user_watches=65536` 修復指令；降級輪詢前正確清理部分初始化的 watches
+
+#### host/task_scheduler.py — Phase 9C
+
+- **Cron 時區修正（P1）** — `compute_next_run()` 現在正確使用 `pytz` 將 croniter 結果轉換為設定的本地時區（修復之前所有 cron 任務以 UTC 執行的問題）
+- **Interval task drift 修正（P1）** — interval 任務的 `last_run` 改為使用 `task["next_run"]`（排程時間），而非任務完成時間；消除長任務執行時的累積誤差
+
+#### host/main.py — Phase 9C
+
+- **Graceful shutdown 超時延長（P1）** — `wait_for_active` timeout 從 10 秒延長至 30 秒；新增關機等待 log 訊息，避免長任務被強制中斷後重複處理
+
+#### host/memory/memory_bus.py — Phase 9D (Memory/Evolution 修復)
+
+- **MEMORY.md 原子寫入（P2）** — 使用 temp file + `os.replace()`（POSIX atomic rename）替代直接 `write_text()`；防止崩潰時記憶檔案損壞
+
+#### host/evolution/immune.py — Phase 9D
+
+- **中文免疫模式收緊（P2）** — 重寫 20 個中文注入偵測 pattern，要求同時具備命令語氣 + 明確對象詞（`指令`/`規則`/`限制`/`設定`）；消除對「我忽略了他之前的建議」等正常句子的誤判
+
+#### host/evolution/genome.py — Phase 9D
+
+- **Formality 收斂停止（P2）** — 新增 `_CONVERGENCE_EPSILON = 0.01`；當 formality 距目標 <1% 時停止更新，消除無限震盪
+- **Genome DB 值驗證（P2）** — 新增 `_safe_float()` helper（帶 min/max 範圍限制）；DB 中 NULL 或非數字值不再導致崩潰
+
+### Issues Addressed
+#339 #340 #341 #342
+
+---
+
 ## [1.15.0-phase8] — 2026-03-20
 
 ### Fixed / Added (Phase 8: Qwen 優化、群組隔離、inotify IPC、安裝體驗)
