@@ -1,5 +1,50 @@
 # Release Notes
 
+## EvoClaw v1.16.0 — Phase 9 穩定性全面修復 — 2026-03-20
+
+### 概述
+
+本版本是第四輪 4 個 AI agent 並行深度分析的成果，針對分析發現的 12 個 P0/P1/P2 問題進行全面修復，大幅縮小 EvoClaw 與 NanoClaw 的穩定性差距。
+
+### 核心改變
+
+| 項目 | 修改前 | 修改後 | 效果 |
+|------|--------|--------|------|
+| 故障判斷機制 | stderr emoji marker 偵測（誤判率高） | `proc.returncode` exit code | 消除假 circuit breaker 觸發 |
+| Circuit breaker 恢復 | half-open 設 failures = threshold-1 | 重設為 0 | 真正能恢復 |
+| 工具例外處理 | Gemini/Claude loop 無 try/except | 全部包裝 + `[Tool error: ...]` | agent 不再因工具崩潰 |
+| History 大小 | 無限增長（OOM 風險） | 最大 4KB/條、40 條 | 防止記憶體耗盡 |
+| Claude loop 功能 | 缺少假狀態偵測、MEMORY 追蹤 | 與 OpenAI/Gemini 對齊 | 三個 provider 行為一致 |
+| inotify 失敗 | DEBUG 靜默 | WARNING + 修復指引 | 不再靜默失敗 |
+| Cron 時區 | 所有任務用 UTC | 用戶設定的本地時區 | 定時任務時間正確 |
+| Shutdown 超時 | 10 秒 | 30 秒 | 避免長任務重複執行 |
+| MEMORY.md 寫入 | 直接 write_text（可損壞） | temp file + os.replace（原子） | 崩潰不損壞記憶 |
+| 中文免疫誤判 | 「我忽略了他之前的建議」被攔截 | 精確 pattern，需要命令語氣 | 消除假陽性 |
+| Genome formality | 無限震盪 | 收斂停止（epsilon=0.01） | 穩定後不再震盪 |
+| Genome DB 驗證 | NULL 值導致崩潰 | `_safe_float()` 帶預設值 | 資料庫異常不崩潰 |
+
+### 修正摘要
+
+- `container/agent-runner/agent.py`：86 行新增（工具例外、history 限制、Claude loop 補齊）
+- `host/container_runner.py`：exit code 故障判斷 + circuit breaker 修正（26 行改動）
+- `host/ipc_watcher.py`：inotify WARNING + 清理改善（17 行新增）
+- `host/task_scheduler.py`：cron 時區 + interval drift 修正（27 行改動）
+- `host/main.py`：shutdown timeout 10s → 30s
+- `host/memory/memory_bus.py`：原子寫入（6 行改動）
+- `host/evolution/immune.py`：20 個中文 pattern 全部重寫（46 行改動）
+- `host/evolution/genome.py`：收斂停止 + DB 驗證（41 行新增）
+
+### EvoClaw vs NanoClaw 穩定性比較（修復後）
+
+| 指標 | 修復前 | 修復後目標 |
+|------|--------|----------|
+| 故障點 | 18+ | ~12（移除誤判鏈） |
+| Circuit breaker 假觸發 | 常見 | 消除 |
+| Agent 崩潰率（工具例外） | 高 | 低（捕捉後繼續） |
+| OOM 風險 | 有 | 有限制保護 |
+
+---
+
 ## EvoClaw v1.15.0 — Phase 8 Qwen 優化 + 架構穩定 — 2026-03-20
 
 ### 概述
