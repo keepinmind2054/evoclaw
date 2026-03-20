@@ -64,7 +64,7 @@ try:
     _PHASE1_AVAILABLE = True
 except ImportError as _e:
     _PHASE1_AVAILABLE = False
-    print(f"[Phase1] Components not available: {_e}")
+    logging.getLogger("evoclaw").warning("[Phase1] Components not available: %s", _e)
 
 # Phase 2 (UnifiedClaw): SDK API + Memory Summarizer
 try:
@@ -75,7 +75,7 @@ except ImportError as _e2:
     _PHASE2_AVAILABLE = False
     _SdkApi = None
     _MemorySummarizer = None
-    print(f"[Phase2] Components not available: {_e2}")
+    logging.getLogger("evoclaw").warning("[Phase2] Components not available: %s", _e2)
 
 # Phase 3: Bot Registry + RBAC
 try:
@@ -88,7 +88,7 @@ except ImportError as _e3p:
     _bootstrap_bots = None
     _Permission = None
     _RBACStore = None
-    print(f"[Phase3] Components not available: {_e3p}")
+    logging.getLogger("evoclaw").warning("[Phase3] Components not available: %s", _e3p)
 
 
 async def _discord_notify(content: str) -> None:
@@ -853,7 +853,7 @@ async def main() -> None:
                 # Forward fitness to evolution engine
                 pass  # TODO: wire to evolution/fitness.py
 
-            print(f"[Phase1] MemoryBus | WSBridge (port {_ws_bridge.port}) | AgentIdentityStore initialized")
+            log.info("[Phase1] MemoryBus | WSBridge (port %s) | AgentIdentityStore initialized", _ws_bridge.port)
         except Exception as _e:
             log.error("[Phase1] Initialization failed — agent will run WITHOUT long-term memory: %s", _e)
 
@@ -865,7 +865,7 @@ async def main() -> None:
             _sdk_api = _SdkApi(_memory_bus, _identity_store)
             _summarizer = _MemorySummarizer()
             asyncio.create_task(_sdk_api.start())
-            print(f"[Phase2] SdkApi OK (port {_sdk_api.port}) | MemorySummarizer OK")
+            log.info("[Phase2] SdkApi OK (port %s) | MemorySummarizer OK", _sdk_api.port)
         except Exception as _e3:
             log.error("[Phase2] Initialization failed — memory summarizer unavailable: %s", _e3)
 
@@ -880,7 +880,7 @@ async def main() -> None:
             _bot_registry = _BotRegistry()
             _bootstrap_bots(_bot_registry)
             _rbac_store = _RBACStore()
-            print(f"[Phase3] BotRegistry + RBAC initialized")
+            log.info("[Phase3] BotRegistry + RBAC initialized")
         except Exception as _e4:
             log.error("[Phase3] Initialization failed — BotRegistry/RBAC unavailable (fail-closed): %s", _e4)
     _stop_event = asyncio.Event()
