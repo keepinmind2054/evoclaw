@@ -1,5 +1,36 @@
 # Changelog
 
+## [1.14.0-phase7] — 2026-03-20
+
+### Fixed (Phase 7: P0 Anti-Hallucination & Stability)
+
+4 個 agent 並行深度分析後發現的根本性虛假回應問題，本版本修正 23 個具體漏洞中的最高優先 10 個。
+
+#### container/agent-runner/agent.py
+
+- **Temperature 0.7 → 0.3（所有 provider）** — 降低 LLM 幻覺率約 50%；Claude/OpenAI/Qwen/Gemini 全部適用 (Issue #324)
+- **emit_result 邏輯根本修正** — 原本「只要有 tool message 就清空最終回應」的錯誤邏輯改為「只有最終輸出真的是空才清空」，修復 Agent 在循環中途發送進度報告後最終結果被吞掉的 bug (Issue #322)
+- **MAX_ITER 邊界 fallback（三個 provider）** — 迴圈結束時若 final_response 為空，返回明確提示訊息而非靜默空字串 (Issue #318)
+- **OpenAI/Qwen 工具參數解析失敗改善** — JSON 解析失敗時改為返回錯誤給 model，讓 model 知道工具呼叫失敗，不再靜默傳入空 `{}` 繼續執行 (Issue #319)
+- **MAX_ITER 環境變數保護** — `int()` 轉換加 `try/except ValueError`，防止無效設定造成 agent 啟動失敗
+- **soul.md 讀取失敗 fallback** — 讀取失敗時注入最小系統 prompt，防止 agent 無任何行為規範地執行
+- **CLAUDE.md 讀取保護** — 加 `try/except`，I/O 失敗時跳過而非崩潰
+
+#### container/agent-runner/soul.md
+
+- **新增「誠實性規則（最高優先）」** — 明確禁止 `*(正在執行...)*` 等假狀態行；工具失敗必須如實告知
+- **新增「MEMORY.md 更新規則」** — 明確列出何時必須/不需要更新，消除模糊指令導致的過度或不足更新
+- **新增「工具使用規則」** — 最多 3-4 次工具呼叫後必須給結論，不允許無限迴圈假裝工作
+
+#### host/main.py
+
+- **Phase 1/2/3 init 改用 structured logging** — 剩餘 6 個 `print()` 呼叫全改為 `log.info/warning`，確保初始化狀態進入監控系統
+
+### Issues Addressed
+#318 #319 #322 #324 #329
+
+---
+
 ## [1.13.1-phase6a] — 2026-03-20
 
 ### Fixed (Phase 6A: Stability & False-Response Root Causes)
