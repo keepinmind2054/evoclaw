@@ -383,6 +383,20 @@ async def run_container_agent(
     history_lookback = group.get("history_lookback_hours", _DEFAULT_HISTORY_LOOKBACK_HOURS) * 3600
     history_cutoff = int((time.time() - history_lookback) * 1000)
     history_msgs = db.get_messages_since(jid, history_cutoff, limit=50)
+
+    # 防止對話歷史超過 token 上限（粗略估算：1 token ≈ 4 字符）
+    _MAX_HISTORY_CHARS = 20_000  # 約 5000 token
+    _total_chars = 0
+    _trimmed_history = []
+    for _msg in reversed(history_msgs):  # 從最新開始保留
+        _msg_chars = len(str(_msg.get("content", "")))
+        if _total_chars + _msg_chars > _MAX_HISTORY_CHARS:
+            log.warning("Trimming conversation history for %s: %d messages dropped", jid, len(history_msgs) - len(_trimmed_history))
+            break
+        _trimmed_history.append(_msg)
+        _total_chars += _msg_chars
+    history_msgs = list(reversed(_trimmed_history))
+
     conv_history = []
     for m in history_msgs:
         role = "assistant" if m.get("is_bot_message") else "user"
@@ -573,12 +587,19 @@ async def run_container_agent(
             # 只是 agent process 在 emit() 前崩潰（OOM、unhandled exception 等）。
             # 這種情況 Docker 本身是正常的 → 呼叫 _record_docker_success() 歸零 circuit。
             # 若 stderr 幾乎為空，才代表 Docker daemon 層面的失敗 → 計入 circuit breaker。
-            _container_ran = bool(stderr and len(stderr.strip()) > _STDERR_DOCKER_OK_THRESHOLD)
+            # 更可靠的 Docker 健康判斷：
+            # 1. 有任何 stderr 輸出（容器確實啟動了）
+            # 2. 且包含 EvoClaw 的日誌標記（說明 Python 程序有執行）
+            _EVOCLAW_STARTED_MARKERS = ("🚀", "📥", "🧠", "Agent started", "agent.py")
+            _has_evoclaw_output = any(marker in (stderr or "") for marker in _EVOCLAW_STARTED_MARKERS)
+            _container_ran = bool(stderr and len(stderr.strip()) > _STDERR_DOCKER_OK_THRESHOLD) and _has_evoclaw_output
+
             if _container_ran:
                 log.info("Container %s crashed before emit() but Docker is healthy — resetting circuit breaker", container_name)
                 _record_docker_success()
             else:
-                log.warning("Container %s produced no stderr — possible Docker daemon issue — incrementing circuit breaker", container_name)
+                # 只有在沒有 EvoClaw 輸出時才判定 Docker 異常
+                log.warning("Container produced no EvoClaw markers in stderr — possible Docker daemon issue or crash before init")
                 _record_docker_failure()
             # Bundle stderr context for monitor channel (separator parsed by on_error in main.py)
             _stderr_ctx_lines = [_redact_secrets(l) for l in (stderr_lines or [])[-15:]]
