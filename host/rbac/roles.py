@@ -159,7 +159,25 @@ class RBACStore:
             perms.update(ROLE_PERMISSIONS.get(role, frozenset()))
         return perms
 
+    def _is_empty(self) -> bool:
+        """Return True if no grants have been configured at all.
+
+        An empty RBAC store means the system is unconfigured — no one has
+        ever been granted a role.  In this state we fail-open (allow all)
+        rather than locking everyone out of a fresh install.
+        """
+        with self._lock:
+            count = self._conn.execute(
+                "SELECT COUNT(*) FROM rbac_grants"
+            ).fetchone()[0]
+        return count == 0
+
     def has_permission(self, subject_id: str, permission: Permission) -> bool:
+        # Fail-open when unconfigured: if nobody has been granted any role,
+        # treat RBAC as not yet set up and allow all requests through.
+        # Once at least one grant exists, strict enforcement applies.
+        if self._is_empty():
+            return True
         return permission in self.get_permissions(subject_id)
 
     def list_grants(self) -> List[RBACEntry]:
