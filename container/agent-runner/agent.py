@@ -1025,6 +1025,8 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
     # Avoids returning silent empty string to the host.
     if not final_response:
         _log("⚠️ LOOP-EXHAUST", f"Claude agent loop hit MAX_ITER={MAX_ITER} without end_turn — no final text collected")
+    if not final_response or not final_response.strip():
+        final_response = "（處理完成，但未能產生文字回應，請重新詢問。）"
     return final_response
 
 
@@ -1150,7 +1152,7 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                 messages=_oai_history,
                 tools=OPENAI_TOOL_DECLARATIONS,
                 tool_choice=_tool_choice,
-                temperature=0.7,
+                temperature=0.3,
                 max_tokens=4096,
             ), pool=pool, apply_key_fn=apply_key_fn)
         except Exception as _tc_err:
@@ -1162,7 +1164,7 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                     messages=_oai_history,
                     tools=OPENAI_TOOL_DECLARATIONS,
                     tool_choice="auto",
-                    temperature=0.7,
+                    temperature=0.3,
                     max_tokens=4096,
                 ), pool=pool, apply_key_fn=apply_key_fn)
             else:
@@ -1312,8 +1314,14 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
         for tc in msg.tool_calls:
             try:
                 args = _json.loads(tc.function.arguments)
-            except Exception:
-                args = {}
+            except Exception as _arg_err:
+                _log("⚠️ TOOL-ARG-PARSE", f"Failed to parse tool args for {tc.function.name}: {_arg_err} — returning error to model")
+                history.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": f"Error: Failed to parse tool arguments: {_arg_err}"
+                })
+                continue
             result = execute_tool(tc.function.name, args, chat_jid)
             history.append({
                 "role": "tool",
@@ -1323,6 +1331,8 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
 
     if not final_response:
         _log("⚠️ LOOP-EXHAUST", f"OpenAI agent loop hit MAX_ITER={MAX_ITER} without finish_reason=stop — no final text collected")
+    if not final_response or not final_response.strip():
+        final_response = "（處理完成，但未能產生文字回應，請重新詢問。）"
     return final_response
 
 
@@ -1373,7 +1383,7 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
                 tools=[types.Tool(function_declarations=TOOL_DECLARATIONS)],
-                temperature=0.7,  # 適中的隨機性，讓回覆自然但不失準確
+                temperature=0.3,  # 適中的隨機性，讓回覆自然但不失準確
             ),
         ), pool=pool, apply_key_fn=apply_key_fn)
 
@@ -1412,6 +1422,8 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
 
     if not final_response:
         _log("⚠️ LOOP-EXHAUST", f"Gemini agent loop hit MAX_ITER={MAX_ITER} without text response — no final text collected")
+    if not final_response or not final_response.strip():
+        final_response = "（處理完成，但未能產生文字回應，請重新詢問。）"
     return final_response
 
 
@@ -1661,6 +1673,7 @@ def main():
             _log("🧠 SOUL", f"Injected soul.md ({len(_soul_text)} chars)")
         except Exception as _soul_err:
             _log("⚠️ SOUL", f"Failed to read soul.md: {_soul_err}")
+            lines.append("\n你是 EvoClaw，一個智能助理。請誠實、準確地回應，不要編造資訊。")
 
     # ── MEMORY.md 啟動注入（長期記憶 + 身份）────────────────────────────────────
     # 每次 session 啟動時讀取 MEMORY.md，注入為「長期記憶」section。
@@ -1717,7 +1730,11 @@ def main():
     # Dynamic MAX_ITER: env override takes priority, then complexity-based default
     _env_max_iter = os.environ.get("MAX_ITER")
     if _env_max_iter:
-        _dynamic_max_iter = int(_env_max_iter)
+        try:
+            _dynamic_max_iter = int(_env_max_iter)
+        except ValueError:
+            _log("⚠️ MAX_ITER", f"Invalid MAX_ITER env value '{_env_max_iter}' — using dynamic default")
+            _dynamic_max_iter = 20 if _is_level_b else 6
     else:
         _dynamic_max_iter = 20 if _is_level_b else 6
     _log("🔢 MAX_ITER", f"{_dynamic_max_iter} ({'Level B' if _is_level_b else 'Level A'}, prompt_len={len(prompt or '')})")
@@ -1734,8 +1751,11 @@ def main():
     # 全域 CLAUDE.md 提供所有群組共用的指令；群組 CLAUDE.md 提供群組專屬設定
     for claude_md in ["/workspace/global/CLAUDE.md", "/workspace/group/CLAUDE.md"]:
         if Path(claude_md).exists():
-            lines.append("")
-            lines.append(Path(claude_md).read_text(encoding="utf-8"))
+            try:
+                lines.append("")
+                lines.append(Path(claude_md).read_text(encoding="utf-8"))
+            except Exception as _cmd_err:
+                _log("⚠️ CLAUDE.MD", f"Failed to read {claude_md}: {_cmd_err} — skipping")
 
     # 演化引擎提示：附加在所有靜態設定之後（表觀遺傳，動態覆蓋）
     # 格式：\n\n---\n[環境自動調整提示...] 或 [群組偏好...]
@@ -1777,7 +1797,7 @@ def main():
         # 若 agent 已透過 mcp__evoclaw__send_message 工具主動發送訊息，
         # 則清空 result 欄位，避免 host 的 container_runner 再次發送（雙重訊息 + 超長訊息 bug）
         # 若 agent 沒有呼叫工具（純文字回覆），則由 host 負責發送 result
-        emit_result = "" if _messages_sent_via_tool else result
+        emit_result = result if result and result.strip() else ("" if _messages_sent_via_tool else result)
         # Guard: if the agent loop produced no output at all (empty result, no tool messages),
         # emit a minimal fallback so the user never sees pure silence.
         if not emit_result and not _messages_sent_via_tool:
