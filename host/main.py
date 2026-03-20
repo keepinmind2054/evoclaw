@@ -201,6 +201,11 @@ _leader = None
 # Set in main() after initialization; read by _on_message to gate message pipeline.
 _rbac_store = None
 
+# Phase 1 (UnifiedClaw): AgentIdentityStore instance.
+# Defined as module-level global so _process_group_messages (a module-level function)
+# can access it without NameError.  main() sets this before starting the event loop.
+_identity_store = None
+
 # 允許傳送訊息的發送者白名單（phone number 或 JID 集合）
 _sender_allowlist: set[str] = set()
 
@@ -256,6 +261,10 @@ async def _is_duplicate_message(jid: str, sender: str, content: str) -> bool:
     The entire check-then-insert is wrapped in a single async with _dedup_lock:
     block so no two coroutines can check/insert simultaneously (Fix #105).
     """
+    if _dedup_lock is None:
+        # Event loop not yet started (e.g. during testing) — skip dedup rather than crash
+        log.warning("_is_duplicate_message called before event loop init — dedup skipped")
+        return False
     raw = f"{jid}\x00{sender}\x00{content}"
     fp = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()
     async with _dedup_lock:
@@ -491,6 +500,9 @@ async def _process_group_messages(group: dict, messages: list[dict],
         log.debug("Phase 1: identity tracking failed (non-fatal): %s", _id_exc)
 
     # ── Consecutive failure guard: prevent infinite retry loops ───────────────
+    if _group_fail_lock is None:
+        log.warning("_group_fail_lock not initialized — skipping consecutive failure guard")
+        return
     async with _group_fail_lock:
         fail_count = _group_fail_counts.get(jid, 0)
         last_fail = _group_fail_timestamps.get(jid, 0.0)
@@ -631,6 +643,13 @@ async def _process_group_messages(group: dict, messages: list[dict],
         "Invoking container agent",
         extra={"run_id": run_id, "jid": jid, "folder": folder, "session_id": session_id},
     )
+    # run_container_agent manages its own internal timeout (config.CONTAINER_TIMEOUT)
+    # and handles docker kill on expiry.  We add a slightly longer backstop timeout
+    # here (+30s grace) so a pathological case where the internal timeout itself hangs
+    # (e.g. docker kill fails) does not block the GroupQueue slot indefinitely.
+    # Using a different timeout avoids a race where both fire simultaneously and the
+    # outer cancellation prevents the inner docker-kill cleanup from completing.
+    _backstop_timeout = config.CONTAINER_TIMEOUT + 30
     try:
         result = await asyncio.wait_for(
             run_container_agent(
@@ -642,7 +661,7 @@ async def _process_group_messages(group: dict, messages: list[dict],
                 on_success=_on_success_tracked,
                 on_error=on_error,
             ),
-            timeout=config.CONTAINER_TIMEOUT,  # use central config value
+            timeout=_backstop_timeout,
         )
         # run_container_agent returns {"status": "error", ...} when no output markers found
         if not _run_succeeded and isinstance(result, dict) and result.get("status") == "error":
@@ -670,10 +689,11 @@ async def _process_group_messages(group: dict, messages: list[dict],
             except Exception as _notify_exc:
                 log.warning("Failed to send error notification to %s: %s", jid, _notify_exc)
     except asyncio.TimeoutError:
+        # This backstop should rarely fire — run_container_agent's own timeout fires first.
         log.error(
-            "Container run timed out after %ds for group %s — message NOT dropped, "
-            "will be retried on next poll cycle",
-            int(config.CONTAINER_TIMEOUT), jid,
+            "Container backstop timeout (%ds) hit for group %s — internal timeout/kill may "
+            "have hung. Message NOT dropped, will be retried on next poll cycle.",
+            int(_backstop_timeout), jid,
             extra={"run_id": run_id, "jid": jid, "folder": folder},
         )
         async with _group_fail_lock:
@@ -849,9 +869,10 @@ async def main() -> None:
     """
 
     # Phase 1 (UnifiedClaw): Initialize Universal Memory Bus, WSBridge, AgentIdentityStore
+    # _identity_store is declared as a module-level global so _process_group_messages
+    # can access it without a NameError (it is a module-level function, not a closure).
     _memory_bus = None
     _ws_bridge = None
-    _identity_store = None
     if _PHASE1_AVAILABLE:
         try:
             import sqlite3 as _sqlite3
@@ -883,6 +904,7 @@ async def main() -> None:
 
     global _registered_groups, _sender_allowlist, _stop_event, _group_fail_lock, _dedup_lock
     global _startup_time, _HEARTBEAT_INTERVAL, _last_heartbeat, _leader, _rbac_store
+    global _identity_store
 
     # Phase 3: Bot Registry + RBAC
     _bot_registry = None

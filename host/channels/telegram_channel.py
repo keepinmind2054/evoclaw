@@ -182,8 +182,15 @@ class TelegramChannel:
     async def send_message(self, jid: str, text: str) -> None:
         if not self._app:
             return
-        chat_id = int(jid.replace("tg:", ""))
-        await self._app.bot.send_message(chat_id=chat_id, text=text)
+        try:
+            chat_id = int(jid.replace("tg:", ""))
+        except ValueError:
+            log.error("send_message: malformed Telegram JID %r — cannot parse chat_id", jid)
+            return
+        try:
+            await self._app.bot.send_message(chat_id=chat_id, text=text)
+        except Exception as exc:
+            log.error("send_message: failed to deliver to %s: %s", jid, exc)
 
     async def send_file(self, jid: str, file_path: str, caption: str = "") -> None:
         """Send a document/file to a Telegram chat.
@@ -208,7 +215,11 @@ class TelegramChannel:
             await self.send_message(jid, f"[File not found: {p.name}]")
             return
 
-        chat_id = int(jid.replace("tg:", ""))
+        try:
+            chat_id = int(jid.replace("tg:", ""))
+        except ValueError:
+            log.error("send_file: malformed Telegram JID %r — cannot parse chat_id", jid)
+            return
 
         try:
             # Stream the file — do NOT read() the whole thing into memory.
