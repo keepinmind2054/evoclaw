@@ -270,13 +270,17 @@ def tool_send_message(chat_jid: str, text: str, sender: str = None) -> str:
     加入隨機後綴避免同一毫秒內產生多個檔案時發生名稱衝突。
     """
     try:
-        Path(IPC_MESSAGES_DIR).mkdir(parents=True, exist_ok=True)
+        ipc_dir = Path(IPC_MESSAGES_DIR)
+        ipc_dir.mkdir(parents=True, exist_ok=True)
         uid = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-        fname = Path(IPC_MESSAGES_DIR) / f"{int(time.time()*1000)}-{uid}.json"
+        fname = ipc_dir / f"{int(time.time()*1000)}-{uid}.json"
         payload = {"type": "message", "chatJid": chat_jid, "text": text}
         if sender:
             payload["sender"] = sender  # 可選的發送者名稱（顯示為不同的 bot 身份）
-        fname.write_text(json.dumps(payload), encoding="utf-8")
+        # Atomic write: write to .tmp then rename to avoid host reading partial JSON
+        tmp = fname.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.rename(fname)  # POSIX rename() is atomic
         _log("📨 IPC", f"type=message → {fname.name}")
         return "Message sent"
     except Exception as e:
@@ -291,16 +295,21 @@ def tool_schedule_task(prompt: str, schedule_type: str, schedule_value: str, con
     供排程器執行任務時路由回正確的聊天室。
     """
     try:
-        Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
-        fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}.json"
-        fname.write_text(json.dumps({
+        tasks_dir = Path(IPC_TASKS_DIR)
+        tasks_dir.mkdir(parents=True, exist_ok=True)
+        fname = tasks_dir / f"{int(time.time()*1000)}.json"
+        payload = json.dumps({
             "type": "schedule_task",
             "prompt": prompt,
             "schedule_type": schedule_type,   # "cron", "interval", 或 "once"
             "schedule_value": schedule_value,  # cron 表達式、毫秒數、或 ISO 時間字串
             "context_mode": context_mode,      # "group" 或 "isolated"
             "chatJid": chat_jid,              # 群組 JID，讓 ipc_watcher 存入 DB 供排程器路由使用
-        }), encoding="utf-8")
+        })
+        # Atomic write: write to .tmp then rename
+        tmp = fname.with_suffix(".tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.rename(fname)
         _log("📨 IPC", f"type=schedule_task → {fname.name}")
         return "Task scheduled"
     except Exception as e:
@@ -950,12 +959,13 @@ CLAUDE_TOOL_DECLARATIONS = [
 ]
 
 
-def run_agent_claude(client_holder, model: str, system_instruction: str, user_message: str, chat_jid: str, conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None) -> str:
+def run_agent_claude(client_holder, model: str, system_instruction: str, user_message: str, chat_jid: str, conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None, max_iter: int = 20) -> str:
     """
     Anthropic Claude agentic loop.
     client_holder: a one-element list [client] so key rotation can swap the client mid-loop.
     conversation_history: 最近的對話記錄，以原生 multi-turn 格式注入。
     pool/apply_key_fn: optional key pool for automatic rotation on rate-limit errors.
+    max_iter: maximum number of agentic loop iterations (default 20; caller sets based on task complexity).
     """
     messages = []
     # 注入對話歷史（原生 multi-turn 格式）
@@ -966,7 +976,7 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
             if text:
                 messages.append({"role": role, "content": text})
     messages.append({"role": "user", "content": user_message})
-    MAX_ITER = 30
+    MAX_ITER = max_iter
     final_response = ""
 
     for n in range(MAX_ITER):
@@ -1089,13 +1099,14 @@ def _execute_tool_inner(name: str, args: dict, chat_jid: str) -> str:
 
 # ── Agentic loop ──────────────────────────────────────────────────────────────
 
-def run_agent_openai(client_holder, system_instruction: str, user_message: str, chat_jid: str, model: str, conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None, group_folder: str = "") -> str:
+def run_agent_openai(client_holder, system_instruction: str, user_message: str, chat_jid: str, model: str, conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None, group_folder: str = "", max_iter: int = 20) -> str:
     """
-    OpenAI-compatible agentic loop (NVIDIA NIM / OpenAI / Groq / etc.)
+    OpenAI-compatible agentic loop (NVIDIA NIM / OpenAI / Qwen / Groq / etc.)
     Works the same as run_agent but uses OpenAI chat completions API.
     client_holder: a one-element list [client] so key rotation can swap the client mid-loop.
     conversation_history: 原生 multi-turn 格式的對話歷史。
     pool/apply_key_fn: optional key pool for automatic rotation on rate-limit errors.
+    max_iter: maximum number of agentic loop iterations (default 20; caller sets based on task complexity).
     """
     import json as _json
     history = [{"role": "system", "content": system_instruction}]
@@ -1107,7 +1118,7 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
             if text:
                 history.append({"role": role, "content": text})
     history.append({"role": "user", "content": user_message})
-    MAX_ITER = 30
+    MAX_ITER = max_iter
     final_response = ""
     _no_tool_turns = 0  # consecutive turns without any tool call (Fix #169)
     _turns_since_notify = 0  # turns since last mcp__evoclaw__send_message call (milestone enforcer)
@@ -1310,7 +1321,7 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
 
 
 
-def run_agent(client_holder, system_instruction: str, user_message: str, chat_jid: str, assistant_name: str = "Eve", conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None) -> str:
+def run_agent(client_holder, system_instruction: str, user_message: str, chat_jid: str, assistant_name: str = "Eve", conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None, max_iter: int = 20) -> str:
     """
     Gemini function-calling 代理迴圈（agentic loop）。
 
@@ -1321,12 +1332,9 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
        b. Function call：代表 agent 要使用工具，執行後將結果加回 history
     3. 若是 function call，執行工具並將結果作為 user role 加回 history，
        然後再次呼叫 Gemini（繼續下一輪）
-    4. 重複直到 Gemini 不再發出 function call，或達到 MAX_ITER 上限
+    4. 重複直到 Gemini 不再發出 function call，或達到 max_iter 上限
 
-    MAX_ITER = 30 的原因：防止 agent 陷入無限工具呼叫迴圈
-    （例如誤判任務完成條件）。30 次對大多數任務已足夠，
-    超過通常代表 agent 卡住了。
-
+    max_iter: 由呼叫方根據任務複雜度動態設定（Level A=6, Level B=20）。
     history 維護完整的對話記錄（user / model / tool_response），
     讓 Gemini 在每次迭代都有完整的上下文，不需要重新解釋先前的工具結果。
     """
@@ -1347,7 +1355,7 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
                 history.append(types.Content(role=role, parts=[types.Part(text=text)]))
     history.append(types.Content(role="user", parts=[types.Part(text=user_message)]))
 
-    MAX_ITER = 30  # 最多迭代次數，防止無限迴圈
+    MAX_ITER = max_iter  # 由呼叫方動態設定（Level A=6, Level B=20）
     final_response = ""
 
     for n in range(MAX_ITER):
@@ -1680,20 +1688,32 @@ def main():
             f"請在完成主要任務後，建立 {_memory_path} 並填寫身份資料（格式見 soul.md 的 ### 自我認知）。"
         )
 
-    # ── Level B 啟發式偵測（代碼層面輔助分類）────────────────────────────────
-    # 根據 prompt 長度 + 關鍵字分析，code 層面判斷是否為 Level B 任務，
-    # 並在 system prompt 中標記，輔助模型做出正確的委派決策。
+    # ── Level B 啟發式偵測（代碼層面輔助分類）+ 動態 MAX_ITER ─────────────────
+    # 根據 prompt 長度 + 關鍵字分析任務複雜度，動態設定 MAX_ITER：
+    #   Level A（簡單問答）：MAX_ITER = 6  — 減少幻覺迴圈機會
+    #   Level B（複雜任務）：MAX_ITER = 20 — 足夠完成多步驟任務
+    # 透過環境變數 MAX_ITER 可覆蓋此設定（用於測試或特殊需求）
     _LEVEL_B_KEYWORDS = [
         "debug", "修復", "fix", "配置", "configure", "install", "安裝",
         "optimize", "優化", "implement", "實作", "refactor", "重構",
         "analyze", "分析", "deploy", "部署", "multi-step", "step by step",
         "system", "系統", "migrate", "migration", "architecture", "架構",
+        "寫", "write", "create", "建立", "generate", "產生", "整理", "總結",
+        "搜尋", "search", "找", "查", "git", "docker", "python", "code",
     ]
     _prompt_lower = prompt.lower() if prompt else ""
     _is_level_b = (
-        len(prompt or "") > 200 or
+        len(prompt or "") > 150 or
         any(kw in _prompt_lower for kw in _LEVEL_B_KEYWORDS)
     )
+    # Dynamic MAX_ITER: env override takes priority, then complexity-based default
+    _env_max_iter = os.environ.get("MAX_ITER")
+    if _env_max_iter:
+        _dynamic_max_iter = int(_env_max_iter)
+    else:
+        _dynamic_max_iter = 20 if _is_level_b else 6
+    _log("🔢 MAX_ITER", f"{_dynamic_max_iter} ({'Level B' if _is_level_b else 'Level A'}, prompt_len={len(prompt or '')})")
+
     if _is_level_b:
         lines.append("")
         lines.append(
@@ -1738,14 +1758,14 @@ def main():
         if use_openai_compat:
             _model = os.environ.get("NIM_MODEL") or os.environ.get("OPENAI_MODEL") or os.environ.get("GEMINI_MODEL") or "meta/llama-3.3-70b-instruct"
             _log("🤖 MODEL", f"openai-compat/{_model}")
-            result = run_agent_openai(_openai_client_holder, system_instruction, prompt, chat_jid, _model, conversation_history, pool=_active_pool, apply_key_fn=_apply_openai_key, group_folder=group_folder)
+            result = run_agent_openai(_openai_client_holder, system_instruction, prompt, chat_jid, _model, conversation_history, pool=_active_pool, apply_key_fn=_apply_openai_key, group_folder=group_folder, max_iter=_dynamic_max_iter)
         elif use_claude:
             _log("🤖 MODEL", f"claude/{claude_model}")
-            result = run_agent_claude(_claude_client_holder, claude_model, system_instruction, prompt, chat_jid, conversation_history, pool=claude_pool, apply_key_fn=_apply_claude_key)
+            result = run_agent_claude(_claude_client_holder, claude_model, system_instruction, prompt, chat_jid, conversation_history, pool=claude_pool, apply_key_fn=_apply_claude_key, max_iter=_dynamic_max_iter)
         else:
             _gemini_model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
             _log("🤖 MODEL", f"gemini/{_gemini_model}")
-            result = run_agent(_gemini_client_holder, system_instruction, prompt, chat_jid, assistant_name, conversation_history, pool=google_pool, apply_key_fn=_apply_google_key)
+            result = run_agent(_gemini_client_holder, system_instruction, prompt, chat_jid, assistant_name, conversation_history, pool=google_pool, apply_key_fn=_apply_google_key, max_iter=_dynamic_max_iter)
         # 若 agent 已透過 mcp__evoclaw__send_message 工具主動發送訊息，
         # 則清空 result 欄位，避免 host 的 container_runner 再次發送（雙重訊息 + 超長訊息 bug）
         # 若 agent 沒有呼叫工具（純文字回覆），則由 host 負責發送 result
