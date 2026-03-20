@@ -1969,17 +1969,34 @@ def main():
     # ── 靈魂規則 (Soul Rules) — 從 soul.md 讀取 ──────────────────────────────
     # soul.md 與 agent.py 同目錄，更新靈魂規則只需編輯該檔案，無需動 Python code。
     # {{GROUP_FOLDER}} 為執行時替換的佔位符，指向此群組的資料目錄。
+    # VALIDATION: soul.md must exist and be non-empty — it contains the core
+    # anti-hallucination rules.  A missing or empty soul.md means the agent
+    # will run WITHOUT honesty constraints, so we log a CRITICAL warning and
+    # inject a minimal fallback rather than silently continuing.
+    _SOUL_MAX_CHARS = 32_000  # warn if soul.md exceeds this (context-window risk)
     _soul_path = Path(__file__).parent / "soul.md"
-    if _soul_path.exists():
+    if not _soul_path.exists():
+        _log("🚨 CRITICAL", f"soul.md NOT FOUND at {_soul_path} — anti-hallucination rules are MISSING. "
+             "The agent will run without soul constraints. Fix immediately.")
+        lines.append("\n你是 EvoClaw，一個智能助理。請誠實、準確地回應，不要編造資訊。不能假裝執行工具或假造結果。")
+    else:
         try:
             _soul_text = _soul_path.read_text(encoding="utf-8").strip()
-            _soul_text = _soul_text.replace("{{GROUP_FOLDER}}", str(group_folder))
-            lines.append("")
-            lines.append(_soul_text)
-            _log("🧠 SOUL", f"Injected soul.md ({len(_soul_text)} chars)")
+            if not _soul_text:
+                _log("🚨 CRITICAL", f"soul.md at {_soul_path} is EMPTY — anti-hallucination rules are MISSING. "
+                     "The agent will run without soul constraints. Fix immediately.")
+                lines.append("\n你是 EvoClaw，一個智能助理。請誠實、準確地回應，不要編造資訊。不能假裝執行工具或假造結果。")
+            else:
+                if len(_soul_text) > _SOUL_MAX_CHARS:
+                    _log("⚠️ SOUL", f"soul.md is very large ({len(_soul_text)} chars > {_SOUL_MAX_CHARS}) — "
+                         "consider trimming to avoid consuming excessive context-window tokens.")
+                _soul_text = _soul_text.replace("{{GROUP_FOLDER}}", str(group_folder))
+                lines.append("")
+                lines.append(_soul_text)
+                _log("🧠 SOUL", f"Injected soul.md ({len(_soul_text)} chars)")
         except Exception as _soul_err:
-            _log("⚠️ SOUL", f"Failed to read soul.md: {_soul_err}")
-            lines.append("\n你是 EvoClaw，一個智能助理。請誠實、準確地回應，不要編造資訊。")
+            _log("🚨 CRITICAL", f"Failed to read soul.md: {_soul_err} — anti-hallucination rules are MISSING.")
+            lines.append("\n你是 EvoClaw，一個智能助理。請誠實、準確地回應，不要編造資訊。不能假裝執行工具或假造結果。")
 
     # ── MEMORY.md 啟動注入（長期記憶 + 身份）────────────────────────────────────
     # 每次 session 啟動時讀取 MEMORY.md，注入為「長期記憶」section。
@@ -2080,14 +2097,32 @@ def main():
     # never appear in legitimate evolution_hints produced by the GA engine, but
     # a compromised or misconfigured hint could otherwise silently bypass the
     # anti-hallucination rules established earlier in the system prompt.
+    #
+    # NOTE: evolution_hints are appended AFTER soul.md in the system prompt, so
+    # a malicious hint that says "disregard previous rules" could in theory
+    # override the soul rules. The filter below blocks the known bypass patterns.
+    # Legitimate GA-produced hints should only contain style/tone preferences,
+    # language settings, or group-specific behavioural nudges — never honesty
+    # overrides. When in doubt, strip the hint and log SECURITY.
     if evolution_hints:
         import re as _re_hints
         _BYPASS_PATTERNS = _re_hints.compile(
-            r'ignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?'
-            r'|override\s+soul'
-            r'|you\s+may\s+(?:skip|bypass|ignore)\s+tools?'
-            r'|pretend\s+(?:you\s+)?(?:completed?|finished?|done)'
-            r'|(?:假裝|偽裝|跳過)\s*(?:工具|完成|執行)',
+            # English prompt-injection patterns
+            r'ignore\s+(?:all\s+)?(?:previous|prior|above|your)\s+instructions?'
+            r'|disregard\s+(?:all\s+)?(?:previous|prior|above|your)\s+instructions?'
+            r'|forget\s+(?:your\s+)?(?:rules?|instructions?|guidelines?|soul)'
+            r'|override\s+(?:soul|honesty|rules?|instructions?)'
+            r'|you\s+may\s+(?:skip|bypass|ignore|omit)\s+tools?'
+            r'|pretend\s+(?:you\s+)?(?:completed?|finished?|done|executed?|ran)'
+            r'|act\s+as\s+if\s+(?:you\s+)?(?:completed?|finished?|done|executed?)'
+            r'|(?:skip|bypass|omit)\s+(?:tool\s+calls?|verification|checking)'
+            r'|(?:claim|say|report|tell)\s+(?:the\s+)?(?:task\s+)?(?:is\s+)?(?:done|complete|finished|success)'
+            r'\s+without'
+            # Chinese prompt-injection patterns
+            r'|(?:忽略|無視|跳過|忘記)\s*(?:之前|先前|上面|所有)?\s*(?:規則|指令|要求|設定|靈魂)'
+            r'|(?:假裝|偽裝|假設)\s*(?:已經)?\s*(?:完成|執行|成功|做完)'
+            r'|(?:跳過|省略)\s*(?:工具|呼叫|驗證|確認)'
+            r'|(?:覆蓋|覆寫|取代)\s*(?:soul|靈魂|規則|誠實)',
             _re_hints.IGNORECASE | _re_hints.DOTALL,
         )
         if _BYPASS_PATTERNS.search(evolution_hints):
