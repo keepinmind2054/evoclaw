@@ -27,7 +27,9 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import sqlite3
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -565,7 +567,9 @@ class MemoryBus:
                 if len(updated.encode("utf-8")) > max_bytes:
                     encoded = updated.encode("utf-8")[:max_bytes]
                     updated = encoded.decode("utf-8", errors="ignore")
-                memory_file.write_text(updated, encoding="utf-8")
+                tmp_path = memory_file.with_suffix('.tmp')
+                tmp_path.write_text(updated, encoding="utf-8")
+                os.replace(tmp_path, memory_file)
                 logger.debug(f"Hot memory patched for agent {agent_id}: +{len(patch)} chars")
                 return True
             except OSError as e:
