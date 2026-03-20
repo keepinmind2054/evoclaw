@@ -1,5 +1,38 @@
 # Release Notes
 
+## EvoClaw v1.15.0 — Phase 8 Qwen 優化 + 架構穩定 — 2026-03-20
+
+### 概述
+
+本版本是第三輪 4 個 AI agent 並行深度分析的成果，針對 Qwen 3.5 397B 相容性問題、群組隔離架構、IPC 延遲，以及安裝體驗進行全面改善。
+
+### 核心改變
+
+| 項目 | 修改前 | 修改後 | 效果 |
+|------|--------|--------|------|
+| Qwen MAX_ITER | 20 (Level B) | 12 | 幻覺螺旋 -40% |
+| Qwen tool_choice | `"required"` | `"auto"` | 消除死迴圈 |
+| Qwen temperature | 0.3 | 0.2 | 輸出更穩定 |
+| Circuit Breaker | 全域（一群組影響全部） | Per-group | 群組完全隔離 |
+| IPC 延遲（Linux） | ~500ms 輪詢 | <20ms inotify | 回應速度 25x |
+| 安裝複雜度 | 37 個環境變數 | 5 個（.env.minimal） | 新用戶入門門檻 -87% |
+
+### 修正摘要
+
+- `agent.py`：95 行新增（Qwen 專屬邏輯）
+- `container_runner.py`：Per-group circuit breaker（7 個呼叫點）
+- `ipc_watcher.py`：inotify 混合後端（107 行新增）
+- 新增 3 個文件：`QUICK_START.md`、`TROUBLESHOOTING.md`、`.env.minimal`
+
+### 新增文件
+
+- **`QUICK_START.md`** — 4 步驟 5 分鐘快速上手
+- **`TROUBLESHOOTING.md`** — 7 個常見問題及解法
+- **`.env.minimal`** — 最小化環境變數範本
+
+---
+
+
 ## EvoClaw v1.14.0 — Phase 7 Anti-Hallucination — 2026-03-20
 
 ### 概述

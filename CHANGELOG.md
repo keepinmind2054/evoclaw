@@ -1,3 +1,42 @@
+## [1.15.0-phase8] — 2026-03-20
+
+### Fixed / Added (Phase 8: Qwen 優化、群組隔離、inotify IPC、安裝體驗)
+
+4 個 agent 並行分析後針對 Qwen 3.5 397B 相容性、架構穩定性與安裝體驗的深度修正。
+
+#### container/agent-runner/agent.py — Phase 8A (Qwen 3.5 397B 優化)
+
+- **`_is_qwen_model()` helper** — 統一偵測 Qwen 模型，避免多處重複判斷
+- **MAX_ITER 自動降低（Qwen 專屬）** — Level B: 20→12，Level A: 6→5；減少 Qwen 幻覺螺旋 (Issue #326)
+- **Temperature 0.3 → 0.2（Qwen）** — 進一步降低 Qwen 輸出不確定性
+- **`tool_choice="auto"`（Qwen）** — 避免 `tool_choice="required"` 導致的死迴圈；改用 prompt-based 強制機制 (Issue #325)
+- **Qwen 系統 prompt 注入** — 中文優先規則、禁止假狀態、思考字數限制 200 字
+- **假狀態 pattern 偵測** — 偵測 `*(正在執行...)*`、`【已完成】` 等 Qwen 常見假狀態格式
+- **工具參數 JSON 自動修復** — Qwen 輸出截斷 JSON 時嘗試自動修復，減少工具呼叫失敗率
+
+#### host/container_runner.py — Phase 8B (群組隔離 Circuit Breaker)
+
+- **Per-group circuit breaker** — `_docker_failures`、`_docker_failure_time` 改為 dict（group_folder → value）(Issue #327)
+- **群組獨立熔斷** — A 群組 Docker 失敗不再影響 B 群組，每個群組有獨立的 60 秒恢復計時
+- **錯誤訊息更新** — 「⚠️ 此群組 Docker 暫時受阻，約 60 秒後自動恢復。其他群組不受影響。」
+
+#### host/ipc_watcher.py + host/requirements.txt — Phase 8C (inotify 混合 IPC)
+
+- **Linux inotify 後端** — 事件驅動，延遲 <20ms（vs 輪詢 ~500ms）(Issue #328)
+- **自動降級到輪詢** — 非 Linux 或 inotify 初始化失敗時自動回退到原本 500ms 輪詢
+- **`inotify-simple>=1.3.0`** — 加入 requirements.txt（Linux 限定依賴）
+
+#### QUICK_START.md + TROUBLESHOOTING.md + .env.minimal — Phase 8D (安裝體驗)
+
+- **QUICK_START.md** — 5 分鐘快速上手（4 步驟），移除複雜度 (Issue #330)
+- **TROUBLESHOOTING.md** — 7 個常見問題及解法，含 log 符號對照表
+- **`.env.minimal`** — 只需 5 個必要變數（原本 37 個），降低新用戶入門門檻
+
+### Issues Addressed
+#325 #326 #327 #328 #329 #330
+
+---
+
 # Changelog
 
 ## [1.14.0-phase7] — 2026-03-20
