@@ -80,7 +80,7 @@ except ImportError as _e2:
 # Phase 3: Bot Registry + RBAC
 try:
     from .identity.bot_registry import BotRegistry as _BotRegistry, bootstrap_known_bots as _bootstrap_bots
-    from .rbac.roles import Permission as _Permission, RBACStore as _RBACStore
+    from .rbac.roles import Permission as _Permission, RBACStore as _RBACStore, Role as _Role
     _PHASE3_AVAILABLE = True
 except ImportError as _e3p:
     _PHASE3_AVAILABLE = False
@@ -88,6 +88,7 @@ except ImportError as _e3p:
     _bootstrap_bots = None
     _Permission = None
     _RBACStore = None
+    _Role = None
     logging.getLogger("evoclaw").warning("[Phase3] Components not available: %s", _e3p)
 
 
@@ -881,6 +882,17 @@ async def main() -> None:
             _bootstrap_bots(_bot_registry)
             _rbac_store = _RBACStore()
             log.info("[Phase3] BotRegistry + RBAC initialized")
+            # Auto-bootstrap: grant admin to all IDs listed in OWNER_IDS env var.
+            # Format: OWNER_IDS=123456,987654321  (comma-separated Telegram/Discord user IDs)
+            # This ensures the owner always has access even after a fresh install.
+            _owner_ids_raw = os.environ.get("OWNER_IDS", "").strip()
+            if _owner_ids_raw:
+                for _oid in [x.strip() for x in _owner_ids_raw.split(",") if x.strip()]:
+                    try:
+                        _rbac_store.grant(_oid, _Role.ADMIN, granted_by="system:bootstrap")
+                        log.info("[Phase3] RBAC bootstrap: granted admin to owner ID %s", _oid)
+                    except Exception as _eg:
+                        log.warning("[Phase3] RBAC bootstrap failed for %s: %s", _oid, _eg)
         except Exception as _e4:
             log.error("[Phase3] Initialization failed — BotRegistry/RBAC unavailable (fail-closed): %s", _e4)
     _stop_event = asyncio.Event()
