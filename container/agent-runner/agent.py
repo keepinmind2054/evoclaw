@@ -112,6 +112,11 @@ class _KeyPool:
         return len(self._keys)
 
 
+def _is_qwen_model(model_name: str) -> bool:
+    """Check if the model is a Qwen variant (needs special handling)."""
+    return "qwen" in (model_name or "").lower()
+
+
 def _llm_call_with_retry(fn, max_attempts: int = 3, base_delay: float = 1.0, pool: "_KeyPool | None" = None, apply_key_fn=None):
     """Call an LLM API function with exponential backoff retry on transient errors.
 
@@ -1141,7 +1146,26 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
         # Escalate to "required" when model has been avoiding tools (Fix #169).
         # tool_choice="required" is enforced at the API level — the model CANNOT
         # return a text-only response, it MUST make a tool call.
-        _tool_choice = "required" if _no_tool_turns > 0 else "auto"
+        # Qwen 不適合 tool_choice="required"（容易死循環），改用 prompt 強制
+        _is_qwen = _is_qwen_model(model)
+        if _no_tool_turns >= 2 and _is_qwen:
+            _log("⚠️ QWEN-FORCE", f"Injecting critical prompt instead of tool_choice='required' (Qwen)")
+            history.append({
+                "role": "user",
+                "content": (
+                    "【緊急】你已連續多輪未呼叫工具。現在必須立刻選擇並執行一個工具：\n"
+                    "A) Bash: 執行指令\n"
+                    "B) Read: 讀取檔案\n"
+                    "C) mcp__evoclaw__send_message: 發送訊息給用戶\n"
+                    "禁止產出任何文字說明，直接呼叫工具。"
+                ),
+            })
+            _no_tool_turns = 0
+            _tool_choice = "auto"
+        elif _no_tool_turns > 0:
+            _tool_choice = "required"
+        else:
+            _tool_choice = "auto"
         if _no_tool_turns > 0:
             _log("⚠️ FORCE-TOOL", f"no_tool_turns={_no_tool_turns} — escalating tool_choice to 'required'")
         _log("🧠 LLM →", f"turn={n} provider=openai-compat tool_choice={_tool_choice}")
@@ -1152,7 +1176,7 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                 messages=_oai_history,
                 tools=OPENAI_TOOL_DECLARATIONS,
                 tool_choice=_tool_choice,
-                temperature=0.3,
+                temperature=0.2 if _is_qwen else 0.3,
                 max_tokens=4096,
             ), pool=pool, apply_key_fn=apply_key_fn)
         except Exception as _tc_err:
@@ -1164,7 +1188,7 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                     messages=_oai_history,
                     tools=OPENAI_TOOL_DECLARATIONS,
                     tool_choice="auto",
-                    temperature=0.3,
+                    temperature=0.2 if _is_qwen else 0.3,
                     max_tokens=4096,
                 ), pool=pool, apply_key_fn=apply_key_fn)
             else:
@@ -1222,6 +1246,19 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
             # text re-prompt is secondary fallback for providers that don't support "required").
             _FAKE_STATUS_RE = _re_cb.compile(r'\*\([^)]*\)\*|\*\[[^\]]*\]\*', _re_cb.DOTALL)
             _fake_hits = _FAKE_STATUS_RE.findall(content)
+            # 擴展假狀態偵測，涵蓋 Qwen 常見的虛假回應格式
+            _QWEN_FAKE_PATTERNS = [
+                r'【[^】]*(?:已|正在|將|完成|處理|執行)[^】]*】',  # 【已完成】
+                r'（[^）]{2,30}(?:已|正在|處理|執行)[^）]{0,20}）',  # （已完成）
+                r'(?:已|正在|即將).{0,8}(?:完成|處理|執行|分析)',  # 已完成、正在處理
+            ]
+            for _qp in _QWEN_FAKE_PATTERNS:
+                try:
+                    _qwen_fake_hits = _re_cb.findall(_qp, content)
+                    if _qwen_fake_hits:
+                        _fake_hits = (_fake_hits or []) + _qwen_fake_hits
+                except Exception:
+                    pass
             if _fake_hits and n < MAX_ITER - 1:
                 _log("⚠️ FAKE-STATUS", f"model wrote {len(_fake_hits)} fake status line(s) — tool_choice='required' on next turn")
                 history.append({
@@ -1315,13 +1352,30 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
             try:
                 args = _json.loads(tc.function.arguments)
             except Exception as _arg_err:
-                _log("⚠️ TOOL-ARG-PARSE", f"Failed to parse tool args for {tc.function.name}: {_arg_err} — returning error to model")
-                history.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": f"Error: Failed to parse tool arguments: {_arg_err}"
-                })
-                continue
+                # 嘗試修復 Qwen 常見的 JSON 格式問題
+                _raw_args = str(tc.function.arguments or "")
+                _recovered = False
+                if _raw_args.strip() and _raw_args != "{}":
+                    try:
+                        import re as _re_fix_args
+                        # 修復常見問題：末尾多餘逗號
+                        _fixed = _re_fix_args.sub(r',\s*([}\]])', r'\1', _raw_args)
+                        args = _json.loads(_fixed)
+                        _recovered = True
+                        _log("🔧 ARG-RECOVERY", f"Recovered malformed args for {tc.function.name}")
+                    except Exception:
+                        args = {}
+                else:
+                    args = {}
+
+                if not _recovered:
+                    _log("⚠️ TOOL-ARG-PARSE", f"Failed to parse/recover tool args for {tc.function.name}: {_arg_err}")
+                    history.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": f"Error: Failed to parse tool arguments: {_arg_err}"
+                    })
+                    continue
             result = execute_tool(tc.function.name, args, chat_jid)
             history.append({
                 "role": "tool",
@@ -1739,6 +1793,14 @@ def main():
         _dynamic_max_iter = 20 if _is_level_b else 6
     _log("🔢 MAX_ITER", f"{_dynamic_max_iter} ({'Level B' if _is_level_b else 'Level A'}, prompt_len={len(prompt or '')})")
 
+    # Qwen 397B 推理較慢且容易陷入 reasoning loop，降低 MAX_ITER
+    _model_for_check = os.environ.get("NIM_MODEL") or os.environ.get("OPENAI_MODEL") or ""
+    if _is_qwen_model(_model_for_check) and not _env_max_iter:
+        _prev = _dynamic_max_iter
+        _dynamic_max_iter = min(_dynamic_max_iter, 12 if _is_level_b else 5)
+        if _prev != _dynamic_max_iter:
+            _log("🧠 QWEN-ITER", f"Reduced MAX_ITER {_prev}→{_dynamic_max_iter} for Qwen model")
+
     if _is_level_b:
         lines.append("")
         lines.append(
@@ -1781,6 +1843,19 @@ def main():
             _hrole = str(_hmsg.get('role', '?')).upper()
             _hcontent = str(_hmsg.get('content', ''))
             _log(f"📚 [{_hrole}]", _hcontent[:200])
+
+    # Qwen 特化：注入中文遵從規則，避免推理迴圈
+    if _is_qwen_model(_model_for_check):
+        _qwen_rules = (
+            "\n## Qwen 特化規則（最高優先）\n"
+            "- 思考限制：不超過 200 字就必須行動，不要過度推理\n"
+            "- 禁止假設：工具執行後必須等待結果，不能假設成功\n"
+            "- 失敗承認：承認不確定比編造進度更好\n"
+            "- 工具呼叫：遇到困難優先呼叫工具，不要空想\n"
+            "- 禁止假狀態：*(正在執行...)*、【已完成】等格式完全禁止\n"
+        )
+        system_instruction = system_instruction + _qwen_rules
+        _log("🧠 QWEN-PROMPT", f"Injected {len(_qwen_rules)} chars Qwen-specific rules")
 
     try:
         if use_openai_compat:
