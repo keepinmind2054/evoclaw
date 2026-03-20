@@ -1,6 +1,6 @@
 # EvoClaw
 
-[![Version](https://img.shields.io/badge/version-v1.11.42-blue)](https://github.com/KeithKeepGoing/evoclaw/blob/main/CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v1.13.1-blue)](https://github.com/KeithKeepGoing/evoclaw/blob/main/CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Docker](https://img.shields.io/badge/docker-required-blue)](https://www.docker.com/)
@@ -25,6 +25,7 @@
 - [進化引擎](#進化引擎)
 - [Web 介面](#web-介面)
 - [設定參數](#設定參數)
+- [已知限制與穩定性](#已知限制與穩定性)
 - [開發指南](#開發指南)
 - [授權與來源](#授權與來源)
 
@@ -70,13 +71,15 @@ Telegram / WhatsApp / Discord / Slack / Gmail
                     ↓ 產生（注入進化提示）
            Docker 容器（每群組獨立隔離）
                     ↓ 執行
-           agent.py + Gemini / OpenAI-compatible / Claude
+           agent.py + Qwen / Gemini / OpenAI-compatible / Claude
            + 工具（Bash, Read, Write, Edit, Glob, Grep, WebFetch,
                    send_message, schedule_task, list_tasks,
                    pause_task, resume_task, cancel_task）
                     ↓
            記錄適應度分數 → 回應路由到正確頻道
 ```
+
+> **設計取捨**：EvoClaw 的 Docker 容器隔離架構比直接 API 呼叫多了 15+ 個潛在失敗點，換取的是更強的安全隔離與多步驟任務執行能力。若主要用途是問答對話，這個複雜度是不必要的；若需要執行 Bash 指令、讀寫檔案、協調多個子代理，則 Docker 隔離是必要的。
 
 ### 專案結構
 
@@ -541,6 +544,27 @@ python -m pytest tests/
 - [ ] [#220] `tool_web_fetch()` 需加入私有 IP 封鎖清單（SSRF）
 
 **22 個安全及架構議題正在積極追蹤中**，詳見 [GitHub Issues](https://github.com/KeithKeepGoing/evoclaw/issues?q=label%3Asecurity)。
+
+---
+
+## 已知限制與穩定性
+
+EvoClaw 的 Docker 容器架構帶來強大的隔離性，但也引入了額外複雜度。以下是目前已知的限制與對應追蹤 issue：
+
+| 類別 | 限制 | Issue | 狀態 |
+|------|------|-------|------|
+| 延遲 | 容器冷啟動 15–30 秒 | — | 架構限制 |
+| 穩定性 | MAX_ITER=30 允許過多幻覺迴圈 | #309 | 計畫修正 |
+| 穩定性 | 預設 LLM 工具呼叫可靠性 | #310 | 計畫修正 |
+| 穩定性 | IPC 檔案寫入無原子性 | #311 | 計畫修正 |
+| 穩定性 | Docker circuit breaker 粒度過粗 | #312 | 計畫修正 |
+| 穩定性 | 訊息 5 次失敗後靜默丟棄 | #313 | 計畫修正 |
+| 效能 | System prompt 3000+ tokens | #314 | 計畫修正 |
+| 整潔 | Stale branches 需 admin 刪除 | #315 | 待處理 |
+
+**v1.13.1 (Phase 6A)** 已修正 8 個導致靜默無回應的核心 bug。詳見 [CHANGELOG.md](CHANGELOG.md)。
+
+> **推薦 LLM**：使用 Claude API key 可顯著提升工具呼叫可靠性，減少虛假回應。設定 `ANTHROPIC_API_KEY` 環境變數，EvoClaw 會自動優先使用 Claude。
 
 ---
 

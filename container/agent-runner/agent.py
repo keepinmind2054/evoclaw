@@ -1011,6 +1011,10 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
 
         messages.append({"role": "user", "content": tool_results})
 
+    # If the loop exhausted MAX_ITER without an end_turn, return whatever we have.
+    # Avoids returning silent empty string to the host.
+    if not final_response:
+        _log("⚠️ LOOP-EXHAUST", f"Claude agent loop hit MAX_ITER={MAX_ITER} without end_turn — no final text collected")
     return final_response
 
 
@@ -1306,6 +1310,8 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                 "content": result,
             })
 
+    if not final_response:
+        _log("⚠️ LOOP-EXHAUST", f"OpenAI agent loop hit MAX_ITER={MAX_ITER} without finish_reason=stop — no final text collected")
     return final_response
 
 
@@ -1396,6 +1402,8 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
         # 工具結果以 user role 加回 history（Gemini function calling 協議要求）
         history.append(types.Content(role="user", parts=fn_responses))
 
+    if not final_response:
+        _log("⚠️ LOOP-EXHAUST", f"Gemini agent loop hit MAX_ITER={MAX_ITER} without text response — no final text collected")
     return final_response
 
 
@@ -1750,6 +1758,11 @@ def main():
         # 則清空 result 欄位，避免 host 的 container_runner 再次發送（雙重訊息 + 超長訊息 bug）
         # 若 agent 沒有呼叫工具（純文字回覆），則由 host 負責發送 result
         emit_result = "" if _messages_sent_via_tool else result
+        # Guard: if the agent loop produced no output at all (empty result, no tool messages),
+        # emit a minimal fallback so the user never sees pure silence.
+        if not emit_result and not _messages_sent_via_tool:
+            _log("⚠️ EMPTY-RESULT", "Agent loop returned no output and sent no tool messages — emitting fallback")
+            emit_result = "（系統：處理完成，但未產生回應，請重試。）"
         # Preserve the incoming sessionId so the host can track conversation continuity.
         # Only fall back to generating a new UUID if no sessionId was provided.
         preserved_session_id = session_id if session_id else str(uuid.uuid4())
@@ -1757,7 +1770,8 @@ def main():
     except Exception as e:
         _log("❌ ERROR", f"{type(e).__name__}: {e}")
         traceback.print_exc(file=sys.stderr)
-        emit({"status": "error", "result": None, "error": str(e)})
+        # Emit a structured error so container_runner can surface it to the user via on_error
+        emit({"status": "error", "result": None, "error": f"{type(e).__name__}: {e}"})
 
 
 
