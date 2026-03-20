@@ -81,6 +81,9 @@ class RBACStore:
         self._role_cache: dict = {}  # {subject_id: (roles_set, fetched_at)}
         self._cache_ttl = 60.0
         self._cache_maxsize = 512
+        # Cache for _is_empty() result: (result: bool, fetched_at: float)
+        # Invalidated on every grant/revoke via _invalidate_empty_cache().
+        self._empty_cache: Optional[tuple] = None  # (is_empty: bool, fetched_at: float)
         self._init_db()
         logger.info(f"RBACStore initialized at {db_path}")
 
@@ -119,6 +122,8 @@ class RBACStore:
     def _invalidate_cache(self, subject_id: str):
         with self._cache_lock:
             self._role_cache.pop(subject_id, None)
+            # Also invalidate the _is_empty cache so has_permission() reflects the grant/revoke
+            self._empty_cache = None
 
     def grant(self, subject_id: str, role: Role, granted_by: Optional[str] = None):
         with self._lock:
@@ -165,12 +170,28 @@ class RBACStore:
         An empty RBAC store means the system is unconfigured — no one has
         ever been granted a role.  In this state we fail-open (allow all)
         rather than locking everyone out of a fresh install.
+
+        Result is cached for self._cache_ttl seconds (same TTL as role cache)
+        and invalidated immediately on every grant() / revoke() call, so the
+        cache never serves a stale "empty" result after the first admin grant.
+        Without caching, every has_permission() call hits the DB twice —
+        once for the count and once for the role query.
         """
+        with self._cache_lock:
+            if self._empty_cache is not None:
+                _cached_result, _cached_at = self._empty_cache
+                if (_time.time() - _cached_at) < self._cache_ttl:
+                    return _cached_result
+                # Expired
+                self._empty_cache = None
         with self._lock:
             count = self._conn.execute(
                 "SELECT COUNT(*) FROM rbac_grants"
             ).fetchone()[0]
-        return count == 0
+        result = count == 0
+        with self._cache_lock:
+            self._empty_cache = (result, _time.time())
+        return result
 
     def has_permission(self, subject_id: str, permission: Permission) -> bool:
         # Fail-open when unconfigured: if nobody has been granted any role,

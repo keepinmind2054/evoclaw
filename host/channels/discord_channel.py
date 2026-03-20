@@ -2,6 +2,7 @@
 import asyncio
 import concurrent.futures
 import logging
+import re
 import threading
 from typing import Callable, Optional
 
@@ -87,10 +88,19 @@ class DiscordChannel:
             # Normalize Discord @mention of the bot (e.g. <@1234567890> or <@!1234567890>)
             # to the configured trigger word so that tagging the bot works naturally.
             # e.g.  "<@1483370646770810881> 哈囉"  →  "@Eve 哈囉"
-            import re as _re
+            # Also strip any other user/role @mentions (e.g. <@!999>) that appear in the
+            # message so that TRIGGER_PATTERN.match() (anchored at start) is not confused
+            # by leading mention tags for other users.
             if self._client.user and self._client.user in message.mentions:
-                normalized = _re.sub(rf"<@!?{self._client.user.id}>", "", text).strip()
+                # Remove the bot's own mention and prepend the trigger word
+                normalized = re.sub(rf"<@!?{self._client.user.id}>", "", text).strip()
+                # Strip any remaining user/role mentions from the normalized text
+                normalized = re.sub(r"<@[!&]?\d+>", "", normalized).strip()
                 text = f"@{config.ASSISTANT_NAME} {normalized}".strip()
+            else:
+                # Even without a bot mention, strip raw Discord mention syntax that could
+                # appear at the start of the message and break TRIGGER_PATTERN.match().
+                text = re.sub(r"^(<@[!&]?\d+>\s*)+", "", text).strip()
 
             groups = {g["jid"]: g for g in registered_groups}
             group = groups.get(jid)
@@ -190,10 +200,17 @@ class DiscordChannel:
             log.warning("Discord send_message called but channel not connected")
             return
         try:
+            # Discord enforces a hard 2000-character limit per message.
+            # Split long messages into chunks rather than silently truncating so
+            # the user sees the full response.
+            _DISCORD_LIMIT = 2000
+            chunks = [text[i:i + _DISCORD_LIMIT] for i in range(0, max(len(text), 1), _DISCORD_LIMIT)]
+
             async def _send():
                 channel = await self._get_channel(jid)
                 if channel is not None:
-                    await channel.send(text)
+                    for chunk in chunks:
+                        await channel.send(chunk)
             await self._run_in_discord_loop(_send())
         except Exception as exc:
             log.error("Discord send_message exception: %s", exc)

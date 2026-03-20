@@ -124,6 +124,9 @@ def _create_tables(db: sqlite3.Connection) -> None:
         result TEXT,
         error TEXT
     );
+    -- Index for get_due_tasks(): filters on status + next_run on every scheduler tick.
+    -- Without this index, each tick performs a full table scan of scheduled_tasks.
+    CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_status_next_run ON scheduled_tasks(status, next_run);
 
     CREATE TABLE IF NOT EXISTS router_state (
         key TEXT PRIMARY KEY,

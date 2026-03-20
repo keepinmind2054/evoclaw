@@ -541,7 +541,33 @@ async def run_container_agent(
                                 _active_containers[container_name]["current_activity"] = safe_line
 
             async def _collect() -> tuple[bytes, bytes]:
-                stdout_task = asyncio.create_task(proc.stdout.read())
+                # Read stdout in chunks up to _MAX_OUTPUT_SIZE to prevent host OOM.
+                # proc.stdout.read() with no limit would buffer the entire container
+                # output — a runaway or malicious container emitting gigabytes of data
+                # would exhaust host memory before the outer wait_for timeout fires.
+                async def _read_stdout_bounded() -> bytes:
+                    chunks: list[bytes] = []
+                    total = 0
+                    assert proc.stdout is not None
+                    while True:
+                        chunk = await proc.stdout.read(65536)  # 64 KiB at a time
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > _MAX_OUTPUT_SIZE:
+                            log.warning(
+                                "Container %s stdout exceeded %d bytes — truncating",
+                                container_name, _MAX_OUTPUT_SIZE,
+                            )
+                            chunks.append(chunk[:_MAX_OUTPUT_SIZE - (total - len(chunk))])
+                            # Drain the rest without buffering to let the container exit
+                            while await proc.stdout.read(65536):
+                                pass
+                            break
+                        chunks.append(chunk)
+                    return b"".join(chunks)
+
+                stdout_task = asyncio.create_task(_read_stdout_bounded())
                 stderr_task = asyncio.create_task(_stream_stderr())
                 stdout_data, _ = await asyncio.gather(stdout_task, stderr_task)
                 return stdout_data, b"\n".join(l.encode() for l in stderr_lines)
@@ -590,7 +616,16 @@ async def run_container_agent(
             _container_ran = proc is not None and proc.returncode in _AGENT_EXIT_CODES
 
             if _container_ran:
-                log.info("Container %s crashed before emit() but Docker is healthy — resetting circuit breaker", container_name)
+                # Log OOM explicitly so operators can act (raise --memory limit)
+                if proc is not None and proc.returncode == 137:
+                    log.error(
+                        "Container %s was OOM-killed (exit 137). "
+                        "Consider raising CONTAINER_MEMORY in config (currently %r). "
+                        "Circuit breaker NOT tripped — Docker daemon is healthy.",
+                        container_name, config.CONTAINER_MEMORY,
+                    )
+                else:
+                    log.info("Container %s crashed before emit() but Docker is healthy — resetting circuit breaker", container_name)
                 _record_docker_success(folder)
             else:
                 # Exit code indicates Docker itself failed (not an agent-level issue)
