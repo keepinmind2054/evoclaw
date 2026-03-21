@@ -1,3 +1,57 @@
+## [1.22.0] — 2026-03-21
+
+### Fixed (Phase 15: Conversation Loop & Delivery — 44 fixes)
+
+Four PRs covering the LLM conversation loop, IPC protocol & result delivery, process lifecycle & shutdown, and database schema & query correctness.
+
+#### LLM Conversation Loop (PR #371 — 11 fixes)
+
+- **Claude `stop_reason=max_tokens` mid-tool-call orphaned assistant message (CRITICAL)** — assistant message left without a matching tool_result caused next API call to return HTTP 400; added cleanup of orphaned assistant messages on max_tokens mid-call
+- **Claude `stop_reason=tool_use` with no tool_use blocks orphaned assistant message (CRITICAL)** — orphaned assistant message with no tool blocks caused HTTP 400 on next API call; added guard to discard assistant message when no tool_use blocks are present
+- **Claude & OpenAI: list-type `content` silently dropped during history injection (CRITICAL)** — tool call records with list-type content were silently dropped during history injection, causing tool call history to vanish; fixed to preserve list-type content correctly
+- **Claude history truncation split `assistant(tool_use)` + `user(tool_result)` pairs (HIGH)** — truncation could separate paired messages, causing Anthropic API 400 errors; truncation now respects pair boundaries
+- **OpenAI history truncation split `assistant(tool_calls)` + `role=tool` pairs (HIGH)** — truncation could separate paired messages, causing OpenAI API 400 errors; truncation now respects pair boundaries
+- **Gemini history truncation split `model(function_call)` + `user(FunctionResponse)` pairs (HIGH)** — truncation could separate paired messages, causing Gemini API rejection; truncation now respects pair boundaries
+- **OpenAI `finish_reason="length"` triggered infinite context overflow retry (MEDIUM)** — treated as a no-tool turn and retried, overflowing context again; now trims history to ¼ and exits the loop
+- **Gemini SAFETY/RECITATION/MAX_TOKENS returned silent generic placeholder (MEDIUM)** — stop conditions silently returned a generic placeholder with no explanation to the user or logs; added explicit handling with informative messaging
+- **Claude & Gemini fake-status regex missing English fake-done patterns (LOW)** — English-language fake completion patterns not covered by existing regex; added missing patterns
+- **Tool schema missing `description` on pause/resume task params (LOW)** — pause and resume task tool parameters lacked description fields in schema; descriptions added
+- **Tool schema missing `required: []` on list_tasks (LOW)** — list_tasks schema omitted the required array; added `required: []`
+
+#### IPC Protocol & Result Delivery (PR #372 — 15 fixes)
+
+- **`container_runner.py` `on_output` called before `on_success` → duplicate responses on every retry (CRITICAL)** — if delivery failed after `on_output` was called, cursor never advanced, causing the user to receive duplicate responses on every subsequent retry; reordered so cursor advances only after successful delivery
+- **`ipc_watcher.py` 4 skill/memory result writes non-atomic → truncated JSON → skill installs hang forever (CRITICAL)** — non-atomic writes allowed container to read partially-written JSON, causing skill installs to appear to hang indefinitely; converted to atomic tmp-file + rename writes
+- **`ipc_watcher.py` subagent success+error result writes non-atomic → `tool_run_agent` returned empty result (CRITICAL)** — non-atomic writes caused `tool_run_agent` to read truncated or empty result files; converted to atomic writes
+- **`agent.py` `tool_schedule_task` filename collision on same-millisecond tasks (HIGH)** — timestamp-only filenames caused silent overwrites when two tasks were scheduled in the same millisecond; added random suffix to filenames
+- **3 more IPC tool writes non-atomic (`run_agent`, `start_remote_control`, `self_update`) (HIGH)** — non-atomic writes in these three tools exposed the same truncation risk; converted to atomic writes
+- **`main.py` `_on_success_tracked`: `async with _group_fail_lock` without None guard → TypeError during startup window (HIGH)** — lock used before initialization during startup window raised TypeError; added None guard
+- **`_error_notify_times` TOCTOU race → rate limiter bypassed during failure storms (HIGH)** — check-then-update on `_error_notify_times` had a TOCTOU race that allowed the rate limiter to be bypassed under concurrent failure conditions; replaced with atomic update
+- **`emit()` BrokenPipeError unhandled → confusing stderr on container timeout (MEDIUM)** — unhandled BrokenPipeError produced confusing stderr output when a container timed out; added explicit handler
+- **`group_queue.py` silent discard of pending items on shutdown (MEDIUM)** — items pending in the queue at shutdown time were silently dropped with no logging; now logs counts of discarded items
+
+#### Process Lifecycle & Shutdown (PR #373 — 15 fixes)
+
+- **Leader lease never released if `asyncio.gather()` raised → DB lock row stuck until TTL expiry (CRITICAL)** — an exception in `asyncio.gather()` skipped lease release, leaving the DB lock row held until TTL expiry and blocking restarts; added finally block to ensure release
+- **Double-signal SIGTERM race: two rapid SIGTERMs both took "first signal" path, neither force-exiting (CRITICAL)** — two rapid SIGTERMs both entered the first-signal handler path due to a race, with neither triggering the force-exit path; added atomic flag to distinguish first vs second signal
+- **`on_output` exception prevented `on_success` call → infinite message replay (HIGH)** — an exception in `on_output` bypassed the `on_success` call, causing the message to replay infinitely; wrapped `on_output` in try/except so `on_success` is always called
+- **`cleanup_orphans()` used `docker ps` (running only), missed `Exited` containers from SIGKILL → storage leak + name conflicts (HIGH)** — orphan cleanup only considered running containers, leaving exited containers from SIGKILL to accumulate, causing storage leaks and container name conflicts; switched to include all container states
+- **`asyncio.Lock()` created at module import (before event loop) → DeprecationWarning on 3.10+, RuntimeError on 3.12+ (HIGH)** — module-level lock creation before the event loop existed triggered deprecation warnings on Python 3.10+ and RuntimeErrors on 3.12+; deferred to first use
+- **`asyncio.get_event_loop()` deprecated call in group_queue → wrong loop on 3.12+ (HIGH)** — deprecated `get_event_loop()` call returned the wrong loop on Python 3.12+; replaced with `asyncio.get_running_loop()`
+- **Retry sleep coroutines not cancelled on shutdown → could start new containers mid-teardown (HIGH)** — uncancelled sleep coroutines in retry paths could wake up mid-shutdown and start new containers; added cancellation on shutdown signal
+- **No SIGHUP handler → operators had to full-restart to reload config (MEDIUM)** — no SIGHUP handler meant config changes required a full process restart; added SIGHUP handler for config reload
+- **Stale IPC result files after SIGKILL → stale replies delivered to user on restart (MEDIUM)** — IPC result files left over from a SIGKILL were picked up on restart and delivered as fresh replies; added cleanup of stale result files on startup
+- **systemd: `TimeoutStopSec=45` too short; added `KillMode=mixed`; added `EnvironmentFile` (MEDIUM)** — 45-second stop timeout was insufficient for graceful shutdown; `KillMode` and `EnvironmentFile` directives were missing from the unit file; all three updated
+
+#### Database Schema & Query Correctness (PR #374 — 9 fixes)
+
+- **`immune_threats`: no `UNIQUE(sender_jid, pattern_hash)` constraint → race condition allowed duplicates → inflated threat counts → incorrect auto-blocks (CRITICAL)** — missing unique constraint allowed concurrent inserts to create duplicate threat rows, inflating threat counts and triggering incorrect auto-blocks; added `UNIQUE(sender_jid, pattern_hash)` constraint
+- **`memory_fts_search()` never queried cold memory despite docstring saying "warm AND cold" (HIGH)** — the function only queried warm memory, making all cold memory invisible to FTS search; fixed to query both warm and cold memory stores
+- **`set_registered_group()` used `INSERT OR REPLACE` → destroyed `added_at` timestamp on every update (HIGH)** — `INSERT OR REPLACE` deleted and re-inserted the row on every update, resetting `added_at` to the current time; replaced with `INSERT ... ON CONFLICT DO UPDATE`
+- **No migration version tracking table → impossible to run incremental migrations safely (MEDIUM)** — without version tracking, re-running migrations caused data corruption or errors; added `schema_migrations` table and migration registry
+- **Missing indexes: `task_run_logs(task_id)`, `container_logs(status)`, `dev_sessions(status)`, `immune_threats(sender_jid, pattern_hash)` composite (MEDIUM)** — four high-traffic query paths lacked indexes, causing full table scans; all four indexes added
+- **Tests: added WAL pragma verification, concurrent-write regression test, executemany test (MEDIUM)** — test coverage gaps for WAL mode, concurrent writes, and bulk inserts; all three test cases added
+
 ## [1.21.0] — 2026-03-21
 
 ### Fixed (Phase 14: Skills, Memory & Enterprise — 57 fixes)
