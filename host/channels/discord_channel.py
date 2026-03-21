@@ -114,14 +114,24 @@ class DiscordChannel:
             sender = str(message.author.id)
             sender_name = message.author.display_name or message.author.name
 
-            await on_message_callback(
-                jid=jid,
-                sender=sender,
-                sender_name=sender_name,
-                content=text,
-                is_group=is_group,
-                channel="discord",
-            )
+            # Fix(p12a): wrap pipeline call in try/except so that any exception
+            # raised inside on_message_callback (RBAC, DB, immune check, dedup)
+            # does not propagate into discord.py's event dispatcher and crash the
+            # on_message event, causing the update to be silently dropped.
+            try:
+                await on_message_callback(
+                    jid=jid,
+                    sender=sender,
+                    sender_name=sender_name,
+                    content=text,
+                    is_group=is_group,
+                    channel="discord",
+                )
+            except Exception as _exc:
+                log.error(
+                    "Discord on_message: unhandled exception in callback for jid=%s: %s",
+                    jid, _exc, exc_info=True,
+                )
 
         # Run the discord client in a background thread with its own event loop
         self._loop = asyncio.new_event_loop()
@@ -203,8 +213,15 @@ class DiscordChannel:
             # Discord enforces a hard 2000-character limit per message.
             # Split long messages into chunks rather than silently truncating so
             # the user sees the full response.
+            # Fix(p12a): the previous `range(0, max(len(text), 1), …)` passed
+            # `range(0, 1, 2000)` when text was empty, producing chunks=[""].
+            # Sending an empty string to Discord raises a 400 Bad Request.
+            # Guard against empty text before building the chunk list.
+            if not text:
+                log.debug("Discord send_message: empty text for jid=%s — skipping", jid)
+                return
             _DISCORD_LIMIT = 2000
-            chunks = [text[i:i + _DISCORD_LIMIT] for i in range(0, max(len(text), 1), _DISCORD_LIMIT)]
+            chunks = [text[i:i + _DISCORD_LIMIT] for i in range(0, len(text), _DISCORD_LIMIT)]
 
             async def _send():
                 channel = await self._get_channel(jid)
