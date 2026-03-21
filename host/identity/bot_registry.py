@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 
 BOT_REGISTRY_VERSION = "1.0"
 
+# BUG-BR-2 FIX: Nonces older than this (in seconds) are considered expired
+# and cannot be used to complete a handshake.  Prevents replay attacks where
+# a leaked nonce is submitted at an arbitrary future time.
+_NONCE_TTL_SECS = 300  # 5 minutes
+
 
 @dataclass
 class BotIdentity:
@@ -67,6 +72,9 @@ class BotRegistry:
         self.db_path = db_path
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._lock = threading.Lock()
+        # BUG-BR-1 FIX: _pending_handshakes is accessed from multiple threads
+        # but was previously protected only by _lock in some paths and not others.
+        # We now use the same _lock for ALL accesses to this dict.
         self._pending_handshakes: Dict[str, List[float]] = {}
         self._init_db()
         logger.info(f"BotRegistry initialized at {db_path}")
@@ -99,6 +107,11 @@ class BotRegistry:
                     completed_at REAL,
                     nonce TEXT
                 )
+            """)
+            # BUG-BR-2 FIX: Index on nonce for fast expired-nonce cleanup queries.
+            self._conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_handshakes_nonce
+                ON bot_handshakes(nonce, status, initiated_at)
             """)
             self._conn.commit()
 
@@ -164,16 +177,18 @@ class BotRegistry:
 
     def initiate_handshake(self, initiator_id: str, target_id: str) -> str:
         import secrets
-        # Rate limiting: allow at most 5 handshake attempts per target within 300s
-        now = time.time()
-        timestamps = self._pending_handshakes.setdefault(target_id, [])
-        # Prune timestamps older than 300 seconds
-        self._pending_handshakes[target_id] = [t for t in timestamps if now - t < 300]
-        if len(self._pending_handshakes[target_id]) >= 5:
-            raise RuntimeError("Handshake rate limit exceeded for target")
-        self._pending_handshakes[target_id].append(now)
-        nonce = secrets.token_hex(16)
+        # BUG-BR-1 FIX: Hold _lock for the entire rate-limit check + insert so
+        # that concurrent callers cannot both pass the rate-limit check and both
+        # insert entries, bypassing the 5-attempt cap.
         with self._lock:
+            now = time.time()
+            timestamps = self._pending_handshakes.setdefault(target_id, [])
+            # Prune timestamps older than _NONCE_TTL_SECS seconds
+            self._pending_handshakes[target_id] = [t for t in timestamps if now - t < _NONCE_TTL_SECS]
+            if len(self._pending_handshakes[target_id]) >= 5:
+                raise RuntimeError("Handshake rate limit exceeded for target")
+            self._pending_handshakes[target_id].append(now)
+            nonce = secrets.token_hex(16)
             self._conn.execute("""
                 INSERT INTO bot_handshakes
                     (initiator_bot_id,target_bot_id,status,initiated_at,nonce)
@@ -183,17 +198,41 @@ class BotRegistry:
         return nonce
 
     def complete_handshake(self, initiator_id: str, target_id: str, nonce: str) -> bool:
+        """Complete a handshake and mark both bots as trusted.
+
+        BUG-BR-2 FIX: Expired nonces (older than _NONCE_TTL_SECS) are rejected
+        even if their status is still 'pending' in the DB, preventing replay
+        attacks where a nonce intercepted or leaked in the past is later reused
+        to elevate trust.
+        """
+        now = time.time()
+        expiry_cutoff = now - _NONCE_TTL_SECS
         with self._lock:
             row = self._conn.execute("""
-                SELECT id FROM bot_handshakes
+                SELECT id, initiated_at FROM bot_handshakes
                 WHERE initiator_bot_id=? AND target_bot_id=? AND nonce=? AND status='pending'
             """, (initiator_id, target_id, nonce)).fetchone()
             if not row:
-                logger.warning(f"Handshake failed: {initiator_id} -> {target_id}")
+                logger.warning(f"Handshake failed: {initiator_id} -> {target_id} (nonce not found or already completed)")
                 return False
+            # BUG-BR-2 FIX: Reject expired nonces.
+            initiated_at = row[1] if isinstance(row, (tuple, list)) else row["initiated_at"]
+            if initiated_at < expiry_cutoff:
+                logger.warning(
+                    "Handshake failed: %s -> %s (nonce expired — initiated %.0fs ago, TTL=%ds)",
+                    initiator_id, target_id, now - initiated_at, _NONCE_TTL_SECS,
+                )
+                # Mark as expired so it cannot be retried
+                row_id = row[0] if isinstance(row, (tuple, list)) else row["id"]
+                self._conn.execute(
+                    "UPDATE bot_handshakes SET status='expired' WHERE id=?", (row_id,)
+                )
+                self._conn.commit()
+                return False
+            row_id = row[0] if isinstance(row, (tuple, list)) else row["id"]
             self._conn.execute("""
                 UPDATE bot_handshakes SET status='completed', completed_at=? WHERE id=?
-            """, (time.time(), row[0]))
+            """, (now, row_id))
             self._conn.execute(
                 "UPDATE bots SET trusted=1 WHERE bot_id IN (?,?)",
                 (initiator_id, target_id)
@@ -208,6 +247,25 @@ class BotRegistry:
                 "UPDATE bots SET last_seen=? WHERE bot_id=?", (time.time(), bot_id)
             )
             self._conn.commit()
+
+    def purge_stale_bots(self, max_age_secs: float = 86400 * 7) -> int:
+        """Remove bots that have not been seen for *max_age_secs* seconds.
+
+        BUG-BR-3 FIX: Without periodic cleanup, disconnected bots accumulate
+        in the registry indefinitely — a memory/storage leak and a potential
+        security concern (stale trusted entries).  Returns the number of bots
+        removed.
+        """
+        cutoff = time.time() - max_age_secs
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM bots WHERE trusted=0 AND last_seen < ?", (cutoff,)
+            )
+            self._conn.commit()
+        removed = cur.rowcount
+        if removed:
+            logger.info("BotRegistry: purged %d stale (untrusted) bot(s)", removed)
+        return removed
 
     def _row_to_identity(self, row) -> BotIdentity:
         d = dict(zip(self._BOT_COLS, row))

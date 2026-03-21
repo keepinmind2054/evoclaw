@@ -31,6 +31,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
+import signal
 import socket
 import time
 from typing import Optional
@@ -41,6 +43,23 @@ _ENABLED = os.environ.get("LEADER_ELECTION_ENABLED", "false").lower() == "true"
 _HEARTBEAT_INTERVAL = int(os.environ.get("LEADER_HEARTBEAT_INTERVAL", "10"))
 _LEASE_TIMEOUT = int(os.environ.get("LEADER_LEASE_TIMEOUT", "30"))
 _INSTANCE_ID = os.environ.get("INSTANCE_ID", f"{socket.gethostname()}:{os.getpid()}")
+
+# BUG-LE-1 FIX: Enforce LEASE_TIMEOUT > HEARTBEAT_INTERVAL at startup.
+# If LEASE_TIMEOUT <= HEARTBEAT_INTERVAL a valid leader can never renew before
+# its own lease is considered expired, causing continuous leadership churn /
+# split-brain where multiple standby instances simultaneously claim the lease.
+if _ENABLED and _LEASE_TIMEOUT <= _HEARTBEAT_INTERVAL:
+    _LEASE_TIMEOUT = _HEARTBEAT_INTERVAL * 3
+    log.warning(
+        "LeaderElection: LEADER_LEASE_TIMEOUT must be > LEADER_HEARTBEAT_INTERVAL. "
+        "Automatically adjusted to %ds (3 × heartbeat interval).",
+        _LEASE_TIMEOUT,
+    )
+
+# BUG-LE-2 FIX: Maximum wall-clock seconds to wait for a single SQLite call.
+# Without this, a blocked/hung DB causes acquire() and the heartbeat loop to
+# freeze indefinitely, silently stalling the entire event loop.
+_DB_OP_TIMEOUT = 5  # seconds
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS leader_election (
@@ -69,6 +88,41 @@ WHERE singleton = 1 AND instance_id = ?
 
 _READ = "SELECT instance_id, heartbeat_at FROM leader_election WHERE singleton = 1"
 
+# Consecutive heartbeat failures before we self-demote and signal shutdown.
+# A single transient DB error should not cause a false demotion.
+_MAX_CONSECUTIVE_HEARTBEAT_FAILURES = 3
+
+
+def _db_execute(conn, *args, **kwargs):
+    """Execute a SQLite statement with a hard timeout.
+
+    BUG-LE-2: Wraps conn.execute in a thread so that a blocked/locked DB
+    cannot freeze the asyncio event loop indefinitely.  Raises RuntimeError
+    if the operation does not complete within _DB_OP_TIMEOUT seconds.
+    """
+    import concurrent.futures
+    import threading
+
+    result_holder: list = []
+    exc_holder: list = []
+
+    def _run():
+        try:
+            result_holder.append(conn.execute(*args, **kwargs))
+        except Exception as e:  # noqa: BLE001
+            exc_holder.append(e)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=_DB_OP_TIMEOUT)
+    if t.is_alive():
+        raise RuntimeError(
+            f"LeaderElection: DB operation timed out after {_DB_OP_TIMEOUT}s"
+        )
+    if exc_holder:
+        raise exc_holder[0]
+    return result_holder[0]
+
 
 class LeaderElection:
     """DB-backed leader election with heartbeat renewal.
@@ -81,9 +135,13 @@ class LeaderElection:
         self._conn = conn
         self._is_leader = not _ENABLED  # no-op mode: always leader
         self._task: Optional[asyncio.Task] = None
+        # BUG-LE-5: Track consecutive heartbeat failures so we don't demote
+        # ourselves on a single transient DB error (but DO demote after
+        # _MAX_CONSECUTIVE_HEARTBEAT_FAILURES consecutive failures).
+        self._consecutive_hb_failures = 0
 
         if _ENABLED:
-            conn.execute(_CREATE_TABLE)
+            _db_execute(conn, _CREATE_TABLE)
             conn.commit()
             log.info(
                 "LeaderElection initialized: instance_id=%s, heartbeat=%ds, lease=%ds",
@@ -103,7 +161,13 @@ class LeaderElection:
             now = time.time()
             expiry = now - _LEASE_TIMEOUT
             try:
-                cur = self._conn.execute(_ACQUIRE, (_INSTANCE_ID, now, now, expiry))
+                # BUG-LE-2 FIX: use timeout-guarded execute
+                cur = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: _db_execute(
+                        self._conn, _ACQUIRE, (_INSTANCE_ID, now, now, expiry)
+                    ),
+                )
                 self._conn.commit()
                 if cur.rowcount > 0:
                     self._is_leader = True
@@ -115,7 +179,7 @@ class LeaderElection:
 
             # Check who holds the lease
             try:
-                row = self._conn.execute(_READ).fetchone()
+                row = _db_execute(self._conn, _READ).fetchone()
                 if row:
                     log.info(
                         "LeaderElection: standby — leader is %s (heartbeat %.0fs ago)",
@@ -124,7 +188,13 @@ class LeaderElection:
             except Exception:
                 pass
 
-            await asyncio.sleep(_HEARTBEAT_INTERVAL)
+            # BUG-LE-3 FIX: Add random jitter (0–2 s) to the standby poll
+            # interval to prevent a thundering-herd split-brain when multiple
+            # standbys simultaneously detect an expired lease and race to
+            # acquire it.  The SQLite upsert is still the authoritative
+            # arbiter, but jitter reduces contention significantly.
+            jitter = random.uniform(0, 2)
+            await asyncio.sleep(_HEARTBEAT_INTERVAL + jitter)
 
     async def release(self) -> None:
         """Release the leader lease on shutdown."""
@@ -138,8 +208,14 @@ class LeaderElection:
             except asyncio.CancelledError:
                 pass
 
+        # BUG-LE-4 FIX: set _is_leader = False BEFORE the DB delete so that if
+        # the delete raises an exception the instance is already demoted and will
+        # not continue processing messages believing it is still the leader.
+        self._is_leader = False
+
         try:
-            self._conn.execute(
+            _db_execute(
+                self._conn,
                 "DELETE FROM leader_election WHERE singleton = 1 AND instance_id = ?",
                 (_INSTANCE_ID,),
             )
@@ -148,28 +224,52 @@ class LeaderElection:
         except Exception as exc:
             log.warning("LeaderElection: release failed (non-fatal): %s", exc)
 
-        self._is_leader = False
-
     async def _heartbeat_loop(self) -> None:
         """Periodically update heartbeat_at to keep the lease alive."""
         while True:
             await asyncio.sleep(_HEARTBEAT_INTERVAL)
             try:
                 now = time.time()
-                cur = self._conn.execute(_HEARTBEAT, (now, _INSTANCE_ID))
+                # BUG-LE-2 FIX: use timeout-guarded execute in executor so a
+                # stuck DB does not freeze the event loop here either.
+                cur = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: _db_execute(self._conn, _HEARTBEAT, (now, _INSTANCE_ID)),
+                )
                 self._conn.commit()
                 if cur.rowcount == 0:
-                    # Another instance stole the lease
+                    # Another instance stole the lease (genuine split-brain)
                     log.warning(
                         "LeaderElection: lease lost! Another instance became leader. Shutting down."
                     )
                     self._is_leader = False
-                    # Signal main process to stop
-                    import signal
+                    # Reset failure counter — this is a clean demotion
+                    self._consecutive_hb_failures = 0
                     os.kill(os.getpid(), signal.SIGTERM)
                     return
+                # Successful heartbeat: reset failure counter
+                self._consecutive_hb_failures = 0
                 log.debug("LeaderElection: heartbeat renewed (%.0f)", now)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                log.error("LeaderElection: heartbeat failed: %s", exc)
+                # BUG-LE-5 FIX: Do not silently continue after DB errors.
+                # Count consecutive failures.  After _MAX_CONSECUTIVE_HEARTBEAT_FAILURES
+                # we cannot guarantee we are still leader (another instance may have
+                # taken over while our heartbeat was failing), so we self-demote
+                # and signal shutdown rather than continuing to act as leader.
+                self._consecutive_hb_failures += 1
+                log.error(
+                    "LeaderElection: heartbeat failed (%d/%d): %s",
+                    self._consecutive_hb_failures,
+                    _MAX_CONSECUTIVE_HEARTBEAT_FAILURES,
+                    exc,
+                )
+                if self._consecutive_hb_failures >= _MAX_CONSECUTIVE_HEARTBEAT_FAILURES:
+                    log.error(
+                        "LeaderElection: too many consecutive heartbeat failures — "
+                        "self-demoting to avoid split-brain. Sending SIGTERM."
+                    )
+                    self._is_leader = False
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    return

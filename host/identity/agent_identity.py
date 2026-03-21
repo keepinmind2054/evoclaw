@@ -137,10 +137,19 @@ class AgentIdentityStore:
             return self._row_to_identity(row)
 
     def get(self, agent_id: str) -> Optional[AgentIdentity]:
-        """Retrieve identity by agent_id. Returns None if not found."""
-        row = self._conn.execute(
-            "SELECT * FROM agent_identities WHERE agent_id = ?", (agent_id,)
-        ).fetchone()
+        """Retrieve identity by agent_id. Returns None if not found.
+
+        BUG-AI-1 FIX: The original implementation read from the DB without
+        holding _lock, creating a read-write race condition with concurrent
+        writers (update_summary, add_skill, etc.) that share the same SQLite
+        connection.  SQLite's check_same_thread=False disables the built-in
+        guard but does NOT make the Connection object thread-safe — the
+        application-level lock must be held for all operations.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM agent_identities WHERE agent_id = ?", (agent_id,)
+            ).fetchone()
         return self._row_to_identity(row) if row else None
 
     def update_summary(self, agent_id: str, summary: str):
