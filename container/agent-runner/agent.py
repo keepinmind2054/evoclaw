@@ -208,11 +208,22 @@ def tool_bash(command: str) -> str:
     同時回傳 stderr 讓 agent 能看到錯誤訊息並自行修正。
     輸出限制 50KB：防止大量輸出撐爆 LLM context window。
     危險指令封鎖：防止 prompt-injection 攻擊執行破壞性指令。
+
+    P14D-BASH-1: stdin is explicitly closed (DEVNULL) so the child process
+    never blocks waiting for interactive input from the bot's own stdin.
+
+    P14D-BASH-2: on TimeoutExpired the child and its entire process group are
+    sent SIGKILL so they do not linger as zombies or continue consuming CPU/IO
+    after the timeout.
+
+    P14D-BASH-3: non-zero exit codes are surfaced to the LLM in the return
+    value so it knows the command failed rather than silently succeeding.
     """
     # ── Dangerous command blocklist ───────────────────────────────────────────
     # Block commands that could destroy the container filesystem or host mounts.
     # Uses a whitespace/flag-aware pattern to catch common variants.
     import re as _re_bash
+    import signal as _signal
     _DANGEROUS_PATTERNS = [
         # rm -rf / and variants (rm -rf /*, rm --no-preserve-root /, etc.)
         r'\brm\s+.*-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+[/~]',
@@ -241,21 +252,40 @@ def tool_bash(command: str) -> str:
 
     _BASH_OUTPUT_LIMIT = 50 * 1024  # 50 KB
 
+    proc = None
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             ["bash", "-c", command],
-            capture_output=True, text=True,
-            timeout=300, cwd=WORKSPACE,
-            shell=False  # safer: exec bash directly, not via /bin/sh -c
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,   # P14D-BASH-1: never block on stdin
+            cwd=WORKSPACE,
+            # start_new_session=True creates a new process group so we can
+            # kill the entire group (including child processes) on timeout.
+            start_new_session=True,
         )
-        out = result.stdout
-        if result.stderr:
-            out += f"\nSTDERR:\n{result.stderr}"
+        try:
+            stdout_bytes, stderr_bytes = proc.communicate(timeout=300)
+        except subprocess.TimeoutExpired:
+            # P14D-BASH-2: kill the whole process group, not just the leader
+            try:
+                import os as _os
+                _os.killpg(_os.getpgid(proc.pid), _signal.SIGKILL)
+            except Exception:
+                proc.kill()
+            proc.communicate()  # reap zombie
+            return "Error: command timed out after 300s"
+
+        out = stdout_bytes.decode("utf-8", errors="replace")
+        err_text = stderr_bytes.decode("utf-8", errors="replace")
+        if err_text:
+            out += f"\nSTDERR:\n{err_text}"
+        # P14D-BASH-3: surface non-zero exit codes to the LLM
+        if proc.returncode != 0:
+            out += f"\n[Exit code: {proc.returncode}]"
         if len(out) > _BASH_OUTPUT_LIMIT:
             out = out[:_BASH_OUTPUT_LIMIT] + f"\n... (output truncated at 50KB, total {len(out)} bytes)"
         return out or "(no output)"
-    except subprocess.TimeoutExpired:
-        return "Error: command timed out after 300s"
     except Exception as e:
         return f"Error: {e}"
 
@@ -263,22 +293,63 @@ def tool_bash(command: str) -> str:
 def tool_read(file_path: str) -> str:
     """讀取指定路徑的文字檔案內容，讓 agent 可以檢視檔案。
     檔案大小限制 512KB：防止讀取巨大檔案導致 OOM 或 context 爆炸。
+
+    P14D-READ-1: Symlink resolution is re-checked AFTER resolving the path so
+    that symlinks pointing outside /workspace/ (e.g. /etc/passwd) are blocked.
+    The existing _check_path_allowed() call only checks the raw input string;
+    a symlink like /workspace/group/evil -> /etc/passwd would pass that check
+    but lead to reading host-sensitive files.
+
+    P14D-READ-2: Binary files are detected from the first 512 bytes and
+    rejected with an explanatory message rather than being returned as garbled
+    UTF-8 replacement characters.
+
+    P14D-READ-3: Non-UTF-8 text files are read with errors="replace" so a
+    Latin-1 file does not raise UnicodeDecodeError.
     """
     _READ_SIZE_LIMIT = 512 * 1024  # 512 KB
 
     err = _check_path_allowed(file_path)
     if err:
         return err
+
     try:
         p = Path(file_path)
+
+        # P14D-READ-1: resolve symlinks and re-check the *real* path
+        try:
+            resolved = p.resolve()
+        except Exception as exc:
+            return f"Error: cannot resolve path {file_path!r}: {exc}"
+        resolved_str = str(resolved)
+        if not any(resolved_str.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES):
+            _log("⚠️ SECURITY", f"Read: symlink escape blocked: {file_path!r} -> {resolved_str!r}")
+            return (
+                f"Error: access denied — {file_path!r} resolves to {resolved_str!r} "
+                f"which is outside the allowed workspace (symlink escape prevention)."
+            )
+
         file_size = p.stat().st_size
+
+        # P14D-READ-2: binary detection via null-byte / high-byte heuristic
+        with p.open("rb") as fh:
+            sample = fh.read(min(512, file_size))
+        if b"\x00" in sample or (len(sample) > 0 and sum(b > 127 for b in sample) > len(sample) * 0.3):
+            return (
+                f"Error: {file_path!r} appears to be a binary file. "
+                "tool_read only supports text files. Use Bash + base64 to inspect binary content."
+            )
+
         if file_size > _READ_SIZE_LIMIT:
             # Read only the first 512KB and warn
             with p.open("rb") as fh:
                 raw = fh.read(_READ_SIZE_LIMIT)
+            # P14D-READ-3: decode with errors="replace" to handle non-UTF-8 text
             text = raw.decode("utf-8", errors="replace")
             return text + f"\n\n... (file truncated: read {_READ_SIZE_LIMIT} of {file_size} bytes)"
-        return p.read_text(encoding="utf-8")
+
+        # P14D-READ-3: use errors="replace" so Latin-1/Windows-1252 files don't crash
+        return p.read_text(encoding="utf-8", errors="replace")
     except Exception as e:
         return f"Error reading file: {e}"
 
@@ -289,6 +360,10 @@ def tool_write(file_path: str, content: str) -> str:
     自動建立不存在的父目錄（mkdir -p），簡化 agent 的操作步驟。
     寫入大小限制 10MB：防止寫入過大檔案耗盡磁碟。
     原子寫入：先寫入 .tmp 再 rename，防止部分寫入導致檔案損毀。
+
+    P14D-WRITE-1: If the target file already exists its mode bits (permissions)
+    are preserved across the atomic replace.  Without this, every Write call
+    would silently reset a chmod +x script to 0o600, breaking executables.
     """
     _WRITE_SIZE_LIMIT = 10 * 1024 * 1024  # 10 MB
 
@@ -300,9 +375,24 @@ def tool_write(file_path: str, content: str) -> str:
     try:
         p = Path(file_path)
         p.parent.mkdir(parents=True, exist_ok=True)
+        # P14D-WRITE-1: capture existing permissions before overwriting
+        existing_mode = None
+        if p.exists():
+            try:
+                existing_mode = p.stat().st_mode
+            except Exception:
+                pass
         # Atomic write: write to .tmp then rename to avoid partial-write corruption
         tmp = p.with_suffix(p.suffix + ".tmp")
         tmp.write_text(content, encoding="utf-8")
+        # Restore permissions on the tmp file before renaming so the final
+        # file inherits the original mode atomically.
+        if existing_mode is not None:
+            try:
+                import os as _os
+                _os.chmod(tmp, existing_mode)
+            except Exception:
+                pass
         tmp.rename(p)  # POSIX rename() is atomic
         return f"Written: {file_path}"
     except Exception as e:
@@ -314,6 +404,17 @@ def tool_edit(file_path: str, old_string: str, new_string: str) -> str:
     在檔案中找到 old_string 並替換為 new_string（只替換第一個出現的位置）。
     若 old_string 不存在則回傳錯誤，讓 agent 知道需要先確認內容再修改。
     原子寫入：先寫入 .tmp 再 rename，防止部分寫入導致檔案損毀。
+
+    P14D-EDIT-1: If old_string appears more than once in the file the LLM is
+    warned about the ambiguity so it can provide a longer, unique context
+    string.  Previously the first occurrence was silently replaced, which could
+    corrupt the wrong section of the file.
+
+    P14D-EDIT-2: File permissions are preserved across the atomic replace, for
+    the same reason as tool_write (P14D-WRITE-1).
+
+    P14D-EDIT-3: Files that cannot be decoded as UTF-8 are read with
+    errors="replace" so the function does not crash on Latin-1 files.
     """
     _WRITE_SIZE_LIMIT = 10 * 1024 * 1024  # 10 MB
 
@@ -322,16 +423,37 @@ def tool_edit(file_path: str, old_string: str, new_string: str) -> str:
         return err
     try:
         p = Path(file_path)
-        content = p.read_text(encoding="utf-8")
+        # P14D-EDIT-3: tolerate non-UTF-8 files
+        content = p.read_text(encoding="utf-8", errors="replace")
         if old_string not in content:
             return f"Error: old_string not found in {file_path}"
+        # P14D-EDIT-1: warn if old_string appears multiple times to prevent
+        # the LLM from inadvertently editing the wrong occurrence
+        count = content.count(old_string)
+        if count > 1:
+            return (
+                f"Error: old_string appears {count} times in {file_path}. "
+                "Provide a longer, unique context string that matches exactly one location."
+            )
         # replace(..., 1) 確保只替換第一個出現的位置，避免意外修改多處
         new_content = content.replace(old_string, new_string, 1)
         if len(new_content.encode("utf-8")) > _WRITE_SIZE_LIMIT:
             return f"Error: resulting file too large (> 10MB limit)"
+        # P14D-EDIT-2: preserve existing file permissions
+        existing_mode = None
+        try:
+            existing_mode = p.stat().st_mode
+        except Exception:
+            pass
         # Atomic write: write to .tmp then rename
         tmp = p.with_suffix(p.suffix + ".tmp")
         tmp.write_text(new_content, encoding="utf-8")
+        if existing_mode is not None:
+            try:
+                import os as _os
+                _os.chmod(tmp, existing_mode)
+            except Exception:
+                pass
         tmp.rename(p)  # POSIX rename() is atomic
         return f"Edited: {file_path}"
     except Exception as e:
@@ -588,21 +710,52 @@ def tool_glob(pattern: str, path: str = WORKSPACE) -> str:
     在指定目錄下尋找符合 glob 模式的檔案（支援 ** 遞迴搜尋）。
     例如 pattern="**/*.py" 可找出所有 Python 檔案。
     結果最多回傳 1000 個，超過部分截斷並警告。
+
+    P14D-GLOB-1: A ``**`` pattern on a very deep directory tree (e.g. a
+    node_modules tree with hundreds of thousands of files) can run for many
+    seconds and block the entire agent loop.  We run the glob in a background
+    thread and enforce a 30-second wall-clock timeout via threading.Event so
+    the agent is not blocked indefinitely.
     """
     _GLOB_MAX_RESULTS = 1000
+    _GLOB_TIMEOUT_SECS = 30
 
-    try:
-        search_path = os.path.join(path, pattern)
-        matches = _glob_module.glob(search_path, recursive=True)
-        if not matches:
-            return f"No files found matching: {pattern} in {path}"
-        matches_sorted = sorted(matches)
-        if len(matches_sorted) > _GLOB_MAX_RESULTS:
-            truncated = len(matches_sorted) - _GLOB_MAX_RESULTS
-            return "\n".join(matches_sorted[:_GLOB_MAX_RESULTS]) + f"\n... ({truncated} more results not shown — refine your pattern)"
-        return "\n".join(matches_sorted)
-    except Exception as e:
-        return f"Error: {e}"
+    import threading as _threading
+
+    _result_holder: list = []
+    _exc_holder: list = []
+
+    def _do_glob() -> None:
+        try:
+            search_path = os.path.join(path, pattern)
+            _result_holder.append(_glob_module.glob(search_path, recursive=True))
+        except Exception as exc:
+            _exc_holder.append(exc)
+
+    t = _threading.Thread(target=_do_glob, daemon=True)
+    t.start()
+    t.join(timeout=_GLOB_TIMEOUT_SECS)
+
+    if t.is_alive():
+        # Thread is still running — glob timed out
+        _log("⚠️ GLOB-TIMEOUT", f"glob pattern={pattern!r} path={path!r} timed out after {_GLOB_TIMEOUT_SECS}s")
+        return (
+            f"Error: glob timed out after {_GLOB_TIMEOUT_SECS}s — "
+            "the pattern matched too many files or the directory tree is too deep. "
+            "Narrow the pattern or reduce the search path."
+        )
+
+    if _exc_holder:
+        return f"Error: {_exc_holder[0]}"
+
+    matches = _result_holder[0] if _result_holder else []
+    if not matches:
+        return f"No files found matching: {pattern} in {path}"
+    matches_sorted = sorted(matches)
+    if len(matches_sorted) > _GLOB_MAX_RESULTS:
+        truncated = len(matches_sorted) - _GLOB_MAX_RESULTS
+        return "\n".join(matches_sorted[:_GLOB_MAX_RESULTS]) + f"\n... ({truncated} more results not shown — refine your pattern)"
+    return "\n".join(matches_sorted)
 
 
 def tool_grep(pattern: str, path: str = WORKSPACE, include: str = "*") -> str:
@@ -774,10 +927,27 @@ def tool_web_fetch(url: str) -> str:
             raw_bytes = resp.read(_WEB_FETCH_RAW_LIMIT)
             # Check for binary bytes in first 512 bytes (null bytes etc.)
             _sample = raw_bytes[:512]
-            if b"\x00" in _sample or sum(b > 127 for b in _sample) > len(_sample) * 0.3:
+            if b"\x00" in _sample or (len(_sample) > 0 and sum(b > 127 for b in _sample) > len(_sample) * 0.3):
                 return "Error: response appears to be binary content — WebFetch only supports text"
 
-        raw = raw_bytes.decode("utf-8", errors="replace")
+        # P14D-WF-CHARSET: extract charset from Content-Type header and use it
+        # for decoding, falling back to UTF-8.  Servers frequently return pages
+        # encoded in Latin-1 or Windows-1252 with the charset declared in the
+        # header (e.g. "text/html; charset=iso-8859-1").  Ignoring the declared
+        # charset and always decoding as UTF-8 produces replacement characters
+        # that corrupt the extracted text.
+        import re as _re_ct
+        _charset = "utf-8"
+        _ct_charset_match = _re_ct.search(r'charset=["\']?([A-Za-z0-9_\-]+)', content_type, _re_ct.IGNORECASE)
+        if _ct_charset_match:
+            _declared = _ct_charset_match.group(1).lower()
+            # Normalise common aliases
+            _charset = _declared if _declared else "utf-8"
+        try:
+            raw = raw_bytes.decode(_charset, errors="replace")
+        except (LookupError, UnicodeDecodeError):
+            # Unknown charset name — fall back to UTF-8
+            raw = raw_bytes.decode("utf-8", errors="replace")
 
         if "html" in _ct_lower or raw.lstrip().startswith("<"):
             extractor = _HTMLTextExtractor()
