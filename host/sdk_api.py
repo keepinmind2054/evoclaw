@@ -163,6 +163,11 @@ class SdkApi:
         remote = getattr(websocket, "remote_address", "unknown")
         logger.info(f"SdkApi: client connected from {remote}")
 
+        # BUG-SDK-01 (CRITICAL): Auth was checked per-message — an unauthenticated
+        # client received an error reply but the loop continued, allowing
+        # unlimited retry attempts without disconnecting.  Authenticate once on
+        # the first message and close the socket on failure.
+        _authenticated = not bool(self._token)  # True when no token required
         try:
             async for raw in websocket:
                 try:
@@ -171,10 +176,15 @@ class SdkApi:
                     await self._send_error(websocket, "invalid_json", "Invalid JSON")
                     continue
 
-                # Optional authentication
-                if self._token and msg.get("token") != self._token:
-                    await self._send_error(websocket, "unauthorized", "Invalid or missing token")
-                    continue
+                if not _authenticated:
+                    if msg.get("token") != self._token:
+                        await self._send_error(websocket, "unauthorized", "Invalid or missing token")
+                        await websocket.close()
+                        return
+                    _authenticated = True
+                    # Strip token from msg before dispatching to handlers so it
+                    # is not accidentally echoed back in error responses.
+                    msg.pop("token", None)
 
                 await self._dispatch(websocket, msg)
 
@@ -200,7 +210,12 @@ class SdkApi:
         """Query memories for an agent."""
         query = msg.get("query", "")
         agent_id = msg.get("agent_id", "")
-        k = int(msg.get("k", 5))
+        # BUG-SDK-02 (MEDIUM): Unbounded `k` allows a client to request
+        # millions of results, exhausting memory.  Cap at 100.
+        try:
+            k = max(1, min(int(msg.get("k", 5)), 100))
+        except (TypeError, ValueError):
+            k = 5
         project = msg.get("project", "")
 
         if not query or not agent_id:
@@ -227,7 +242,15 @@ class SdkApi:
                 "count": len(memories),
             }))
         except Exception as e:
-            await self._send_error(websocket, "memory_error", str(e))
+            # BUG-SDK-03 (MEDIUM): Exception message leaked verbatim — may
+            # contain internal paths or DB schema.  Log the full error
+            # server-side; return only a generic message to the client.
+            logger.error("SdkApi: memory_query error: %s", e, exc_info=True)
+            await self._send_error(websocket, "memory_error", "Internal error during memory query")
+
+    # BUG-SDK-04 (HIGH): No size limit on memory write content — an attacker
+    # can write multi-MB strings and exhaust memory / disk.
+    _MAX_MEMORY_CONTENT = 64 * 1024  # 64 KB
 
     async def _handle_memory_write(self, websocket, msg: dict):
         """Write a memory entry."""
@@ -235,10 +258,22 @@ class SdkApi:
         agent_id = msg.get("agent_id", "")
         scope = msg.get("scope", "shared")
         project = msg.get("project", "")
-        importance = float(msg.get("importance", 0.5))
+        # BUG-SDK-02 (MEDIUM): importance not validated / clamped.
+        try:
+            importance = max(0.0, min(1.0, float(msg.get("importance", 0.5))))
+        except (TypeError, ValueError):
+            importance = 0.5
 
         if not content or not agent_id:
             await self._send_error(websocket, "missing_params", "content and agent_id required")
+            return
+
+        # BUG-SDK-04 (HIGH): Enforce content size limit.
+        if len(content) > self._MAX_MEMORY_CONTENT:
+            await self._send_error(
+                websocket, "content_too_large",
+                f"Content exceeds {self._MAX_MEMORY_CONTENT} byte limit"
+            )
             return
 
         try:
@@ -252,7 +287,9 @@ class SdkApi:
                 "scope": scope,
             }))
         except Exception as e:
-            await self._send_error(websocket, "memory_error", str(e))
+            # BUG-SDK-03 (MEDIUM): Do not leak internal error detail.
+            logger.error("SdkApi: memory_write error: %s", e, exc_info=True)
+            await self._send_error(websocket, "memory_error", "Internal error during memory write")
 
     async def _handle_agent_list(self, websocket, msg: dict):
         """List all known agents."""
@@ -303,6 +340,9 @@ class SdkApi:
         except Exception as e:
             await self._send_error(websocket, "status_error", str(e))
 
+    # BUG-SDK-05 (HIGH): No size limit on task message content.
+    _MAX_TASK_MESSAGE = 32 * 1024  # 32 KB
+
     async def _handle_task_submit(self, websocket, msg: dict):
         """Submit a task to a group (if callback registered)."""
         group = msg.get("group", "")
@@ -312,12 +352,22 @@ class SdkApi:
             await self._send_error(websocket, "missing_params", "group and message required")
             return
 
+        # BUG-SDK-05 (HIGH): Enforce message size limit.
+        if len(message) > self._MAX_TASK_MESSAGE:
+            await self._send_error(
+                websocket, "message_too_large",
+                f"Message exceeds {self._MAX_TASK_MESSAGE} byte limit"
+            )
+            return
+
         if self._task_submit_callback:
             try:
                 task_id = await self._task_submit_callback(group, message)
                 await websocket.send(json.dumps({"type": "task_ack", "task_id": task_id, "group": group}))
             except Exception as e:
-                await self._send_error(websocket, "task_error", str(e))
+                # BUG-SDK-03 (MEDIUM): Do not leak internal error detail.
+                logger.error("SdkApi: task_submit error: %s", e, exc_info=True)
+                await self._send_error(websocket, "task_error", "Internal error during task submission")
         else:
             await self._send_error(websocket, "not_configured", "Task submission not configured")
 

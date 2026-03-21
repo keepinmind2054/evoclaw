@@ -24,10 +24,27 @@ class JsonFormatter(logging.Formatter):
     # (they're either rendered explicitly or are internal Python logging state)
     _SKIP = frozenset({
         "args", "created", "exc_info", "exc_text", "filename",
-        "funcName", "levelno", "lineno", "message", "module",
+        "funcName", "levelno", "levelname",  # BUG-LF-01: levelname rendered as "level" below
+        "lineno", "message", "module",
         "msecs", "msg", "name", "pathname", "process",
         "processName", "relativeCreated", "stack_info", "taskName",
         "thread", "threadName",
+        # BUG-LF-02 (HIGH): asctime should be skipped — it is only present
+        # when a previous Formatter has already called formatTime(), and if
+        # copied it duplicates the timestamp under a different key name.
+        "asctime",
+    })
+
+    # BUG-LF-03 (HIGH): Any extra= field is blindly forwarded to the JSON
+    # output.  A developer passing extra={"token": "sk-...", "api_key": ...}
+    # would leak secrets into structured logs (and any log shipper).
+    # Maintain a denylist of well-known sensitive field names that must never
+    # appear in emitted log records.
+    _SENSITIVE_KEYS = frozenset({
+        "token", "api_key", "apikey", "secret", "password", "passwd",
+        "credential", "auth", "authorization", "bearer",
+        "telegram_bot_token", "whatsapp_token", "discord_bot_token",
+        "slack_bot_token", "claude_api_key", "openai_api_key",
     })
 
     def format(self, record: logging.LogRecord) -> str:
@@ -44,8 +61,14 @@ class JsonFormatter(logging.Formatter):
 
         # Copy any extra= fields (run_id, jid, folder, etc.)
         for key, value in record.__dict__.items():
-            if key not in self._SKIP and not key.startswith("_"):
-                obj[key] = value
+            if key in self._SKIP or key.startswith("_"):
+                continue
+            # BUG-LF-03 (HIGH): Suppress sensitive keys to prevent secret
+            # exfiltration via structured logging pipelines.
+            if key.lower() in self._SENSITIVE_KEYS:
+                obj[key] = "***REDACTED***"
+                continue
+            obj[key] = value
 
         # Append exception traceback if present
         if record.exc_info:
