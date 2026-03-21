@@ -50,42 +50,57 @@ def rebase(project_root: Path | None = None) -> RebaseResult:
         tracked_files.extend(s.file_hashes.keys())
     tracked_files = list(dict.fromkeys(tracked_files))  # deduplicate, preserve order
 
-    # Generate custom patch (current vs base)
-    custom_dir = root / CUSTOM_DIR
-    custom_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    patch_filename = f"{ts}_rebase.patch"
-    patch_path = custom_dir / patch_filename
-
-    base_dir = root / BASE_DIR
-    files_in_patch = 0
-
-    # Diff current files vs base using difflib (cross-platform, no 'diff' binary needed)
-    patch_lines = []
-    for rel_path in tracked_files:
-        current_path = root / rel_path
-        base_path = base_dir / rel_path
-        if not current_path.exists() or not base_path.exists():
-            continue
-        try:
-            base_lines = base_path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
-            current_lines = current_path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
-            diff_result = list(difflib.unified_diff(
-                base_lines, current_lines,
-                fromfile=str(base_path),
-                tofile=str(current_path),
-            ))
-            if diff_result:
-                patch_lines.append("".join(diff_result))
-                files_in_patch += 1
-        except Exception:
-            pass
-
-    patch_content = "\n".join(patch_lines)
-    patch_path.write_text(patch_content, encoding="utf-8")
-
+    # BUG-FIX: acquire the lock BEFORE generating the patch and replaying so
+    # that we hold it across the entire read-modify-write sequence.  Previously
+    # the patch was written to disk before the lock was acquired, which meant
+    # another process could mutate skills between the patch snapshot and the
+    # replay, leaving the working tree in an inconsistent state.
     lock = acquire_lock()
     try:
+        # Generate custom patch (current vs base) while holding the lock
+        custom_dir = root / CUSTOM_DIR
+        custom_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        patch_filename = f"{ts}_rebase.patch"
+        patch_path = custom_dir / patch_filename
+
+        base_dir = root / BASE_DIR
+        files_in_patch = 0
+
+        # Diff current files vs base using difflib (cross-platform, no 'diff' binary needed)
+        patch_lines = []
+        for rel_path in tracked_files:
+            current_path = root / rel_path
+            base_path = base_dir / rel_path
+            if not current_path.exists() or not base_path.exists():
+                continue
+            # BUG-FIX: detect binary files and skip them rather than silently
+            # corrupting the patch with replacement characters.
+            try:
+                base_bytes = base_path.read_bytes()
+                current_bytes = current_path.read_bytes()
+                if _is_binary(base_bytes) or _is_binary(current_bytes):
+                    continue
+                base_lines = base_bytes.decode("utf-8").splitlines(keepends=True)
+                current_lines = current_bytes.decode("utf-8").splitlines(keepends=True)
+            except (UnicodeDecodeError, OSError):
+                # Treat unreadable files as binary — skip
+                continue
+            try:
+                diff_result = list(difflib.unified_diff(
+                    base_lines, current_lines,
+                    fromfile=str(base_path),
+                    tofile=str(current_path),
+                ))
+                if diff_result:
+                    patch_lines.append("".join(diff_result))
+                    files_in_patch += 1
+            except Exception:
+                pass
+
+        patch_content = "\n".join(patch_lines)
+        patch_path.write_text(patch_content, encoding="utf-8")
+
         # Replay all skills from base
         options = ReplayOptions(
             skills=[s.name for s in applied],
@@ -136,3 +151,8 @@ def rebase(project_root: Path | None = None) -> RebaseResult:
 
     finally:
         lock.release()
+
+
+def _is_binary(data: bytes, sample_size: int = 8192) -> bool:
+    """Heuristic: a file is binary if it contains a NUL byte in the first sample."""
+    return b"\x00" in data[:sample_size]

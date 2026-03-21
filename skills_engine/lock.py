@@ -20,6 +20,11 @@ def _is_process_alive(pid: int) -> bool:
         return True
     except (ProcessLookupError, PermissionError):
         return False
+    except OSError:
+        # BUG-FIX: on Windows os.kill raises OSError for non-existent PIDs
+        # rather than ProcessLookupError.  Treat any OSError as "not alive" so
+        # that stale lock files created on Windows are correctly evicted.
+        return False
 
 
 def _is_stale(lock: dict) -> bool:

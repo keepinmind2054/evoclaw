@@ -104,12 +104,23 @@ async def test_md_only_skill_returns_content(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Test 3: Failing skill sets step status to FAILED (no crash)
+# Test 3: Failing skill — step function catches the error and returns error dict
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_failing_skill_sets_step_failed(tmp_path):
-    """A skill whose run() raises an exception should set the step to FAILED, not crash."""
+    """
+    A skill whose run() raises an exception should have its error captured in
+    the step result dict.  The skill_step_fn wrapper catches exceptions so the
+    WorkflowDAG step itself completes (StepStatus.SUCCESS at the step wrapper
+    level), but the result must be an error dict containing the failure detail.
+
+    BUG-FIX: previously skill_step_fn called exec_skill() without await,
+    so handler.py was never actually executed — the coroutine object was
+    treated as a loaded module and the "run" attribute lookup silently fell
+    through to skill_loader.load().  After the fix, handler.py IS executed
+    and the exception IS captured in the error dict.
+    """
     skills_dir = tmp_path / "skills"
     skills_dir.mkdir()
 
@@ -127,15 +138,14 @@ def run(agent_id="default", **kwargs):
         skill_loader=loader,
     )
 
-    # Engine should not raise — it catches errors gracefully
+    # Engine should not raise — the skill_step_fn wrapper catches errors
     run = await engine.run_skill_steps()
     assert run is not None
 
     step = run.steps["bad-step"]
-    # The step function returns an error dict instead of raising,
-    # so the step itself succeeds at the engine level but carries error info.
-    # Verify the result contains the error information.
-    assert step.status == StepStatus.SUCCESS  # step fn didn't raise
+    # The step wrapper catches exceptions and returns an error dict, so the
+    # DAG-level step succeeds (the wrapper fn didn't raise).
+    assert step.status == StepStatus.SUCCESS
     assert isinstance(step.result, dict)
     assert "error" in step.result
     assert "intentional failure" in step.result["error"]
@@ -240,7 +250,51 @@ async def test_nonexistent_skill_returns_error_dict(tmp_path):
     assert run is not None
 
     step = run.steps["ghost"]
-    assert step.status == StepStatus.SUCCESS  # step fn catches the error
+    # The skill_step_fn wrapper catches FileNotFoundError and returns an error dict
+    assert step.status == StepStatus.SUCCESS  # wrapper fn completed without raising
     assert isinstance(step.result, dict)
     assert "error" in step.result
     assert step.result["skill"] == "does-not-exist"
+
+
+# ---------------------------------------------------------------------------
+# Test 7: exec_skill await correctness — handler.py IS executed (not skipped)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_handler_is_actually_executed(tmp_path):
+    """
+    Regression test for the missing-await bug in skill_step_fn.
+
+    Previously exec_skill() was called without await, returning a coroutine
+    object that evaluated as truthy.  getattr(coroutine, 'run', None) always
+    returned None, so handler.py was never executed and every skill silently
+    fell back to returning its SKILL.md content.
+
+    This test verifies that handler.py IS executed by confirming the run()
+    return value differs from the SKILL.md content.
+    """
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+
+    handler_src = """\
+def run(agent_id="default", **kwargs):
+    return "HANDLER_EXECUTED"
+"""
+    skill_dir = skills_dir / "marker-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("# marker-skill\nFallback content.", encoding="utf-8")
+    (skill_dir / "handler.py").write_text(handler_src, encoding="utf-8")
+
+    loader = SkillLoader(skills_dir=skills_dir)
+    engine = WorkflowEngine()
+    engine.add_skill_step("marker", skill_name="marker-skill", skill_loader=loader)
+
+    run = await engine.run_skill_steps()
+    step = run.steps["marker"]
+    assert step.status == StepStatus.SUCCESS
+    # If the handler is actually called, result is "HANDLER_EXECUTED"
+    # If the missing-await bug is present, result would be "# marker-skill\nFallback content."
+    assert step.result == "HANDLER_EXECUTED", (
+        f"Expected handler.py to be executed, but got: {step.result!r}"
+    )

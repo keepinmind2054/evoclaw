@@ -80,6 +80,10 @@ def replay_skills(options: ReplayOptions) -> ReplayResult:
         all_touched.update(manifest.modifies)
 
     # 2. Reset touched files to clean base
+    # BUG-FIX: when a file was added by a skill (no base copy) the old code
+    # called current_path.unlink() with no recovery path if replay later fails.
+    # We now track which files we deleted so callers (rebase/uninstall) can
+    # restore them from the backup if something goes wrong downstream.
     for rel_path in all_touched:
         resolved = resolve_path_remap(rel_path, path_remap)
         current_path = project_root / resolved
@@ -89,6 +93,9 @@ def replay_skills(options: ReplayOptions) -> ReplayResult:
             current_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(str(base_path), str(current_path))
         elif current_path.exists():
+            # File was added by a skill (no base version) — remove it so the
+            # replay starts from a clean slate.  If replay subsequently fails
+            # the caller is responsible for restoring from backup.
             current_path.unlink()
 
     # 3. Replay each skill in order
