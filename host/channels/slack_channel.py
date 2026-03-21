@@ -25,6 +25,11 @@ class SlackChannel:
         # Cached workspace ID resolved once at connect() — avoids an auth_test()
         # API round-trip on every single incoming message.
         self._workspace_id: str = "unknown"
+        # FIX(p13c-SL-1): cache the bot's own user ID at connect() so we can
+        # reliably detect and ignore messages the bot itself posts.  Without
+        # this, the "subtype=bot_message" guard misses messages posted by the
+        # bot via certain Slack SDK paths that do not set the subtype field.
+        self._bot_user_id: Optional[str] = None
 
         env = read_env_file(["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"])
         self._bot_token = env.get("SLACK_BOT_TOKEN", "")
@@ -49,12 +54,16 @@ class SlackChannel:
 
         self._app = AsyncApp(token=self._bot_token)
 
-        # Resolve and cache workspace_id once at startup — avoids an auth_test()
-        # API call on every incoming message which would hit Slack rate limits.
+        # Resolve and cache workspace_id and bot user_id once at startup.
         try:
             auth_info = await self._app.client.auth_test()
             self._workspace_id = auth_info.get("team_id", "unknown")
-            log.info("Slack workspace ID resolved: %s", self._workspace_id)
+            # FIX(p13c-SL-1): store the bot's own user_id for self-message detection.
+            self._bot_user_id = auth_info.get("user_id")
+            log.info(
+                "Slack workspace ID resolved: %s, bot user_id: %s",
+                self._workspace_id, self._bot_user_id,
+            )
         except Exception as exc:
             log.warning("Slack auth_test() failed at connect: %s — using 'unknown'", exc)
 
@@ -64,12 +73,34 @@ class SlackChannel:
             if subtype in ("bot_message", "message_changed", "message_deleted"):
                 return
 
+            # FIX(p13c-SL-1): also skip messages from the bot's own user ID
+            # regardless of subtype, preventing bot-message feedback loops when
+            # the Slack SDK does not set the subtype for bot-originated posts.
+            user_id = event.get("user", "")
+            if self._bot_user_id and user_id == self._bot_user_id:
+                return
+
             text = event.get("text", "")
             if not text:
                 return
 
+            # FIX(p13c-SL-2): strip Slack mrkdwn @mention tags (e.g. <@U12345>)
+            # from the start of the message before trigger matching, mirroring
+            # Discord's normalization logic.  Without this, a Slack @mention
+            # of the bot arrives as "<@U12345> hello" which never matches
+            # TRIGGER_PATTERN (anchored at "^@AssistantName\b").
+            import re as _re
+            # Normalize bot @mention to the configured trigger word
+            if self._bot_user_id and f"<@{self._bot_user_id}>" in text:
+                normalized = _re.sub(rf"<@{_re.escape(self._bot_user_id)}>", "", text).strip()
+                # Strip any remaining mention tags
+                normalized = _re.sub(r"<@[A-Z0-9]+>", "", normalized).strip()
+                text = f"@{config.ASSISTANT_NAME} {normalized}".strip()
+            else:
+                # Strip leading mention syntax that could break TRIGGER_PATTERN.match()
+                text = _re.sub(r"^(<@[A-Z0-9]+>\s*)+", "", text).strip()
+
             channel_id = event.get("channel", "")
-            user_id = event.get("user", "")
 
             # Use cached workspace_id resolved once at connect()
             workspace_id = self._workspace_id
@@ -94,14 +125,23 @@ class SlackChannel:
             except Exception:
                 pass
 
-            await self._on_message(
-                jid=jid,
-                sender=user_id,
-                sender_name=sender_name,
-                content=text,
-                is_group=True,
-                channel="slack",
-            )
+            # FIX(p13c-SL-3): wrap pipeline call in try/except to prevent
+            # unhandled exceptions from propagating into slack-bolt's event
+            # dispatcher and silently dropping the message.
+            try:
+                await self._on_message(
+                    jid=jid,
+                    sender=user_id,
+                    sender_name=sender_name,
+                    content=text,
+                    is_group=True,
+                    channel="slack",
+                )
+            except Exception as exc:
+                log.error(
+                    "Slack handle_message: unhandled exception in _on_message for jid=%s: %s",
+                    jid, exc, exc_info=True,
+                )
 
         self._handler = AsyncSocketModeHandler(self._app, self._app_token)
         await self._handler.start_async()
@@ -117,6 +157,13 @@ class SlackChannel:
             log.warning("Slack invalid JID: %s", jid)
             return
         channel_id = parts[2]
+
+        # FIX(p13c-SL-4): Slack's text message API rejects empty strings with a
+        # "no_text" error.  Guard against empty text to avoid spurious API errors.
+        if not text:
+            log.debug("Slack send_message: empty text for jid=%s — skipping", jid)
+            return
+
         try:
             await self._app.client.chat_postMessage(channel=channel_id, text=text)
         except Exception as exc:

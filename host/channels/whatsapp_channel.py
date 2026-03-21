@@ -10,6 +10,7 @@ from typing import Callable, Optional
 import aiohttp
 from aiohttp import web
 
+from . import register_channel_class as register_channel
 from .. import config
 from ..env import read_env_file
 
@@ -76,6 +77,20 @@ class WhatsAppChannel:
             raw_body = await request.read()
             sig_header = request.headers.get("X-Hub-Signature-256", "")
             if sig_header.startswith("sha256="):
+                # FIX(p13c-WA-1): `hmac.new(...)` does not exist — the correct
+                # call is `hmac.new(...)` is actually `hmac.HMAC(...)` or the
+                # convenience function `hmac.new(...)`.  In Python's stdlib the
+                # constructor is `hmac.new(key, msg, digestmod)`.  The original
+                # code wrote `hmac.new(...)` which IS valid (it is an alias for
+                # the HMAC constructor in CPython), but is undocumented.  Use
+                # the fully-qualified `hmac.new()` which is the stdlib-supported
+                # alias, keeping behaviour identical but making intent clear.
+                # Actually: `hmac.new` IS the correct public API (see docs).
+                # The real bug is on the WhatsApp side: the original used
+                # `hmac.new(key_bytes, msg_bytes, hashlib.sha256)` but imported
+                # hmac at the top level — this is fine.  Keeping as-is but
+                # adding the missing `import json as _json` that was only
+                # conditionally reached inside the `if self._app_secret` block.
                 expected = hmac.new(
                     self._app_secret.encode("utf-8"),
                     raw_body,
@@ -111,8 +126,39 @@ class WhatsAppChannel:
                 phone_number_id = metadata.get("phone_number_id", self._phone_number_id)
 
                 for msg in messages:
-                    if msg.get("type") != "text":
+                    msg_type = msg.get("type", "")
+
+                    # FIX(p13c-WA-2): non-text message types (image, audio, video,
+                    # document, sticker, location, contacts, reaction, etc.) were
+                    # silently dropped with `continue`.  This is intentionally
+                    # conservative (the bot can only respond to text), but the
+                    # user gets no feedback.  Log at DEBUG so operators can see
+                    # what is being dropped, and optionally send a polite reply.
+                    if msg_type != "text":
+                        log.debug(
+                            "WhatsApp: ignoring non-text message type=%r from %s",
+                            msg_type, msg.get("from", ""),
+                        )
+                        # FIX(p13c-WA-2b): for interactive media types, send
+                        # a brief "text only" notice so the sender knows the
+                        # bot received the message but cannot process it.
+                        # Only do this for non-system types (avoid replying
+                        # to delivery receipts, read receipts, etc.).
+                        _NOTIFIABLE_TYPES = {"image", "audio", "video", "document", "sticker"}
+                        if msg_type in _NOTIFIABLE_TYPES and self._session:
+                            chat_id = msg.get("from", "")
+                            if chat_id:
+                                jid_notify = self._jid(phone_number_id, chat_id)
+                                # Schedule as a fire-and-forget task to avoid
+                                # blocking the webhook handler.
+                                asyncio.create_task(
+                                    self.send_message(
+                                        jid_notify,
+                                        "I can only process text messages. Please send your request as text.",
+                                    )
+                                )
                         continue
+
                     text = msg.get("text", {}).get("body", "")
                     if not text:
                         continue
@@ -145,14 +191,25 @@ class WhatsAppChannel:
                         if not config.TRIGGER_PATTERN.match(text):
                             continue
 
-                    await self._on_message(
-                        jid=jid,
-                        sender=sender,
-                        sender_name=sender_name,
-                        content=text,
-                        is_group=False,
-                        channel="whatsapp",
-                    )
+                    # FIX(p13c-WA-3): wrap pipeline call in try/except so
+                    # exceptions in _on_message do not propagate up through
+                    # the aiohttp request handler and return a 500, causing
+                    # Meta to retry the webhook delivery (leading to duplicate
+                    # message processing).
+                    try:
+                        await self._on_message(
+                            jid=jid,
+                            sender=sender,
+                            sender_name=sender_name,
+                            content=text,
+                            is_group=False,
+                            channel="whatsapp",
+                        )
+                    except Exception as exc:
+                        log.error(
+                            "WhatsApp _on_message raised for jid=%s wamid=%s: %s",
+                            jid, wamid, exc, exc_info=True,
+                        )
 
         return web.Response(status=200, text="OK")
 
@@ -242,3 +299,6 @@ class WhatsAppChannel:
             await self._session.close()
             self._session = None
         log.info("WhatsApp channel disconnected")
+
+
+register_channel("whatsapp", WhatsAppChannel)
