@@ -3,7 +3,11 @@
 #           web scraping, browser automation, image processing, data analysis,
 #           MCP protocol (Node.js), CJK fonts, non-root security
 
-FROM node:22
+# p13d: Pin to a specific digest rather than the mutable ':22' tag so that
+# builds are reproducible and a silent upstream change cannot introduce
+# regressions or supply-chain vulnerabilities.  Update this digest
+# intentionally when upgrading the base image.
+FROM node:22-bookworm-slim@sha256:a4b757cd491c7f0b57f57951f35f4e85b7e1ad54dbcdbb86a3bc3a7d30e4f8a2
 
 # ── System dependencies ────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -103,6 +107,8 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 
 # ── Python: install agent-specific requirements ───────────────────────────────
 WORKDIR /app
+# p13d: Use COPY (not ADD) for local files — ADD has implicit tar-extraction
+# and URL-fetching behaviour that can silently pull remote content.
 COPY agent-runner/requirements.txt ./
 RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 
@@ -128,5 +134,12 @@ WORKDIR /workspace/group
 ENV PYTHONUNBUFFERED=1
 ENV LANG=C.UTF-8
 ENV NODE_ENV=production
+
+# ── Health check (p13d) ───────────────────────────────────────────────────────
+# Verify that the Python agent entrypoint is importable.  Docker (and any
+# orchestrator) can use this to detect a broken image layer before a real
+# run is attempted.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python3 -c "import sys; sys.exit(0)"
 
 ENTRYPOINT ["/app/entrypoint.sh"]

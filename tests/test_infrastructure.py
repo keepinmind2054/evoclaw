@@ -280,64 +280,84 @@ class TestWebportal:
 # ── Fix #5: Container runner circuit breaker ──────────────────────────────────
 
 class TestDockerCircuitBreaker:
+    # p13d fix: _docker_failures is a dict keyed by group_folder, not a plain
+    # int.  All tests must use the per-group API (_record_docker_failure takes
+    # an optional group_folder argument that defaults to "_global").
+    _GROUP = "_global"
+
     def setup_method(self):
-        """Reset circuit breaker state before each test."""
+        """Reset circuit breaker state for the test group before each test."""
         import host.container_runner as cr
         with cr._docker_failure_lock:
-            cr._docker_failures = 0
+            cr._docker_failures.pop(self._GROUP, None)
+            cr._docker_failure_time.pop(self._GROUP, None)
 
     def test_circuit_open_after_threshold_failures(self):
         """Circuit should open after _DOCKER_CIRCUIT_THRESHOLD failures."""
         import host.container_runner as cr
-        assert not cr._docker_circuit_open()
+        assert not cr._docker_circuit_open(self._GROUP)
 
         for _ in range(cr._DOCKER_CIRCUIT_THRESHOLD):
-            cr._record_docker_failure()
+            cr._record_docker_failure(self._GROUP)
 
-        assert cr._docker_circuit_open()
+        assert cr._docker_circuit_open(self._GROUP)
 
     def test_circuit_closed_below_threshold(self):
         """Circuit should remain closed with fewer failures than threshold."""
         import host.container_runner as cr
         for _ in range(cr._DOCKER_CIRCUIT_THRESHOLD - 1):
-            cr._record_docker_failure()
-        assert not cr._docker_circuit_open()
+            cr._record_docker_failure(self._GROUP)
+        assert not cr._docker_circuit_open(self._GROUP)
 
     def test_record_success_resets_counter(self):
         """Recording success should reset the failure counter."""
         import host.container_runner as cr
         for _ in range(cr._DOCKER_CIRCUIT_THRESHOLD):
-            cr._record_docker_failure()
-        assert cr._docker_circuit_open()
+            cr._record_docker_failure(self._GROUP)
+        assert cr._docker_circuit_open(self._GROUP)
 
-        cr._record_docker_success()
-        assert not cr._docker_circuit_open()
+        cr._record_docker_success(self._GROUP)
+        assert not cr._docker_circuit_open(self._GROUP)
 
     @pytest.mark.asyncio
-    async def test_run_container_raises_when_circuit_open(self):
-        """run_container_agent should raise RuntimeError when circuit is open."""
-        import host.container_runner as cr
-        # Force open
-        with cr._docker_failure_lock:
-            cr._docker_failures = cr._DOCKER_CIRCUIT_THRESHOLD
+    async def test_run_container_returns_error_when_circuit_open(self):
+        """run_container_agent should return an error dict when circuit is open.
 
-        group = {"jid": "test-jid", "folder": "test-folder", "is_main": False}
-        with pytest.raises(RuntimeError, match="circuit breaker open"):
-            await cr.run_container_agent(group=group, prompt="hello")
+        p13d fix: the function does NOT raise RuntimeError — it returns
+        ``{"status": "error", "error": "Docker circuit breaker open for ..."}``
+        and notifies the user.  The old test asserted a RuntimeError which
+        would never fire, making it a silent false-positive.
+        """
+        import host.container_runner as cr
+        # Force open for the test group folder
+        test_folder = "test-folder"
+        with cr._docker_failure_lock:
+            cr._docker_failures[test_folder] = cr._DOCKER_CIRCUIT_THRESHOLD
+            cr._docker_failure_time[test_folder] = time.time()
+
+        group = {"jid": "test-jid", "folder": test_folder, "is_main": False}
+        result = await cr.run_container_agent(group=group, prompt="hello")
+        assert result["status"] == "error"
+        assert "circuit breaker" in result["error"].lower()
+
+        # Cleanup
+        with cr._docker_failure_lock:
+            cr._docker_failures.pop(test_folder, None)
+            cr._docker_failure_time.pop(test_folder, None)
 
     def test_thread_safety_of_failure_counter(self):
-        """Multiple threads incrementing failures should not race."""
+        """Multiple threads incrementing failures for the same group should not race."""
         import host.container_runner as cr
         with cr._docker_failure_lock:
-            cr._docker_failures = 0
+            cr._docker_failures[self._GROUP] = 0
 
-        threads = [threading.Thread(target=cr._record_docker_failure) for _ in range(10)]
+        threads = [threading.Thread(target=cr._record_docker_failure, args=(self._GROUP,)) for _ in range(10)]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
 
-        assert cr._docker_failures == 10
+        assert cr._docker_failures[self._GROUP] == 10
 
 
 # ── Fix #4: IPC error handling ────────────────────────────────────────────────
@@ -549,11 +569,23 @@ class TestEnvKeyAllowlist:
         assert isinstance(config.EDITABLE_ENV_KEYS, frozenset)
 
     def test_editable_env_keys_contains_expected_keys(self):
-        """EDITABLE_ENV_KEYS should contain the standard configurable keys."""
+        """EDITABLE_ENV_KEYS should contain the standard configurable keys.
+
+        p13d fix: the key is ``TELEGRAM_BOT_TOKEN`` (not ``TELEGRAM_TOKEN``),
+        and ``DASHBOARD_PASSWORD`` is intentionally excluded from the editable
+        set (changing it requires an env restart).  The old assertion checked
+        for non-existent / excluded keys and would have failed against the
+        real config, masking a real misconfiguration.
+        """
         from host import config
-        for key in ("CLAUDE_API_KEY", "TELEGRAM_TOKEN", "DASHBOARD_PASSWORD",
+        for key in ("CLAUDE_API_KEY", "TELEGRAM_BOT_TOKEN",
                     "CONTAINER_IMAGE", "MAX_CONCURRENT_CONTAINERS"):
             assert key in config.EDITABLE_ENV_KEYS, f"{key} should be in EDITABLE_ENV_KEYS"
+        # DASHBOARD_PASSWORD is intentionally NOT editable via dashboard
+        assert "DASHBOARD_PASSWORD" not in config.EDITABLE_ENV_KEYS, (
+            "DASHBOARD_PASSWORD must NOT be in EDITABLE_ENV_KEYS — "
+            "password changes require an env restart to take effect."
+        )
 
     def test_env_post_rejects_disallowed_key(self):
         """Disallowed keys should produce an error string from the validation logic."""
@@ -730,3 +762,207 @@ class TestSchedulerGroupQueueRouting:
                     )
 
         assert len(created_tasks) > 0, "create_task should be called when group_queue is None"
+
+
+# ── p13d: Container security flags ────────────────────────────────────────────
+
+class TestContainerSecurityFlags:
+    """Verify that _build_docker_cmd (via run_container_agent mock path)
+    includes the mandatory security flags introduced in p13d."""
+
+    def test_safe_name_strips_path_traversal(self):
+        """_safe_name must neutralise path-traversal sequences."""
+        from host.container_runner import _safe_name
+        assert ".." not in _safe_name("../../../etc")
+        assert "/" not in _safe_name("some/folder")
+        assert _safe_name("normal_group") != ""
+
+    def test_safe_name_strips_dots_and_slashes(self):
+        """Dots and slashes must be replaced so the result is docker-name safe."""
+        from host.container_runner import _safe_name
+        result = _safe_name("../evil")
+        assert "/" not in result
+        assert "." not in result
+
+    def test_safe_name_handles_empty_input(self):
+        """Empty or all-special-char input should return a non-empty fallback."""
+        from host.container_runner import _safe_name
+        assert _safe_name("") != ""
+        assert _safe_name("...") != ""
+
+    def test_build_volume_mounts_rejects_traversal_folder(self, tmp_path):
+        """_build_volume_mounts must raise ValueError for a folder that would
+        escape the expected groups/ipc/sessions directories."""
+        from unittest.mock import patch
+        import host.container_runner as cr
+        import host.config as cfg
+
+        group = {"folder": "../../etc", "is_main": False, "jid": "tg:1"}
+
+        with patch.object(cfg, "GROUPS_DIR", tmp_path / "groups"), \
+             patch.object(cfg, "DATA_DIR", tmp_path / "data"), \
+             patch.object(cfg, "BASE_DIR", tmp_path):
+            (tmp_path / "groups").mkdir(parents=True, exist_ok=True)
+            (tmp_path / "data").mkdir(parents=True, exist_ok=True)
+            with pytest.raises(ValueError, match="path traversal"):
+                cr._build_volume_mounts(group)
+
+    @pytest.mark.asyncio
+    async def test_docker_run_includes_network_none(self, tmp_path, monkeypatch):
+        """The docker run command must include '--network none'."""
+        import host.container_runner as cr
+        import host.config as cfg
+
+        captured_cmd = []
+
+        async def fake_create_subprocess_exec(*args, **kwargs):
+            captured_cmd.extend(args)
+            mock_proc = MagicMock()
+            mock_proc.stdout = None
+            mock_proc.stderr = None
+            mock_proc.returncode = 0
+            mock_proc.wait = AsyncMock(return_value=0)
+            mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+            raise Exception("abort after capture")
+
+        monkeypatch.setattr("asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+        monkeypatch.setattr(cfg, "CONTAINER_MEMORY", "")
+        monkeypatch.setattr(cfg, "CONTAINER_CPUS", "")
+
+        groups_dir = tmp_path / "groups"
+        groups_dir.mkdir()
+        (groups_dir / "test-group").mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "ipc" / "test-group" / "messages").mkdir(parents=True)
+        (data_dir / "ipc" / "test-group" / "tasks").mkdir(parents=True)
+        (data_dir / "ipc" / "test-group" / "input").mkdir(parents=True)
+        (data_dir / "ipc" / "test-group" / "results").mkdir(parents=True)
+        (data_dir / "sessions" / "test-group" / ".claude").mkdir(parents=True)
+        (data_dir / "dynamic_tools").mkdir(parents=True)
+
+        monkeypatch.setattr(cfg, "GROUPS_DIR", groups_dir)
+        monkeypatch.setattr(cfg, "DATA_DIR", data_dir)
+
+        with patch("host.container_runner.db"), \
+             patch("host.container_runner.get_adaptive_hints", return_value=[]), \
+             patch("host.container_runner.get_genome_style_hints", return_value=[]), \
+             patch("host.container_runner.get_hot_memory", return_value=""), \
+             patch("host.container_runner._read_secrets", return_value={}), \
+             patch("host.container_runner.db.get_messages_since", return_value=[]), \
+             patch("host.container_runner.db.get_all_tasks", return_value=[]), \
+             patch("host.container_runner.db.log_container_start"), \
+             patch("host.container_runner._get_agent_id", return_value="agent-1"), \
+             patch("host.container_runner._docker_circuit_open", return_value=0):
+            try:
+                await cr.run_container_agent(
+                    group={"jid": "tg:1", "folder": "test-group", "is_main": False},
+                    prompt="hello",
+                )
+            except Exception:
+                pass  # expected — we abort after capturing the cmd
+
+        assert "--network" in captured_cmd, "docker run must include --network flag"
+        net_idx = captured_cmd.index("--network")
+        assert captured_cmd[net_idx + 1] == "none", "network must be set to 'none'"
+
+    @pytest.mark.asyncio
+    async def test_docker_run_includes_cap_drop_all(self, tmp_path, monkeypatch):
+        """The docker run command must include '--cap-drop ALL'."""
+        import host.container_runner as cr
+        import host.config as cfg
+
+        captured_cmd = []
+
+        async def fake_create_subprocess_exec(*args, **kwargs):
+            captured_cmd.extend(args)
+            raise Exception("abort after capture")
+
+        monkeypatch.setattr("asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+        monkeypatch.setattr(cfg, "CONTAINER_MEMORY", "")
+        monkeypatch.setattr(cfg, "CONTAINER_CPUS", "")
+
+        groups_dir = tmp_path / "groups"
+        groups_dir.mkdir()
+        (groups_dir / "test-group").mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "ipc" / "test-group" / "messages").mkdir(parents=True)
+        (data_dir / "ipc" / "test-group" / "tasks").mkdir(parents=True)
+        (data_dir / "ipc" / "test-group" / "input").mkdir(parents=True)
+        (data_dir / "ipc" / "test-group" / "results").mkdir(parents=True)
+        (data_dir / "sessions" / "test-group" / ".claude").mkdir(parents=True)
+        (data_dir / "dynamic_tools").mkdir(parents=True)
+
+        monkeypatch.setattr(cfg, "GROUPS_DIR", groups_dir)
+        monkeypatch.setattr(cfg, "DATA_DIR", data_dir)
+
+        with patch("host.container_runner.db"), \
+             patch("host.container_runner.get_adaptive_hints", return_value=[]), \
+             patch("host.container_runner.get_genome_style_hints", return_value=[]), \
+             patch("host.container_runner.get_hot_memory", return_value=""), \
+             patch("host.container_runner._read_secrets", return_value={}), \
+             patch("host.container_runner.db.get_messages_since", return_value=[]), \
+             patch("host.container_runner.db.get_all_tasks", return_value=[]), \
+             patch("host.container_runner.db.log_container_start"), \
+             patch("host.container_runner._get_agent_id", return_value="agent-1"), \
+             patch("host.container_runner._docker_circuit_open", return_value=0):
+            try:
+                await cr.run_container_agent(
+                    group={"jid": "tg:1", "folder": "test-group", "is_main": False},
+                    prompt="hello",
+                )
+            except Exception:
+                pass
+
+        assert "--cap-drop" in captured_cmd, "docker run must include --cap-drop flag"
+        cap_idx = captured_cmd.index("--cap-drop")
+        assert captured_cmd[cap_idx + 1] == "ALL", "--cap-drop must be ALL"
+
+    @pytest.mark.asyncio
+    async def test_docker_run_includes_pids_limit(self, tmp_path, monkeypatch):
+        """The docker run command must include '--pids-limit'."""
+        import host.container_runner as cr
+        import host.config as cfg
+
+        captured_cmd = []
+
+        async def fake_create_subprocess_exec(*args, **kwargs):
+            captured_cmd.extend(args)
+            raise Exception("abort after capture")
+
+        monkeypatch.setattr("asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+        monkeypatch.setattr(cfg, "CONTAINER_MEMORY", "")
+        monkeypatch.setattr(cfg, "CONTAINER_CPUS", "")
+
+        groups_dir = tmp_path / "groups"
+        groups_dir.mkdir()
+        (groups_dir / "test-group").mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "ipc" / "test-group" / "messages").mkdir(parents=True)
+        (data_dir / "ipc" / "test-group" / "tasks").mkdir(parents=True)
+        (data_dir / "ipc" / "test-group" / "input").mkdir(parents=True)
+        (data_dir / "ipc" / "test-group" / "results").mkdir(parents=True)
+        (data_dir / "sessions" / "test-group" / ".claude").mkdir(parents=True)
+        (data_dir / "dynamic_tools").mkdir(parents=True)
+
+        monkeypatch.setattr(cfg, "GROUPS_DIR", groups_dir)
+        monkeypatch.setattr(cfg, "DATA_DIR", data_dir)
+
+        with patch("host.container_runner.db"), \
+             patch("host.container_runner.get_adaptive_hints", return_value=[]), \
+             patch("host.container_runner.get_genome_style_hints", return_value=[]), \
+             patch("host.container_runner.get_hot_memory", return_value=""), \
+             patch("host.container_runner._read_secrets", return_value={}), \
+             patch("host.container_runner.db.get_messages_since", return_value=[]), \
+             patch("host.container_runner.db.get_all_tasks", return_value=[]), \
+             patch("host.container_runner.db.log_container_start"), \
+             patch("host.container_runner._get_agent_id", return_value="agent-1"), \
+             patch("host.container_runner._docker_circuit_open", return_value=0):
+            try:
+                await cr.run_container_agent(
+                    group={"jid": "tg:1", "folder": "test-group", "is_main": False},
+                    prompt="hello",
+                )
+            except Exception:
+                pass
+
+        assert "--pids-limit" in captured_cmd, "docker run must include --pids-limit flag"

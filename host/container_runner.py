@@ -243,6 +243,28 @@ def _build_volume_mounts(group: dict) -> list[str]:
     base_dir = config.BASE_DIR
     is_main = bool(group.get("is_main"))
 
+    # ── Path-traversal guard (p13d) ────────────────────────────────────────────
+    # ``folder`` is derived from config / DB, but validate that the resolved
+    # host paths stay inside the expected parent directories.  An attacker who
+    # can inject ``../`` sequences into the folder name would otherwise escape
+    # the groups / data directories and mount arbitrary host paths into the
+    # container (e.g. /etc, /root, the host's .ssh directory).
+    def _assert_within(child: Path, parent: Path, label: str) -> None:
+        try:
+            child.resolve().relative_to(parent.resolve())
+        except ValueError:
+            raise ValueError(
+                f"Security: resolved {label} path {child!r} is outside "
+                f"expected parent {parent!r} — possible path traversal in folder={folder!r}"
+            )
+
+    group_host_path = groups_dir / folder
+    _assert_within(group_host_path, groups_dir, "group")
+    session_host_path = data_dir / "sessions" / folder
+    _assert_within(session_host_path, data_dir / "sessions", "sessions")
+    ipc_host_path = data_dir / "ipc" / folder
+    _assert_within(ipc_host_path, data_dir / "ipc", "ipc")
+
     mounts = []
 
     if is_main:
@@ -303,8 +325,21 @@ def _build_volume_mounts(group: dict) -> list[str]:
     return mounts
 
 def _safe_name(folder: str) -> str:
-    """將 folder 名稱轉換為合法的 Docker container 名稱（底線換連字號，截斷過長部分）。"""
-    return folder.replace("_", "-")[:40]
+    """Convert a folder name to a valid Docker container name segment.
+
+    Strips every character that is not alphanumeric or a hyphen so that
+    a JID or folder string containing path-traversal sequences (``../``,
+    ``/``, ``.``) cannot escape the expected naming scheme or influence
+    the volume-mount paths that embed ``folder`` directly.  The result is
+    then truncated to 40 characters so the full container name stays
+    within Docker's 63-character limit.
+    """
+    # Keep only alphanumeric chars and hyphens; replace everything else
+    # (including dots, slashes, underscores) with a hyphen.
+    safe = re.sub(r"[^a-zA-Z0-9-]", "-", folder)
+    # Collapse consecutive hyphens and strip leading/trailing hyphens.
+    safe = re.sub(r"-{2,}", "-", safe).strip("-")
+    return safe[:40] or "group"
 
 async def update_container_activity(container_name: str, activity: str) -> None:
     """Update the current_activity field for a running container (called from stderr stream)."""
@@ -483,6 +518,21 @@ async def run_container_agent(
         "--name", container_name,
         "-e", f"TZ={config.TIMEZONE}",  # 時區設定，確保 agent 顯示正確時間
         "-e", "PYTHONUNBUFFERED=1",  # 強制 Python stdout 立即 flush，讓 Docker Desktop 日誌即時顯示
+        # ── Network isolation (p13d) ───────────────────────────────────────────
+        # Agent containers must not make arbitrary outbound network calls.
+        # LLM API calls are initiated by the host, not the container.
+        "--network", "none",
+        # ── Capability hardening (p13d) ────────────────────────────────────────
+        # Drop all Linux capabilities; grant none back.  The agent only needs to
+        # read/write files in mounted volumes — no raw sockets, no mknod, etc.
+        "--cap-drop", "ALL",
+        # ── Privilege escalation prevention (p13d) ─────────────────────────────
+        # Prevent setuid/setgid binaries inside the container from gaining new
+        # privileges (e.g. sudo, ping).
+        "--security-opt", "no-new-privileges:true",
+        # ── PID limit (p13d) ───────────────────────────────────────────────────
+        # Prevent fork bombs: cap the number of processes the container can spawn.
+        "--pids-limit", str(config.CONTAINER_PIDS_LIMIT),
     ]
     # ── Per-container resource limits (Issue #61) ──────────────────────────────
     # Prevent a runaway agent from OOM-killing the host process.
