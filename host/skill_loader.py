@@ -40,6 +40,10 @@ class SkillLoader:
             if d.is_dir() and (d / "SKILL.md").exists()
         )
 
+    # BUG-FIX: enforce a reasonable size cap on SKILL.md to prevent a malformed
+    # or adversarial skill from injecting megabytes of text into the LLM prompt.
+    _SKILL_MAX_BYTES = 64 * 1024  # 64 KB
+
     def load(self, name: str) -> Optional[str]:
         """Return the SKILL.md content for a skill, or None if not found."""
         resolved = (self._dir / name).resolve()
@@ -49,6 +53,15 @@ class SkillLoader:
         if not skill_file.exists():
             logger.warning("skill_loader: skill not found: %s", name)
             return None
+        # BUG-FIX: cap skill file size to prevent context-window overflow
+        size = skill_file.stat().st_size
+        if size > self._SKILL_MAX_BYTES:
+            logger.warning(
+                "skill_loader: SKILL.md for '%s' is %d bytes (> %d limit) — truncating",
+                name, size, self._SKILL_MAX_BYTES,
+            )
+            raw = skill_file.read_bytes()[:self._SKILL_MAX_BYTES]
+            return raw.decode("utf-8", errors="replace") + "\n... (truncated)"
         return skill_file.read_text(encoding="utf-8")
 
     def load_all(self) -> dict[str, str]:
@@ -149,7 +162,14 @@ class SkillLoader:
         func = getattr(module, fn, None)
         if func is None:
             raise AttributeError(f"Skill '{name}' handler has no function '{fn}'")
-        return func(**kwargs)
+        # BUG-FIX: wrap skill execution so a misbehaving handler cannot crash the
+        # host process.  Callers receive a descriptive error string instead of an
+        # unhandled exception propagating up the stack.
+        try:
+            return func(**kwargs)
+        except Exception as exc:
+            logger.error("skill_loader: skill '%s' fn '%s' raised: %s", name, fn, exc)
+            raise
 
     def skill_summary(self) -> str:
         """Return a human-readable summary of all available skills for agent context."""
