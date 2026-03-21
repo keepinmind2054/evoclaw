@@ -1019,6 +1019,23 @@ def get_warm_logs_recent(jid: str, days: int = 1) -> list[dict]:
     return [{"id": r[0], "log_date": r[1], "content": r[2], "created_at": r[3]} for r in rows]
 
 
+def get_warm_logs_for_date(jid: str, log_date: str) -> list[dict]:
+    """Return all warm log entries for a specific date (YYYY-MM-DD).
+
+    Added for p14b-4: daily wrapup needs yesterday's logs specifically;
+    ``get_warm_logs_recent(days=1)`` returns the last 24 h of wall-clock
+    time which is almost empty when called at midnight.
+    """
+    with _db_lock:
+        db = get_db()
+        rows = db.execute(
+            "SELECT id, log_date, content, created_at FROM group_warm_logs "
+            "WHERE jid=? AND log_date=? ORDER BY created_at ASC",
+            (jid, log_date),
+        ).fetchall()
+    return [{"id": r[0], "log_date": r[1], "content": r[2], "created_at": r[3]} for r in rows]
+
+
 def delete_warm_logs_before(jid: str, cutoff_ts: float) -> int:
     with _db_lock:
         db = get_db()

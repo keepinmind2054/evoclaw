@@ -117,13 +117,20 @@ class SharedMemoryStore:
         self._ensure_schema()
 
     def _ensure_schema(self):
-        """Create tables if they don't exist."""
+        """Create tables if they don't exist.
+
+        Bug fixed (p14b-15): the original code split TABLE_DDL on ";" and
+        executed each fragment with conn.execute().  CREATE TRIGGER statements
+        contain ";" inside their BEGIN...END body, so the naive split produced
+        incomplete fragments that caused an "incomplete input" error and left
+        the schema in a broken state.  We now use conn.executescript() which
+        handles the full DDL correctly as a single batch.
+        """
         try:
             with self._lock:
-                for stmt in self.TABLE_DDL.strip().split(";"):
-                    stmt = stmt.strip()
-                    if stmt:
-                        self._conn.execute(stmt)
+                self._conn.executescript(self.TABLE_DDL)
+                # executescript issues an implicit COMMIT, but call it
+                # explicitly to be consistent with the rest of the module.
                 self._conn.commit()
         except sqlite3.Error as e:
             logger.error(f"SharedMemoryStore schema error: {e}")
@@ -205,15 +212,26 @@ class SharedMemoryStore:
             return []
 
     def delete(self, memory_id: str, agent_id: str) -> bool:
-        """Delete a memory (only owner can delete private memories)."""
+        """Delete a memory.
+
+        Only the owning agent may delete any of their memories.
+
+        Bug fixed (p14b-6): the previous condition
+        ``agent_id = ? OR scope != 'private'`` allowed *any* agent to delete
+        shared or project-scoped memories they did not own.  The correct rule
+        is: only the owner (``agent_id``) may delete, regardless of scope.
+        """
         try:
             with self._lock:
-                result = self._conn.execute(
-                    """DELETE FROM shared_memories
-                       WHERE id = ? AND (agent_id = ? OR scope != 'private')""",
-                    (memory_id, agent_id),
-                )
-                self._conn.commit()
+                try:
+                    result = self._conn.execute(
+                        "DELETE FROM shared_memories WHERE id = ? AND agent_id = ?",
+                        (memory_id, agent_id),
+                    )
+                    self._conn.commit()
+                except sqlite3.Error:
+                    self._conn.rollback()
+                    raise
             return result.rowcount > 0
         except sqlite3.Error as e:
             logger.error(f"SharedMemory delete error: {e}")
@@ -258,13 +276,18 @@ class VectorStore:
             return False
 
     def _ensure_schema(self):
-        """Create vector index table."""
+        """Create vector index table.
+
+        Bug fixed (p14b-8): added ``project`` column to ``vec_memories`` so
+        that project-scoped memories can be properly filtered during search.
+        """
         try:
             self._conn.executescript(f"""
                 CREATE TABLE IF NOT EXISTS vec_memories (
                     memory_id   TEXT PRIMARY KEY,
                     agent_id    TEXT NOT NULL,
                     scope       TEXT NOT NULL DEFAULT 'private',
+                    project     TEXT NOT NULL DEFAULT '',
                     content     TEXT NOT NULL,
                     created_at  REAL NOT NULL
                 );
@@ -312,8 +335,20 @@ class VectorStore:
             logger.debug(f"Embedding generation failed: {e}")
             return None
 
-    async def store(self, memory_id: str, content: str, agent_id: str, scope: str = "private"):
-        """Store content with its vector embedding."""
+    async def store(
+        self,
+        memory_id: str,
+        content: str,
+        agent_id: str,
+        scope: str = "private",
+        project: str = "",
+    ):
+        """Store content with its vector embedding.
+
+        Bug fixed (p14b-8): added ``project`` parameter so project-scoped
+        memories carry their project label into vec_memories and can be
+        correctly filtered by VectorStore.search().
+        """
         if not self._available:
             return
         embedding = await self.embed(content)
@@ -322,8 +357,10 @@ class VectorStore:
         with self._lock:
             try:
                 self._conn.execute(
-                    "INSERT OR REPLACE INTO vec_memories (memory_id, agent_id, scope, content, created_at) VALUES (?,?,?,?,?)",
-                    (memory_id, agent_id, scope, content, time.time())
+                    "INSERT OR REPLACE INTO vec_memories "
+                    "(memory_id, agent_id, scope, project, content, created_at) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (memory_id, agent_id, scope, project, content, time.time())
                 )
                 self._conn.execute(
                     "INSERT OR REPLACE INTO vec_index (memory_id, embedding) VALUES (?,?)",
@@ -334,8 +371,24 @@ class VectorStore:
                 self._conn.rollback()
                 logger.debug(f"VectorStore.store error: {e}")
 
-    async def search(self, query: str, agent_id: str, k: int = 5) -> list[dict]:
-        """Semantic similarity search. Returns empty list if not available."""
+    async def search(
+        self,
+        query: str,
+        agent_id: str,
+        k: int = 5,
+        project: str = "",
+    ) -> list[dict]:
+        """Semantic similarity search. Returns empty list if not available.
+
+        Bug fixed (p14b-8): project-scoped memories were never returned
+        because the WHERE clause only checked ``scope = 'shared' OR
+        agent_id = ?``.  Added project scope filtering to match
+        SharedMemoryStore.search() semantics.
+
+        Bug fixed (p14b-9): ``created_at`` was not included in the SELECT so
+        recall() always stamped vector results with ``time.time()`` (now)
+        instead of the actual creation time.
+        """
         if not self._available:
             return []
         query_embedding = await self.embed(query)
@@ -345,18 +398,20 @@ class VectorStore:
             try:
                 rows = self._conn.execute(
                     """SELECT vm.memory_id, vm.content, vm.agent_id, vm.scope,
-                              vi.distance
+                              vi.distance, vm.created_at
                        FROM vec_index vi
                        JOIN vec_memories vm ON vi.memory_id = vm.memory_id
                        WHERE vi.embedding MATCH ?
-                         AND (vm.scope = 'shared' OR vm.agent_id = ?)
+                         AND (vm.scope = 'shared'
+                              OR vm.agent_id = ?
+                              OR (vm.scope = 'project' AND vm.project = ?))
                        ORDER BY vi.distance
                        LIMIT ?""",
-                    (json.dumps(query_embedding), agent_id, k)
+                    (json.dumps(query_embedding), agent_id, project, k)
                 ).fetchall()
                 return [
                     {"memory_id": r[0], "content": r[1], "agent_id": r[2],
-                     "scope": r[3], "distance": r[4]}
+                     "scope": r[3], "distance": r[4], "created_at": r[5]}
                     for r in rows
                 ]
             except sqlite3.Error as e:
@@ -442,8 +497,9 @@ class MemoryBus:
             project=project,
             importance=importance,
         )
-        # Also index in vector store for semantic search
-        await self.vector.store(memory_id, content, agent_id, scope)
+        # Also index in vector store for semantic search.
+        # Bug fixed (p14b-8): pass project so vector store can filter by it.
+        await self.vector.store(memory_id, content, agent_id, scope, project)
         return memory_id
 
     async def recall(
@@ -505,19 +561,24 @@ class MemoryBus:
 
         # 1. Vector semantic search
         if "vector" in include_sources and self.vector.available:
-            vec_results = await self.vector.search(query, agent_id, k=k)
+            vec_results = await self.vector.search(query, agent_id, k=k, project=project)
             for r in vec_results:
                 if r["memory_id"] not in seen_ids:
                     seen_ids.add(r["memory_id"])
-                    # Convert distance to score (lower distance = higher score)
-                    score = max(0.0, 1.0 - r.get("distance", 1.0))
+                    # Convert distance to score (lower distance = higher score).
+                    # Bug fixed (p14b-7): previous code applied a 1.2× boost
+                    # which pushed scores above the documented 0.0–1.0 range.
+                    # We now clamp to [0.0, 1.0] after conversion.
+                    score = min(1.0, max(0.0, 1.0 - r.get("distance", 1.0)))
                     results.append(Memory(
                         memory_id=r["memory_id"],
                         content=r["content"],
                         agent_id=r["agent_id"],
                         scope=r["scope"],
-                        score=score * 1.2,  # Boost vector results
-                        created_at=time.time(),
+                        score=score,
+                        # Bug fixed (p14b-9): use actual creation time from DB,
+                        # not time.time() (which always returned "now").
+                        created_at=r.get("created_at", time.time()),
                         source="vector",
                     ))
 
@@ -527,8 +588,22 @@ class MemoryBus:
             for r in shared_results:
                 if r["id"] not in seen_ids:
                     seen_ids.add(r["id"])
-                    # Normalize FTS5 rank to 0-1 score
-                    fts_score = min(1.0, abs(r.get("fts_rank", -1)) / 10.0)
+                    # Normalize FTS5 rank to 0-1 score.
+                    # Bug fixed (p14b-10): BM25 rank values are unbounded
+                    # (e.g. -0.5 for low relevance, -50 for high relevance).
+                    # The old formula ``abs(rank) / 10.0`` produced values
+                    # well above 1.0 for highly relevant results which were
+                    # then hard-clamped by min(), destroying the ordering
+                    # between moderately and highly relevant results.
+                    # We now use a sigmoid-like mapping: score = 1 / (1 + e^rank)
+                    # where rank is negative (BM25 convention), so higher
+                    # absolute rank → score closer to 1.0.
+                    import math
+                    raw_rank = r.get("fts_rank", -1.0) or -1.0
+                    # raw_rank is negative; more negative = more relevant.
+                    # Map to (0, 1): score = 1 / (1 + exp(raw_rank / 5))
+                    fts_score = 1.0 / (1.0 + math.exp(raw_rank / 5.0))
+                    fts_score = min(1.0, max(0.0, fts_score))
                     results.append(Memory(
                         memory_id=r["id"],
                         content=r["content"],

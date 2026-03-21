@@ -17,6 +17,12 @@ async def run_weekly_compound(jid: str) -> None:
     Weekly compound:
     1. Prune warm logs older than 30 days
     2. Update hot memory with distillation note
+
+    Bug fixed (p14b-5): previous code called ``(hot + compound_note).strip()``
+    which stripped *leading* whitespace from the existing hot memory content,
+    potentially corrupting content that intentionally starts with whitespace or
+    newlines.  Changed to ``hot.rstrip() + compound_note`` to be consistent
+    with the approach used in warm.py.
     """
     try:
         pruned = prune_old_warm_logs(jid)
@@ -25,7 +31,7 @@ async def run_weekly_compound(jid: str) -> None:
         hot = get_hot_memory(jid)
         compound_note = f"\n[Weekly compound: {week}, pruned {pruned} old entries]\n"
         if compound_note not in hot:
-            new_hot = (hot + compound_note).strip()
+            new_hot = hot.rstrip() + compound_note  # fix: don't strip leading content
             update_hot_memory(jid, new_hot)
         db.record_weekly_compound(jid)
         log.info("compound: weekly compound done for jid=%s (pruned %d)", jid, pruned)
