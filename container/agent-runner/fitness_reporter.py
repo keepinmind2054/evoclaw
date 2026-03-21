@@ -38,13 +38,16 @@ logger = logging.getLogger(__name__)
 class FitnessReporter:
     """
     Sends fitness feedback and memory updates from Agent Runtime to Gateway.
-    
+
     Gracefully degrades to no-op if WebSocket bridge is unavailable
     (backward compatible with file-based IPC).
     """
 
     RECONNECT_DELAY = 5.0   # seconds between reconnection attempts
     HEARTBEAT_INTERVAL = 30  # seconds between heartbeats
+    # Fix p14c: cap reconnection attempts so a permanently-down gateway doesn't
+    # loop forever and waste CPU inside a short-lived agent container.
+    MAX_RECONNECT_ATTEMPTS = 3
 
     def __init__(
         self,
@@ -59,6 +62,8 @@ class FitnessReporter:
         self._ws = None
         self._connected = False
         self._heartbeat_task: Optional[asyncio.Task] = None
+        # Fix p14c: track reconnection attempts to avoid infinite retry loops.
+        self._reconnect_attempts: int = 0
 
     async def connect(self) -> bool:
         """
@@ -69,6 +74,7 @@ class FitnessReporter:
             import websockets  # type: ignore
             self._ws = await websockets.connect(self._url, open_timeout=3)
             self._connected = True
+            self._reconnect_attempts = 0  # Fix p14c: reset counter on successful connect
             # Send initial heartbeat to register
             await self._send({"type": "heartbeat", "agent_id": self.agent_id})
             # Start background heartbeat
@@ -78,6 +84,31 @@ class FitnessReporter:
         except Exception as e:
             logger.debug(f"FitnessReporter: WebSocket unavailable ({e}), using file IPC fallback")
             self._connected = False
+            return False
+
+    async def _try_reconnect(self) -> bool:
+        """
+        Fix p14c: attempt to re-establish a dropped WebSocket connection.
+
+        Called from _send() and report_fitness() when _connected is False.
+        Capped at MAX_RECONNECT_ATTEMPTS to avoid infinite loops inside a
+        short-lived agent container where the gateway may be permanently down.
+
+        Returns True if the connection was restored.
+        """
+        if self._reconnect_attempts >= self.MAX_RECONNECT_ATTEMPTS:
+            return False
+        self._reconnect_attempts += 1
+        logger.debug(
+            "FitnessReporter: reconnect attempt %d/%d",
+            self._reconnect_attempts,
+            self.MAX_RECONNECT_ATTEMPTS,
+        )
+        try:
+            await asyncio.sleep(self.RECONNECT_DELAY)
+            return await self.connect()
+        except Exception as e:
+            logger.debug("FitnessReporter: reconnect failed: %s", e)
             return False
 
     async def disconnect(self):
@@ -98,20 +129,41 @@ class FitnessReporter:
     ):
         """
         Report response quality score to evolution engine.
-        
+
         Args:
             score:    Quality score 0.0-1.0 (1.0 = perfect response)
             metadata: Optional metadata (response_time, retry_count, etc.)
+
+        Fix p14c (a): if the WebSocket is not connected, attempt a single
+        reconnect before falling back to a local JSON file so that fitness
+        data is never silently dropped.
+        Fix p14c (b): clamp score through float() first to guard against
+        non-numeric inputs that could break max/min comparisons.
         """
-        if not self._connected:
-            return
-        await self._send({
+        try:
+            clamped_score = max(0.0, min(1.0, float(score)))
+        except (TypeError, ValueError):
+            logger.warning("FitnessReporter.report_fitness: invalid score %r — defaulting to 0.0", score)
+            clamped_score = 0.0
+
+        payload = {
             "type": "fitness_update",
             "agent_id": self.agent_id,
-            "score": max(0.0, min(1.0, score)),
+            "score": clamped_score,
             "metadata": metadata or {},
             "timestamp": time.time(),
-        })
+        }
+
+        # Fix p14c: attempt reconnect if needed before giving up on WebSocket.
+        if not self._connected:
+            await self._try_reconnect()
+
+        if self._connected:
+            await self._send(payload)
+        else:
+            # Fix p14c: WebSocket unavailable — persist to local file so the
+            # host can pick it up via file-based IPC (same as patch_hot_memory fallback).
+            self._fallback_fitness_write(payload)
 
     async def write_memory(
         self,
@@ -168,7 +220,12 @@ class FitnessReporter:
         })
 
     async def _heartbeat_loop(self):
-        """Send periodic heartbeats to maintain connection."""
+        """Send periodic heartbeats to maintain connection.
+
+        Fix p14c: on failure, attempt a reconnect (up to MAX_RECONNECT_ATTEMPTS)
+        before giving up, so a transient network blip doesn't permanently disable
+        the reporter for the remainder of the agent run.
+        """
         while self._connected:
             try:
                 await asyncio.sleep(self.HEARTBEAT_INTERVAL)
@@ -178,7 +235,11 @@ class FitnessReporter:
             except Exception as e:
                 logger.debug(f"FitnessReporter: heartbeat failed: {e}")
                 self._connected = False
-                break
+                # Attempt to restore the connection before the next heartbeat.
+                reconnected = await self._try_reconnect()
+                if not reconnected:
+                    logger.debug("FitnessReporter: heartbeat giving up after failed reconnect")
+                    break
 
     async def _send(self, data: dict):
         """Send JSON message to Gateway."""
@@ -189,6 +250,20 @@ class FitnessReporter:
         except Exception as e:
             logger.debug(f"FitnessReporter: send failed: {e}")
             self._connected = False
+
+    def _fallback_fitness_write(self, payload: dict) -> None:
+        """Fix p14c: persist a fitness payload to a local JSONL file when the
+        WebSocket is unavailable.  The host's file-IPC reader can consume these
+        lines and feed them into the evolution engine."""
+        try:
+            fitness_file = os.path.join(
+                os.environ.get("GROUP_DIR", "/workspace"), "fitness_queue.jsonl"
+            )
+            with open(fitness_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload) + "\n")
+            logger.debug("FitnessReporter: fitness written to fallback file %s", fitness_file)
+        except OSError as e:
+            logger.debug("FitnessReporter: fallback fitness write failed: %s", e)
 
     def _fallback_memory_patch(self, patch: str):
         """Fallback: write memory patch to local MEMORY.md file."""
