@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 
 _SKILL_STEPS_DAG = "_skill_steps"
 
+# Maximum number of bytes a single step result may occupy when serialised to
+# str.  Prevents a runaway step from filling up the WorkflowRun.context dict
+# and eventually causing an OOM condition.
+_MAX_STEP_RESULT_BYTES = 256 * 1024  # 256 KB
+
 
 class StepStatus(str, Enum):
     PENDING   = "pending"
@@ -101,18 +106,41 @@ class WorkflowDAG:
             return fn
         return decorator
 
+    def _validate(self) -> None:
+        """Validate the DAG before execution.
+
+        P14D-WF-1: Check that every dependency name actually refers to a
+        registered step.  An undefined dependency would cause the scheduler
+        loop to spin forever (the step whose dep is missing can never become
+        ready, yet it is never classified as blocked either), triggering the
+        deadlock fallback incorrectly.
+
+        P14D-WF-2: Detect cycles via DFS.  A cyclic dependency would also
+        cause the scheduler loop to spin, because steps waiting on each other
+        would never become ready.
+        """
+        # Check all dependency names are known
+        for step_name, step in self._steps.items():
+            for dep in step.depends_on:
+                if dep not in self._steps:
+                    raise ValueError(
+                        f"Step '{step_name}' depends on unknown step '{dep}'"
+                    )
+        # Detect cycles
+        self._topo_sort()
+
     def _topo_sort(self) -> List[str]:
         """Iterative topological sort of steps. Raises ValueError if a cycle is detected."""
-        visited = set()
-        order = []
+        visited: set = set()
+        order: List[str] = []
 
-        def visit(name, visiting=None):
+        def visit(name: str, visiting: Optional[set] = None) -> None:
             if visiting is None:
                 visiting = set()
             if name in visited:
                 return
             if name in visiting:
-                raise ValueError(f"Cycle detected in workflow graph")
+                raise ValueError(f"Cycle detected in workflow graph involving step '{name}'")
             visiting.add(name)
             step = self._steps.get(name)
             if step:
@@ -127,8 +155,18 @@ class WorkflowDAG:
         return order
 
     async def run(self, initial_context: Optional[Dict] = None) -> WorkflowRun:
-        """Execute all steps in dependency order, running independent steps in parallel."""
+        """Execute all steps in dependency order, running independent steps in parallel.
+
+        P14D-WF-1 / P14D-WF-2: Validate the DAG (undefined deps + cycle check)
+        before entering the scheduler loop.
+
+        P14D-WF-3: Step results are size-capped before being merged into the
+        shared context so a runaway step cannot OOM the process.
+        """
         import uuid
+        # Validate structure before starting execution
+        self._validate()
+
         run = WorkflowRun(
             workflow_id=str(uuid.uuid4())[:8],
             name=self.name,
@@ -181,7 +219,7 @@ class WorkflowDAG:
             # parallel steps from seeing each other's partial writes to run.context.
             _parallel_results: dict = {}
 
-            async def run_step(step_name):
+            async def run_step(step_name: str) -> None:
                 step = run.steps[step_name]
                 step.status = StepStatus.RUNNING
                 step.started_at = time.time()
@@ -195,6 +233,14 @@ class WorkflowDAG:
                             loop = asyncio.get_running_loop()
                             coro = loop.run_in_executor(None, step.fn, ctx_snapshot)
                         result = await asyncio.wait_for(coro, timeout=step.timeout)
+                        # P14D-WF-3: cap result size before storing
+                        result_str = str(result)
+                        if len(result_str.encode("utf-8", errors="replace")) > _MAX_STEP_RESULT_BYTES:
+                            logger.warning(
+                                f"Step '{step_name}' result truncated "
+                                f"({len(result_str)} chars > {_MAX_STEP_RESULT_BYTES} byte limit)"
+                            )
+                            result = result_str[:_MAX_STEP_RESULT_BYTES] + "... [truncated]"
                         step.result = result
                         step.status = StepStatus.SUCCESS
                         _parallel_results[step_name] = result  # collect result separately
@@ -256,13 +302,13 @@ class WorkflowEngine:
         name: str,
         skill_name: str,
         *,
-        skill_loader: SkillLoader,
+        skill_loader: "SkillLoader",
         agent_id: str = "default",
         kwargs: dict | None = None,
         depends_on: list[str] | None = None,
         timeout: float = 60.0,
         retries: int = 0,
-    ) -> WorkflowEngine:
+    ) -> "WorkflowEngine":
         """Register a SkillLoader skill as a workflow step.
 
         The skill's handler.py run() function is called as the step function.

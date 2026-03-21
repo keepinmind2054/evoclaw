@@ -4,12 +4,38 @@ Jira Integration — Phase 3 Enterprise Suite
 Provides issue create/query/update/comment for agent-driven workflows.
 """
 import os
-import json
+import re
 import logging
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+
+# Maximum number of Jira issues that search_issues() will ever return.
+# Jira's own maxResults cap is 1000; we enforce a tighter bot-side limit to
+# prevent millions of items from blowing up the LLM context window or RAM.
+_MAX_SEARCH_RESULTS = 500
+
+# Allowlist for Jira issue keys: PROJECT-123 style only.
+# Prevents path-traversal in REST URLs like /issue/../admin
+_ISSUE_KEY_RE = re.compile(r'^[A-Z][A-Z0-9_]{0,9}-[0-9]{1,7}$')
+
+# Allowlist for Jira project keys.
+_PROJECT_KEY_RE = re.compile(r'^[A-Z][A-Z0-9_]{0,9}$')
+
+
+def _validate_issue_key(key: str) -> str:
+    """Raise ValueError if the issue key does not look like PROJECT-123."""
+    if not _ISSUE_KEY_RE.match(key):
+        raise ValueError(f"Invalid Jira issue key: {key!r}")
+    return key
+
+
+def _validate_project_key(key: str) -> str:
+    """Raise ValueError if the project key is not safe."""
+    if not _PROJECT_KEY_RE.match(key):
+        raise ValueError(f"Invalid Jira project key: {key!r}")
+    return key
 
 
 @dataclass
@@ -44,10 +70,11 @@ class JiraConnector:
     ):
         self.base_url = (base_url or os.getenv("JIRA_BASE_URL", "")).rstrip("/")
         self.email = email or os.getenv("JIRA_EMAIL", "")
-        self.api_token = api_token or os.getenv("JIRA_API_TOKEN", "")
+        # P14D-JIRA-1: token stored only in instance attribute, never logged
+        self._api_token = api_token or os.getenv("JIRA_API_TOKEN", "")
         self.project = project or os.getenv("JIRA_PROJECT", "")
         self._session = None
-        if self.base_url and self.email and self.api_token:
+        if self.base_url and self.email and self._api_token:
             self._init_session()
 
     def _init_session(self):
@@ -55,17 +82,32 @@ class JiraConnector:
             import requests
             from requests.auth import HTTPBasicAuth
             self._session = requests.Session()
-            self._session.auth = HTTPBasicAuth(self.email, self.api_token)
+            # P14D-JIRA-1: credentials used directly in auth object, never serialised
+            self._session.auth = HTTPBasicAuth(self.email, self._api_token)
             self._session.headers.update({"Content-Type": "application/json"})
+            # P14D-JIRA-4: do NOT log the token or credentials
             logger.info(f"Jira connected: {self.base_url}")
         except ImportError:
             logger.warning("requests not installed — Jira connector unavailable")
 
+    # ------------------------------------------------------------------
+    # Internal HTTP helpers
+    # ------------------------------------------------------------------
+
     def _get(self, path: str, params: Optional[Dict] = None) -> Optional[Dict]:
+        """HTTP GET with error handling.
+
+        P14D-JIRA-2: All API calls are wrapped in try/except so network errors
+        surface as None rather than propagating exceptions to callers.
+        """
         if not self._session:
             return None
         try:
-            r = self._session.get(f"{self.base_url}/rest/api/3{path}", params=params)
+            r = self._session.get(
+                f"{self.base_url}/rest/api/3{path}",
+                params=params,
+                timeout=30,  # P14D-JIRA-5: explicit timeout on every request
+            )
             r.raise_for_status()
             return r.json()
         except Exception as e:
@@ -73,15 +115,27 @@ class JiraConnector:
             return None
 
     def _post(self, path: str, data: Dict) -> Optional[Dict]:
+        """HTTP POST with error handling.
+
+        P14D-JIRA-2 / P14D-JIRA-5: same safety measures as _get().
+        """
         if not self._session:
             return None
         try:
-            r = self._session.post(f"{self.base_url}/rest/api/3{path}", json=data)
+            r = self._session.post(
+                f"{self.base_url}/rest/api/3{path}",
+                json=data,
+                timeout=30,
+            )
             r.raise_for_status()
             return r.json()
         except Exception as e:
             logger.error(f"Jira POST {path} failed: {e}")
             return None
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def create_issue(
         self,
@@ -96,6 +150,12 @@ class JiraConnector:
         proj = project or self.project
         if not proj:
             logger.error("No Jira project configured")
+            return None
+        # P14D-JIRA-3: validate the project key so it cannot be used for path traversal
+        try:
+            _validate_project_key(proj)
+        except ValueError as e:
+            logger.error(f"create_issue: {e}")
             return None
         payload = {
             "fields": {
@@ -125,7 +185,15 @@ class JiraConnector:
         return None
 
     def get_issue(self, key: str) -> Optional[JiraIssue]:
-        """Fetch a Jira issue by key."""
+        """Fetch a Jira issue by key.
+
+        P14D-JIRA-3: key is validated to prevent path-traversal in the REST URL.
+        """
+        try:
+            _validate_issue_key(key)
+        except ValueError as e:
+            logger.error(f"get_issue: {e}")
+            return None
         data = self._get(f"/issue/{key}")
         if not data:
             return None
@@ -142,8 +210,18 @@ class JiraConnector:
         )
 
     def search_issues(self, jql: str, max_results: int = 20) -> List[JiraIssue]:
-        """Search issues with JQL."""
-        data = self._get("/search", {"jql": jql, "maxResults": max_results})
+        """Search issues with JQL.
+
+        P14D-JIRA-6: cap max_results to _MAX_SEARCH_RESULTS so a pathological
+        JQL query (or a caller passing max_results=10**9) cannot pull millions
+        of items into memory.
+        """
+        capped = min(max_results, _MAX_SEARCH_RESULTS)
+        if capped != max_results:
+            logger.warning(
+                f"search_issues: max_results={max_results} capped to {_MAX_SEARCH_RESULTS}"
+            )
+        data = self._get("/search", {"jql": jql, "maxResults": capped})
         if not data:
             return []
         issues = []
@@ -161,7 +239,15 @@ class JiraConnector:
         return issues
 
     def add_comment(self, key: str, comment: str) -> bool:
-        """Add a comment to an issue."""
+        """Add a comment to an issue.
+
+        P14D-JIRA-3: issue key validated before use in URL.
+        """
+        try:
+            _validate_issue_key(key)
+        except ValueError as e:
+            logger.error(f"add_comment: {e}")
+            return False
         payload = {
             "body": {
                 "type": "doc", "version": 1,
@@ -172,7 +258,15 @@ class JiraConnector:
         return result is not None
 
     def transition_issue(self, key: str, status_name: str) -> bool:
-        """Transition an issue to a new status."""
+        """Transition an issue to a new status.
+
+        P14D-JIRA-3: issue key validated before use in URL.
+        """
+        try:
+            _validate_issue_key(key)
+        except ValueError as e:
+            logger.error(f"transition_issue: {e}")
+            return False
         transitions = self._get(f"/issue/{key}/transitions")
         if not transitions:
             return False
@@ -184,4 +278,4 @@ class JiraConnector:
         return False
 
     def is_configured(self) -> bool:
-        return bool(self.base_url and self.email and self.api_token)
+        return bool(self.base_url and self.email and self._api_token)
