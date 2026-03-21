@@ -1,3 +1,86 @@
+## [1.20.0] — 2026-03-21
+
+### Fixed (Phase 13: Security & Reliability — 75 fixes)
+
+Four PRs covering channel reliability, container security, observability & API security, and leader election / task scheduler / dev engine.
+
+#### Channel Reliability (PR #363 — 16 fixes)
+
+- **Gmail self-email loop guard missing (CRITICAL)** — bot could email itself in an infinite loop; added self-email guard
+- **Matrix sync token advanced before event processing (CRITICAL)** — crash caused permanent message loss; token now advanced only after successful processing
+- **Gmail OAuth refresh fallback to interactive browser (HIGH)** — hung forever on server; fallback removed, failure now raises immediately
+- **Gmail HTTP 401 infinite retry loop (HIGH)** — revoked token caused unbounded retry; replaced with exponential backoff and token invalidation
+- **Gmail no autoresponder loop prevention (HIGH)** — RFC 3834 `Auto-Submitted` header not checked; mailing lists and vacation responders could flood bot; added header check
+- **Slack bot-message filter incomplete (HIGH)** — bot read its own posts and re-triggered pipeline; filter tightened to cover all bot message subtypes
+- **Slack `<@U12345>` mention never normalized (HIGH)** — trigger matching always failed; added mention normalization before trigger check
+- **WhatsApp webhook exception returned HTTP 500 (HIGH)** — Meta retried delivery causing duplicate processing; handler now returns HTTP 200 after logging error
+- **CrossBot unbounded trusted set / no handshake rate limit / no self-handshake check (HIGH)** — memory leak, DoS vector, and identity spoofing; added eviction, rate cap, and self-check
+- **Matrix non-200 sync response silently empty (MEDIUM)** — no log emitted; added error logging and retry
+- **Matrix redacted and undecryptable E2E events dispatched (MEDIUM)** — added filter to drop these event types before dispatch
+- **Slack/WhatsApp missing try/except around `_on_message` (MEDIUM)** — inconsistent with Telegram/Discord; added wrapping
+- **All channels: unified trigger pattern, @mention normalization, empty-message guard (LOW)** — consolidated shared logic into channel base class
+
+#### Container Security & Tests (PR #364 — 14 fixes)
+
+- **`--network none` not set (CRITICAL)** — agent container could make arbitrary outbound network calls; flag added
+- **`--cap-drop ALL` not set (CRITICAL)** — container retained 14 Linux capabilities including NET_RAW and SETUID; added `--cap-drop ALL`
+- **`_safe_name()` path-traversal not stripped (CRITICAL)** — JID containing `../` could mount `/etc` or `~/.ssh` into container; added path component sanitization
+- **`_build_volume_mounts()` no `resolve().relative_to()` validation (CRITICAL)** — host path escape possible; added strict validation
+- **`--security-opt no-new-privileges` not set (HIGH)** — setuid escalation possible; flag added
+- **`--pids-limit` not set (HIGH)** — fork bomb could exhaust host PID table; limit set
+- **Dockerfile used mutable `node:22` tag (HIGH)** — supply-chain risk; pinned to digest
+- **5 circuit breaker tests used wrong API type (HIGH)** — all silently passing with no real assertion; corrected to proper type
+- **`test_run_container_agent` asserted wrong exception type (HIGH)** — test always passed, tested nothing; corrected assertion
+- **`test_editable_env_keys` checked wrong key names (HIGH)** — vacuously wrong assertions; corrected to actual key names
+- **`test_immune_enhanced.py` all 50 tests silently skipped (HIGH)** — hand-rolled runner not collected by pytest; converted to standard pytest format
+- **Dockerfile missing HEALTHCHECK (MEDIUM)** — added HEALTHCHECK instruction
+- **`build_container.py` only tagged `:latest` (MEDIUM)** — no versioned tags; added version tagging
+- **New test suite: `TestContainerSecurityFlags` (MEDIUM)** — covers all security flags and path-traversal guards
+
+#### Observability & API Security (PR #365 — 25 fixes)
+
+- **Health monitor loop could exit silently (CRITICAL)** — `get_health_status()` always returned `{"status":"healthy"}` regardless of reality; loop now restarts on exception with alerting
+- **WS Bridge auth bypass (CRITICAL)** — auth failed but async loop kept reading; loop now terminates on auth failure
+- **SDK API auth per-message allows token guessing (CRITICAL)** — infinite guessing allowed; added connection-level auth with lockout
+- **Dashboard no POST body size limit (HIGH)** — OOM attack possible; added size cap
+- **Dashboard container `stop` API command injection (HIGH)** — name passed directly to subprocess; replaced with safe API call
+- **Dashboard missing `Content-Security-Policy`/`X-Frame-Options` (HIGH)** — clickjacking possible; headers added
+- **Dashboard `/health` and `/metrics` behind auth gate (HIGH)** — Kubernetes probes could not access; endpoints exempted from auth
+- **Dashboard `limit` param uncapped (HIGH)** — `LIMIT 1000000` SQL query possible; capped at reasonable maximum
+- **WS Bridge no connection cap (HIGH)** — fd exhaustion possible; added connection limit
+- **WS Bridge no payload size limit (HIGH)** — unbounded memory operations; size limit added
+- **WS Bridge mid-connection `agent_id` spoofing (HIGH)** — `agent_id` could be changed after auth; locked at auth time
+- **SDK API memory/task write with no size limits (HIGH)** — limits added
+- **Log formatter sensitive fields emitted verbatim (HIGH)** — `token`, `api_key`, `secret`, `password` appeared in JSON logs; added redaction
+- **Router channel list mutated during iteration without lock (HIGH)** — data race; added lock
+- **Health monitor check failures logged at DEBUG (MEDIUM)** — invisible in production; elevated to WARNING/ERROR
+- **Health monitor division by zero in error rate (MEDIUM)** — fixed with zero guard
+- **Health monitor race on `_last_warnings` (MEDIUM)** — added lock
+- **Log formatter `levelname` duplicated (LOW)** — deduplicated
+- **Log formatter `asctime` corrupted timestamp field (LOW)** — fixed field name collision
+
+#### Leader Election, Task Scheduler, Dev Engine (PR #366 — 19 fixes)
+
+- **Leader election SQLite ops no timeout (CRITICAL)** — blocked DB froze entire asyncio event loop; added timeout with cancellation
+- **Dev engine deployed code when REVIEW verdict was FAIL (CRITICAL)** — LLM-generated code deployed despite failure verdict; added strict gate
+- **Allowlist missing/unreadable silently allowed ALL senders (CRITICAL)** — deny-all sentinel now applied on read failure
+- **`LEASE_TIMEOUT <= HEARTBEAT_INTERVAL` caused split-brain churn (HIGH)** — continuous leadership oscillation; added startup assertion enforcing `LEASE_TIMEOUT > 2 * HEARTBEAT_INTERVAL`
+- **`_is_leader = False` set after DELETE (HIGH)** — exception left instance acting as leader with no DB record; flag now cleared before DELETE
+- **Leader yielded only after 3 consecutive heartbeat failures (HIGH)** — instance now correctly steps down; confirmed fix
+- **Task scheduler no at-most-once guard (HIGH)** — same task dispatched twice concurrently; added dispatch lock
+- **Task scheduler no execution timeout (HIGH)** — hung task blocked scheduler forever; added per-task timeout
+- **Task scheduler no consecutive-failure limit (HIGH)** — broken task retried infinitely; added failure cap with quarantine
+- **Bot registry `_pending_handshakes` accessed outside lock (HIGH)** — concurrent callers bypassed rate cap; added lock
+- **Bot registry nonces never expired (HIGH)** — intercepted nonce valid forever; added nonce TTL
+- **Agent identity `get()` read DB without lock (HIGH)** — data race under concurrency; added lock
+- **Task scheduler interval tasks re-fired every poll after downtime (MEDIUM)** — catch-up loop now skips missed runs and sets `next_run` to current time
+- **Task scheduler backoff stored in seconds not milliseconds (MEDIUM)** — task became runnable 50 years ago; fixed unit
+- **Task scheduler crashed `running` tasks never recovered (MEDIUM)** — added startup recovery pass
+- **Dev engine path traversal via `session_id` (MEDIUM)** — unsanitized `session_id` used in path; added sanitization
+- **Group folder non-atomic mkdir and file writes (MEDIUM)** — TOCTOU race; replaced with atomic operations
+- **Bot registry stale entries accumulated forever (MEDIUM)** — added TTL-based eviction
+- **Bot registry no TTL on nonces (MEDIUM)** — addressed alongside nonce expiry fix above
+
 ## [1.19.0] — 2026-03-21
 
 ### Fixed (Phase 12: 深度可靠性修復 — 46 個問題)
