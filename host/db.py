@@ -80,6 +80,18 @@ def _create_tables(db: sqlite3.Connection) -> None:
     - registered_groups：已登記的群組設定，包含 JID、folder、觸發關鍵字等
     """
     db.executescript("""
+    -- ── Schema version tracking ───────────────────────────────────────────────
+    -- schema_migrations tracks which migrations have been applied so that
+    -- run_migrations.py can detect the current schema version and apply only
+    -- new migrations.  Without this table every restart blindly re-runs
+    -- init_database() with no record of what was already applied, making
+    -- incremental migrations impossible.
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+        version     INTEGER PRIMARY KEY,
+        applied_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        description TEXT NOT NULL DEFAULT ''
+    );
+
     CREATE TABLE IF NOT EXISTS chats (
         jid TEXT PRIMARY KEY,
         name TEXT,
@@ -124,6 +136,9 @@ def _create_tables(db: sqlite3.Connection) -> None:
         result TEXT,
         error TEXT
     );
+    -- Index for dashboard queries: "show all runs for task X" scans by task_id.
+    -- Without this index those queries perform a full table scan of task_run_logs.
+    CREATE INDEX IF NOT EXISTS idx_task_run_logs_task_id ON task_run_logs(task_id);
     -- Index for get_due_tasks(): filters on status + next_run on every scheduler tick.
     -- Without this index, each tick performs a full table scan of scheduled_tasks.
     CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_status_next_run ON scheduled_tasks(status, next_run);
@@ -166,6 +181,9 @@ def _create_tables(db: sqlite3.Connection) -> None:
     );
     CREATE INDEX IF NOT EXISTS idx_container_logs_jid ON container_logs(jid, started_at DESC);
     CREATE INDEX IF NOT EXISTS idx_container_logs_run_id ON container_logs(run_id);
+    -- Index for get_container_logs(status=...) filter which otherwise performs
+    -- a full table scan when filtering by status (e.g. "running" to find stuck containers).
+    CREATE INDEX IF NOT EXISTS idx_container_logs_status ON container_logs(status);
 
     -- ── 演化引擎資料表 ──────────────────────────────────────────────────────
     -- evolution_runs：記錄每次 container 執行的效能數據，是適應度計算的原始資料
@@ -191,6 +209,11 @@ def _create_tables(db: sqlite3.Connection) -> None:
     );
 
     -- immune_threats：免疫系統的威脅記錄，形成「抗體」記憶防止重複攻擊
+    -- UNIQUE(sender_jid, pattern_hash) enforces the one-row-per-sender-per-pattern
+    -- invariant at the DB level so that record_immune_threat() can use a safe
+    -- INSERT … ON CONFLICT DO UPDATE instead of a racy SELECT-then-INSERT/UPDATE.
+    -- Without this constraint duplicate rows could accumulate on migration or if the
+    -- application-level lock were ever bypassed.
     CREATE TABLE IF NOT EXISTS immune_threats (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         sender_jid TEXT NOT NULL,
@@ -199,9 +222,13 @@ def _create_tables(db: sqlite3.Connection) -> None:
         count INTEGER DEFAULT 1,
         blocked INTEGER DEFAULT 0,
         first_seen TEXT DEFAULT (datetime('now')),
-        last_seen TEXT DEFAULT (datetime('now'))
+        last_seen TEXT DEFAULT (datetime('now')),
+        UNIQUE(sender_jid, pattern_hash)
     );
     CREATE INDEX IF NOT EXISTS idx_immune_sender ON immune_threats(sender_jid);
+    -- Composite index for the WHERE sender_jid=? AND pattern_hash=? lookup in
+    -- record_immune_threat() and get_recent_threat_count().
+    CREATE INDEX IF NOT EXISTS idx_immune_sender_hash ON immune_threats(sender_jid, pattern_hash);
 
     CREATE TABLE IF NOT EXISTS evolution_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -234,6 +261,9 @@ CREATE TABLE IF NOT EXISTS dev_sessions (
     updated_at   REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_dev_sessions_jid ON dev_sessions(jid, created_at);
+-- Index for filtering active/pending/complete sessions by status.
+-- Without this, "show all active dev sessions" requires a full table scan.
+CREATE INDEX IF NOT EXISTS idx_dev_sessions_status ON dev_sessions(status);
 
 -- dev_events：記錄 7 階段開發流程的事件（保留供向後相容）
 CREATE TABLE IF NOT EXISTS dev_events (
@@ -499,10 +529,22 @@ def set_registered_group(jid: str, name: str, folder: str, trigger_pattern: Opti
             if is_main:
                 # Enforce single main group invariant — demote all other groups
                 db.execute("UPDATE registered_groups SET is_main = 0 WHERE jid != ?", (jid,))
+            # Use INSERT … ON CONFLICT DO UPDATE instead of INSERT OR REPLACE so
+            # that the original added_at timestamp is preserved when updating an
+            # existing group.  INSERT OR REPLACE silently DELETEs + re-INSERTs the
+            # row, which always overwrites added_at with the current time and loses
+            # the original registration timestamp.
             db.execute("""
-                INSERT OR REPLACE INTO registered_groups
+                INSERT INTO registered_groups
                 (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(jid) DO UPDATE SET
+                    name              = excluded.name,
+                    folder            = excluded.folder,
+                    trigger_pattern   = excluded.trigger_pattern,
+                    container_config  = excluded.container_config,
+                    requires_trigger  = excluded.requires_trigger,
+                    is_main           = excluded.is_main
             """, (jid, name, folder, trigger_pattern, int(time.time() * 1000),
                   json.dumps(container_config) if container_config else None,
                   int(requires_trigger), int(is_main)))
@@ -767,24 +809,19 @@ def record_immune_threat(sender_jid: str, pattern_hash: str, threat_type: str) -
     with _db_lock:
         db = get_db()
         try:
-            existing = db.execute("""
-                SELECT id, count FROM immune_threats
-                WHERE sender_jid = ? AND pattern_hash = ?
-            """, (sender_jid, pattern_hash)).fetchone()
-
-            if existing:
-                new_count = existing["count"] + 1
-                db.execute("""
-                    UPDATE immune_threats SET count = ?, last_seen = datetime('now')
-                    WHERE id = ?
-                """, (new_count, existing["id"]))
-            else:
-                db.execute("""
-                    INSERT INTO immune_threats (sender_jid, pattern_hash, threat_type)
-                    VALUES (?, ?, ?)
-                """, (sender_jid, pattern_hash, threat_type))
-                new_count = 1
-
+            # Atomic upsert: the UNIQUE(sender_jid, pattern_hash) constraint
+            # allows a single statement to either insert a new threat or increment
+            # the counter on an existing one, eliminating the previous racy
+            # SELECT-then-INSERT/UPDATE pattern.  The lock is still held to keep
+            # the follow-up SUM query consistent with the write.
+            db.execute("""
+                INSERT INTO immune_threats (sender_jid, pattern_hash, threat_type, count,
+                                           first_seen, last_seen)
+                VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))
+                ON CONFLICT(sender_jid, pattern_hash) DO UPDATE SET
+                    count    = count + 1,
+                    last_seen = datetime('now')
+            """, (sender_jid, pattern_hash, threat_type))
             db.commit()
         except Exception:
             db.rollback()
@@ -794,7 +831,7 @@ def record_immune_threat(sender_jid: str, pattern_hash: str, threat_type: str) -
         total = db.execute("""
             SELECT SUM(count) as total FROM immune_threats WHERE sender_jid = ?
         """, (sender_jid,)).fetchone()
-        return total["total"] if total else new_count
+        return int(total["total"]) if total and total["total"] is not None else 1
 
 
 def is_sender_blocked(sender_jid: str) -> bool:
@@ -1059,11 +1096,17 @@ def delete_warm_logs_before(jid: str, cutoff_ts: float) -> int:
 
 
 def memory_fts_search(jid: str, query: str, limit: int = 10) -> list[dict]:
-    """Hybrid search across warm and cold memory using FTS5."""
+    """Hybrid search across warm and cold memory using FTS5.
+
+    Searches both group_warm_logs_fts and group_cold_memory_fts and returns
+    up to *limit* combined results sorted by relevance (best match first).
+    Previously only warm memory was searched; this was a silent data-loss bug
+    that caused agents to miss relevant cold-memory archives.
+    """
     results = []
     with _db_lock:
         db = get_db()
-        # Warm memory FTS search
+        # ── Warm memory FTS search ────────────────────────────────────────────
         try:
             rows = db.execute(
                 """SELECT w.id, w.log_date, w.content, w.created_at,
@@ -1085,7 +1128,37 @@ def memory_fts_search(jid: str, query: str, limit: int = 10) -> list[dict]:
                 })
         except Exception:
             pass
-    return results
+
+        # ── Cold memory FTS search ────────────────────────────────────────────
+        # The docstring promised hybrid search but cold memory was never queried.
+        # Added here to fulfil the contract and prevent agents from missing
+        # long-term archived information stored in group_cold_memory.
+        try:
+            rows = db.execute(
+                """SELECT c.id, c.title, c.content, c.tags, c.created_at,
+                          bm25(group_cold_memory_fts) as fts_score
+                   FROM group_cold_memory_fts f
+                   JOIN group_cold_memory c ON c.id = f.rowid
+                   WHERE f.jid=? AND group_cold_memory_fts MATCH ?
+                   ORDER BY fts_score
+                   LIMIT ?""",
+                (jid, query, limit),
+            ).fetchall()
+            for r in rows:
+                results.append({
+                    "source": "cold",
+                    "date": r[1],          # title used as date-like label
+                    "content": r[2][:500],
+                    "tags": r[3],
+                    "created_at": r[4],
+                    "fts_score": abs(r[5]) if r[5] else 0.0,
+                })
+        except Exception:
+            pass
+
+    # Re-sort combined results by relevance descending (highest score = best match)
+    results.sort(key=lambda x: x["fts_score"], reverse=True)
+    return results[:limit]
 
 
 def record_micro_sync(jid: str) -> None:
