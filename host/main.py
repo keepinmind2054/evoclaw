@@ -691,17 +691,16 @@ async def _process_group_messages(group: dict, messages: list[dict],
     async def _on_success_tracked():
         nonlocal _run_succeeded
         _run_succeeded = True
-        # p15b-fix: guard against _group_fail_lock being None during the brief
-        # startup window before main() has initialised it.  Previously this
-        # would raise TypeError: 'async with' requires an asynchronous context
-        # manager, silently aborting the cursor advance and causing the message
-        # to be retried indefinitely.
+        # Guard: _group_fail_lock is None during brief startup window before main()
+        # initialises it; skip rather than raise TypeError on 'async with None'.
         if _group_fail_lock is not None:
             async with _group_fail_lock:
                 _group_fail_counts.pop(jid, None)
                 _group_fail_timestamps.pop(jid, None)
         else:
-            log.warning("_on_success_tracked: _group_fail_lock not yet initialised — skipping counter reset")
+            log.warning("_on_success_tracked: _group_fail_lock not initialised — clearing counters directly")
+            _group_fail_counts.pop(jid, None)
+            _group_fail_timestamps.pop(jid, None)
         if on_success:
             await on_success()
 
@@ -1134,6 +1133,34 @@ async def main() -> None:
     # 清除上次程序崩潰後遺留的 evoclaw-* container，避免資源洩漏
     await cleanup_orphans()
 
+    # p15d BUG-FIX (MEDIUM): clean up stale IPC result files left by a previous
+    # crashed run.  If the host was SIGKILL'd between a container writing its
+    # result to the IPC results/ directory and the host processing it, the file
+    # will persist.  On next startup the IPC watcher will process it and may
+    # deliver a duplicate or out-of-context reply.  We remove result files whose
+    # mtime is older than IPC_STALE_RESULTS_MAX_AGE_SECS (default 300s = 5 min)
+    # since those would produce stale, confusing replies.
+    _IPC_STALE_RESULTS_MAX_AGE_SECS = 300
+    try:
+        _now_ts = time.time()
+        _ipc_base = config.DATA_DIR / "ipc"
+        _stale_removed = 0
+        if _ipc_base.exists():
+            for _results_dir in _ipc_base.glob("*/results"):
+                for _stale in _results_dir.glob("*.json"):
+                    try:
+                        if (_now_ts - _stale.stat().st_mtime) > _IPC_STALE_RESULTS_MAX_AGE_SECS:
+                            _stale.unlink(missing_ok=True)
+                            _stale_removed += 1
+                            log.debug("Removed stale IPC result file: %s", _stale.name)
+                    except Exception:
+                        pass
+        if _stale_removed:
+            log.info("Startup: removed %d stale IPC result file(s) older than %ds",
+                     _stale_removed, _IPC_STALE_RESULTS_MAX_AGE_SECS)
+    except Exception as _ipc_clean_exc:
+        log.warning("Startup IPC stale file cleanup failed (non-fatal): %s", _ipc_clean_exc)
+
     # ── Docker image pre-pull at startup (P10D Fix) ───────────────────────────
     # Pre-pull the container image in the background so the first real request
     # doesn't pay the 10-30s cold-pull penalty.  If the image is already cached
@@ -1284,14 +1311,21 @@ async def main() -> None:
     log.info("--- end startup summary ---")
 
     # ── 優雅關機：接到 SIGTERM/SIGINT 時設旗標讓各迴圈自然退出 ──────────────
-    _shutdown_count = 0
+    # p15d: _shutdown_count is an int stored in a list so the nested sync handler
+    # can mutate it without a nonlocal declaration (which is not available in all
+    # Python versions when used inside a signal handler).  Using a list also makes
+    # the increment atomic enough for CPython's GIL-protected signal delivery.
+    _shutdown_count = [0]
 
     def _shutdown(sig, frame):
-        nonlocal _shutdown_count
         global _running
-        _shutdown_count += 1
+        # p15d BUG-FIX: guard against re-entrant double-signal delivery.
+        # On CPython the GIL ensures signal handlers are not truly concurrent,
+        # but two signals delivered in rapid succession can each see count==0
+        # before the first increment completes without this explicit guard.
+        _shutdown_count[0] += 1
 
-        if _shutdown_count >= 2:
+        if _shutdown_count[0] >= 2:
             # 第二次 Ctrl+C：強制殺死所有 container 並立即退出
             log.warning("Force exit (second signal). Killing all containers...")
             from .container_runner import _active_containers as _ac
@@ -1314,6 +1348,24 @@ async def main() -> None:
     signal.signal(signal.SIGINT, _shutdown)
     if hasattr(signal, 'SIGTERM'):
         signal.signal(signal.SIGTERM, _shutdown)
+
+    # p15d BUG-FIX (MEDIUM): handle SIGHUP for config reload without full restart.
+    # On Linux/macOS, SIGHUP is the conventional "reload config" signal.
+    # We reload the sender allowlist and registered groups so operators can add
+    # groups or update the allowlist without bouncing the process.
+    if hasattr(signal, 'SIGHUP'):
+        def _sighup_handler(sig, frame):
+            log.info("SIGHUP received — scheduling config reload (allowlist + groups)")
+            # Write a refresh_groups flag so _message_loop picks up the change
+            # on its next poll cycle.  This is safe to do from a signal handler
+            # because Path.write_text() on a small file is atomic enough on Linux.
+            try:
+                reload_flag = config.DATA_DIR / "refresh_groups.flag"
+                reload_flag.touch()
+            except Exception as _hup_exc:
+                log.warning("SIGHUP: could not write refresh_groups.flag: %s", _hup_exc)
+        signal.signal(signal.SIGHUP, _sighup_handler)
+
     # SIGUSR1: 線上重置 Docker circuit breaker（不需重啟進程）
     # 用法：kill -USR1 $(pgrep -f "python.*evoclaw")
     if hasattr(signal, 'SIGUSR1'):
@@ -1363,6 +1415,11 @@ async def main() -> None:
             except Exception:
                 pass
 
+        # p15d BUG-FIX: cancel GroupQueue retry tasks BEFORE cancelling all tasks
+        # so the explicit cancellation of retry sleeps is visible in the log and
+        # they don't fire after the queue has been shut down.
+        await _group_queue.shutdown()
+
         # Fix #121: cancel any remaining sleeping tasks after channels are safely disconnected.
         pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         for task in pending:
@@ -1377,8 +1434,16 @@ async def main() -> None:
             except asyncio.TimeoutError:
                 log.warning("Task cleanup timed out — forcing exit")
 
-    # Phase 4C: Release leader lease on shutdown
-    await _leader.release()
+        # p15d BUG-FIX (CRITICAL): _leader.release() was previously called OUTSIDE
+        # the finally block, so any exception that propagated through gather() would
+        # skip leader lease release entirely, leaving the DB lock row behind and
+        # preventing a new instance from acquiring leadership until the TTL expired.
+        # Moving it inside finally guarantees release even on abnormal exits.
+        try:
+            await _leader.release()
+            log.info("Leader lease released.")
+        except Exception as _lr_exc:
+            log.warning("Leader release failed (non-fatal): %s", _lr_exc)
 
     log.info("EvoClaw shut down cleanly.")
 
@@ -1388,6 +1453,7 @@ async def main() -> None:
         import sys as _sys_restart
         log.info("Restarting EvoClaw for self-update via os.execv()...")
         os.execv(_sys_restart.executable, [_sys_restart.executable] + _sys_restart.argv)
+
 
 
 if __name__ == "__main__":

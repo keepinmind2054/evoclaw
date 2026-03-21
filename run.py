@@ -62,6 +62,14 @@ def _preflight_check() -> None:
 
 
 if __name__ == "__main__":
+    # p15d BUG-FIX (LOW): set WindowsProactorEventLoopPolicy before asyncio.run()
+    # so asyncio subprocesses work correctly on Windows.  Without this, Docker
+    # subprocess spawning raises NotImplementedError on Python 3.8+ Windows because
+    # the default SelectorEventLoop does not support subprocess pipes.
+    # host/main.py's __main__ block already did this but run.py (the actual entry
+    # point) did not, so the policy was never applied when using `python run.py`.
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
     _preflight_check()
     from host.main import main
     asyncio.run(main())

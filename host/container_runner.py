@@ -75,7 +75,22 @@ _DEFAULT_HISTORY_LOOKBACK_HOURS = 4
 
 # ── Active container tracking (for dashboard) ─────────────────────────────────
 _active_containers: dict[str, dict] = {}  # container_name → info dict
-_active_lock = asyncio.Lock()  # asyncio.Lock for use in async coroutines
+# p15d BUG-FIX (MEDIUM): asyncio.Lock() created at module import time is bound to
+# the event loop that exists at import time (Python 3.10 deprecation, Python 3.12
+# may raise RuntimeError when the lock is used in a different loop).  Use None and
+# lazily initialize via _get_active_lock() once the event loop is running.
+_active_lock: asyncio.Lock | None = None  # lazily initialized; see _get_active_lock()
+
+
+def _get_active_lock() -> asyncio.Lock:
+    """Return (and lazily create) the asyncio.Lock for _active_containers.
+
+    Called from within coroutines so the running event loop always exists.
+    """
+    global _active_lock
+    if _active_lock is None:
+        _active_lock = asyncio.Lock()
+    return _active_lock
 
 # ── Docker circuit breaker ─────────────────────────────────────────────────────
 # Per-group circuit breaker（每個群組獨立追蹤失敗）
@@ -343,7 +358,7 @@ def _safe_name(folder: str) -> str:
 
 async def update_container_activity(container_name: str, activity: str) -> None:
     """Update the current_activity field for a running container (called from stderr stream)."""
-    async with _active_lock:
+    async with _get_active_lock():
         if container_name in _active_containers:
             _active_containers[container_name]["current_activity"] = activity
 
@@ -494,7 +509,7 @@ async def run_container_agent(
     input_json = json.dumps(input_data, ensure_ascii=True)
     # 記錄 container 啟動時間，用於計算回應時間（適應度追蹤）
     t0 = time.time()
-    async with _active_lock:
+    async with _get_active_lock():
         _active_containers[container_name] = {
             "name": container_name,
             "folder": folder,
@@ -623,7 +638,7 @@ async def run_container_agent(
                             log.info("[%s] %s", container_name, safe_line)
                         else:
                             log.debug("[%s] %s", container_name, safe_line)
-                        async with _active_lock:
+                        async with _get_active_lock():
                             if container_name in _active_containers:
                                 _active_containers[container_name]["current_activity"] = safe_line
 
@@ -805,6 +820,7 @@ async def run_container_agent(
             await _notify_error("⚠️ AI 回應格式異常，將自動重試，無需任何操作。|||MONITOR_CONTEXT|||" + _schema_ctx)
             return {"status": "error", "error": "schema mismatch: result is not a dict", "messages": []}
 
+
         # 三層記憶系統：container 可透過 memory_patch 欄位更新熱記憶
         # agent 在回覆中附上新的記憶內容，host 自動寫入熱記憶供下次對話使用
         if isinstance(result, dict) and result.get("memory_patch"):
@@ -914,7 +930,7 @@ async def run_container_agent(
         await _notify_error(f"⚠️ 執行時發生錯誤（{type(e).__name__}），請稍後再試。|||MONITOR_CONTEXT|||{_exc_ctx}")
         return {"status": "error", "result": None, "error": str(e)}
     finally:
-        async with _active_lock:
+        async with _get_active_lock():
             _active_containers.pop(container_name, None)
 
 async def _stop_container(name: str) -> None:
@@ -954,7 +970,7 @@ async def kill_all_containers() -> None:
     """強制 kill 所有正在追蹤的 container（shutdown 時呼叫）。
     使用 docker kill（SIGKILL）確保即時終止，不等待 grace period。
     """
-    async with _active_lock:
+    async with _get_active_lock():
         names = list(_active_containers.keys())
     if not names:
         return
@@ -975,20 +991,33 @@ async def cleanup_orphans() -> None:
 
     用 --filter name=evoclaw- 找出所有屬於本系統的 container，
     強制刪除（-f）避免名稱衝突或資源洩漏。
+
+    p15d BUG-FIX (HIGH): previously used `docker ps` (only RUNNING containers).
+    After a SIGKILL the Python process dies before Docker's --rm cleanup runs,
+    leaving containers in the "Exited" state that `docker ps` (without -a) does
+    NOT list.  These stopped-but-not-removed containers block future runs with
+    the same name and waste storage.  Use `docker ps -a` to catch all states.
     """
     try:
+        # -a: include stopped containers (Exited, Created, etc.) not just running ones.
+        # This is critical for post-SIGKILL recovery where --rm never fired.
         proc = await asyncio.create_subprocess_exec(
-            "docker", "ps", "-q", "--filter", "name=evoclaw-",
+            "docker", "ps", "-a", "-q", "--filter", "name=evoclaw-",
             stdout=asyncio.subprocess.PIPE,
         )
-        out, _ = await proc.communicate()
-        ids = out.decode().split()
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+        ids = [i for i in out.decode().split() if i]
         if ids:
-            rm_proc = await asyncio.create_subprocess_exec("docker", "rm", "-f", *ids,
+            rm_proc = await asyncio.create_subprocess_exec(
+                "docker", "rm", "-f", *ids,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            await rm_proc.wait()
-            log.info("Cleaned up %d orphan containers", len(ids))
+            await asyncio.wait_for(rm_proc.wait(), timeout=15.0)
+            log.info("Cleaned up %d orphan container(s) (running + stopped)", len(ids))
+        else:
+            log.debug("No orphan containers found at startup")
+    except asyncio.TimeoutError:
+        log.warning("cleanup_orphans timed out — Docker may be slow; orphans may remain")
     except Exception as e:
         log.warning(f"Orphan cleanup failed: {e}")

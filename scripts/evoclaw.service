@@ -20,16 +20,37 @@ Type=simple
 User=YOUR_USERNAME
 WorkingDirectory=/path/to/evoclaw
 
+# p15d BUG-FIX (MEDIUM): load .env file so environment variables are available
+# to the process without requiring them to be exported in the shell.
+# Remove or comment this line if you manage env vars through a different mechanism.
+EnvironmentFile=-/path/to/evoclaw/.env
+
 ExecStart=/usr/bin/python3 /path/to/evoclaw/run.py
 Restart=on-failure
-RestartSec=5s
+RestartSec=10s
+
+# p15d BUG-FIX (MEDIUM): KillMode=mixed sends SIGTERM to the main process only
+# (not the entire cgroup), then SIGKILL after TimeoutStopSec.  The default
+# KillMode=control-group sends SIGTERM to ALL processes in the cgroup, which
+# includes docker CLI subprocesses spawned for cleanup — killing them before the
+# Python process can run `docker kill` or `docker rm -f` for orphan cleanup.
+KillMode=mixed
+
+# p15d BUG-FIX (MEDIUM): TimeoutStopSec was 45s but the shutdown sequence needs:
+#   - up to 30s waiting for in-flight containers to finish (wait_for_active)
+#   - up to  5s for kill_all_containers (if containers are still running)
+#   - up to  5s for asyncio task cleanup gather
+#   - a few seconds for channel disconnect + leader release
+# Total worst-case is ~45s, which is right at the old limit — systemd would race
+# to send SIGKILL before cleanup finished, leaving orphan containers.
+# Raised to 90s to give the graceful shutdown sequence room to complete.
+# Docker's own container stop timeout is handled inside the process (5s docker kill),
+# so 90s is still safe — systemd will SIGKILL if Python hangs past that.
+TimeoutStopSec=90
 
 # Log to journald (view with: journalctl -u evoclaw -f)
 StandardOutput=journal
 StandardError=journal
-
-# Give containers time to finish before forceful kill
-TimeoutStopSec=45
 
 [Install]
 WantedBy=multi-user.target
