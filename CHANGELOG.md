@@ -1,3 +1,65 @@
+## [1.21.0] — 2026-03-21
+
+### Fixed (Phase 14: Skills, Memory & Enterprise — 57 fixes)
+
+Four PRs covering the evolution system, enterprise connectors & container tools, skills engine, and memory system.
+
+#### Evolution System (PR #367 — 4 fixes)
+
+- **`immune.py` Chinese attack pattern false negatives (HIGH)** — 10 attack patterns missed Traditional/Simplified char variants (進/进, 從/从), word-order variants (現在你是 vs 你現在), missing space handling (AI 助手), and optional suffix/prefix coverage; all 42 attacks now detected with 0 false positives
+- **`daemon.py` avg_ms calculation corrupted by failed runs (HIGH)** — failed runs and negative values included in average → genome evolved toward wrong response style; fixed to exclude failed/negative values
+- **`fitness.py` final score not clamped (MEDIUM)** — corrupted DB row could produce score > 1.0; added clamp to [0.0, 1.0]
+- **`fitness_reporter.py` WebSocket disconnect permanent (MEDIUM)** — no reconnect logic → all subsequent fitness data silently dropped; added reconnect with file fallback
+
+#### Enterprise Connectors & Container Tools (PR #368 — 20 fixes)
+
+- **`hpc_connector.py` job name newline injection into #SBATCH directives (CRITICAL)** — `job\n#SBATCH --wrap=rm -rf /` allowed arbitrary directive injection; added newline sanitization
+- **`jira_connector.py` issue key path traversal in REST URL (CRITICAL)** — `../../../admin` in issue key escaped API base path; added strict issue key validation
+- **`agent.py` `_tool_bash()` timeout killed only main process (CRITICAL)** — child process group (SSH/git subprocesses) leaked indefinitely; replaced with `os.killpg` to kill entire process group
+- **`agent.py` `_tool_read()` symlink bypass (CRITICAL)** — symlink to `/etc/passwd` passed raw-string path check but read host files; added `os.path.realpath()` resolution before path validation
+- **`hpc_connector.py` SSH BatchMode missing (HIGH)** — interactive prompt hung server; inherited stdin blocked subprocess; no output size limit on job output; all three addressed
+- **`jira_connector.py` API token in public attribute (HIGH)** — token exposed via object inspection; no HTTP timeout; unbounded max_results pagination; all three addressed
+- **`ldap_connector.py` bind password in public attribute (HIGH)** — password exposed via object inspection; stale connection not detected; no LDAP connection timeout; all three addressed
+- **`workflow_engine.py` no dependency or cycle validation (HIGH)** — undefined dependencies caused infinite scheduler loop; missing cycle detection caused infinite loop; both guards added
+- **`agent.py` `_tool_edit()` ambiguous old_string silent edit (HIGH)** — first occurrence edited with no warning to LLM when old_string matched multiple locations; added ambiguity warning
+- **`agent.py` `_tool_glob()` deep `**` glob blocked agentic loop (HIGH)** — unthreaded glob with no timeout blocked loop 30-60 seconds; added thread + timeout
+- **`ldap_connector.py` `is_user_in_group()` unbounded memory (MEDIUM)** — loaded all group members into memory; no close() method; both addressed
+- **`workflow_engine.py` unbounded step result size (MEDIUM)** — no cap on step output stored in state; added size limit
+- **`agent.py` `_tool_bash()` exit code not surfaced (MEDIUM)** — LLM never received exit code; stdin not closed; both fixed
+- **`agent.py` `_tool_read()` binary file handling (MEDIUM)** — binary files returned as garbled text; UnicodeDecodeError on non-UTF-8 files; added binary detection and encoding fallback
+- **`agent.py` `_tool_write()`/`_tool_edit()` file permissions reset (MEDIUM)** — every write reset permissions to default; added permission preservation
+- **`agent.py` `_tool_web_fetch()` charset ignored (MEDIUM)** — charset from Content-Type header ignored; always decoded as UTF-8; added charset extraction and correct decoding
+
+#### Skills Engine (PR #369 — 18 fixes)
+
+- **`workflow_engine.py` `exec_skill()` missing await (CRITICAL)** — async function called without `await` → always returned coroutine object → handler.py was NEVER executed for any skill; all skills returned SKILL.md content instead; added `await`
+- **`file_ops.py` no path-traversal validation on delete/rename (CRITICAL)** — malicious skill could delete `/etc/passwd` or rename arbitrary host files; added strict path validation
+- **`manifest.py` empty YAML AttributeError (HIGH)** — empty manifest file raised AttributeError on load; path-traversal in file_ops/container_tools paths not validated; both fixed
+- **`state.py` crash-truncated state.yaml (HIGH)** — truncated file raised AttributeError on next boot; no .tmp write fallback; added atomic write and recovery
+- **`apply.py` merge conflict leaves project with conflict markers (HIGH)** — backup not restored on merge conflict → project left with `<<<<<<<` markers; container_tools path escape not fully validated; both fixed
+- **`backup.py` file outside project root aborted entire backup (HIGH)** — single out-of-root file terminated full backup operation; changed to skip-and-warn
+- **`lock.py` OSError on Windows not caught (HIGH)** — stale lock file never cleaned on Windows; added OSError handler
+- **`rebase.py` lock acquired after writing patch (HIGH)** — race condition allowed concurrent rebase on same project; binary files corrupted patch; lock moved before write, binary files skipped
+- **`uninstall.py` state read/write outside lock (HIGH)** — concurrent uninstall could overwrite state; added lock around state operations
+- **`merge.py` git unavailable copied wrong file (MEDIUM)** — fallback copied current file instead of incoming; fixed file selection logic
+- **`apply.py` non-atomic package.json/.env.example write (MEDIUM)** — partial writes possible on crash; converted to atomic tmp + replace
+- **`customize.py` non-atomic session file write (MEDIUM)** — partial writes possible on crash; converted to atomic tmp + replace
+- **`structured.py` comment lines parsed as env keys (MEDIUM)** — `# comment` treated as key → false conflict reports; added comment line filter
+- **`manifest.py` empty string accepted as valid required field (MEDIUM)** — empty string bypassed required field validation; added non-empty check
+
+#### Memory System (PR #370 — 15 fixes)
+
+- **`hot.py` UTF-8 boundary corruption (CRITICAL)** — multi-byte CJK/emoji characters split at 8KB limit silently dropped partial characters; added character-boundary-aware chunking
+- **`memory_bus.py` `delete()` authorization bypass (CRITICAL)** — `scope != 'private'` check allowed any agent to delete any shared memory; replaced with explicit owner check
+- **`summarizer.py` silent memory truncation (CRITICAL)** — LLM only saw first 3000 chars of 8KB memory during compression → last ~5000 chars permanently lost every compression cycle; fixed to pass full content
+- **`warm.py` off-by-one in size checks and wrong day summarized (HIGH)** — strict `<` vs `<=` boundary caused incorrect size evaluation; daily wrapup summarized last 24h instead of yesterday's logs; both fixed
+- **`memory_bus.py` vector scores exceeded [0,1] range (HIGH)** — 1.2 boost factor produced scores > 1.0; VectorStore ignored project scope; FTS rank normalization used arbitrary /10 divisor replaced with sigmoid; DDL split on `;` broke CREATE TRIGGER → FTS triggers never created → all FTS search returned zero results; all five addressed
+- **`summarizer.py` LLM output stored without validation (HIGH)** — error messages and prose stored as memory; no size validation on compressed output (could grow larger than original); added validation and size cap
+- **`warm.py` midnight race condition (MEDIUM)** — two `datetime.now()` calls could straddle midnight producing split-day summaries; replaced with single captured timestamp
+- **`compound.py` `.strip()` corrupted markdown structure (MEDIUM)** — leading whitespace stripped from markdown broke indentation/structure; changed to `.rstrip()`
+- **`memory_bus.py` vector results showed wrong created_at (MEDIUM)** — timestamp always set to current time instead of stored value; fixed to read from DB record
+- **`search.py` unbounded BM25 scores (MEDIUM)** — uncapped BM25 scores made recency term irrelevant in blended search ranking; added score normalization
+
 ## [1.20.0] — 2026-03-21
 
 ### Fixed (Phase 13: Security & Reliability — 75 fixes)
