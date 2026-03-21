@@ -54,10 +54,15 @@ def main():
         if env.get(k, "").strip():
             check(f"  {k} ({label})", True)
 
-    # Channel token — at least one
+    # Channel token — at least one (required: without a token the bot cannot receive messages)
+    # p12b fix: promote from non-fatal to fatal (all_ok &=) because a bot with no channel
+    # token starts "successfully" but is completely deaf — worse than failing at startup.
     has_channel = any(env.get(k, "").strip() for k in ["TELEGRAM_BOT_TOKEN", "DISCORD_BOT_TOKEN", "SLACK_BOT_TOKEN"])
-    check("At least one channel token set", has_channel,
-          "optional — set TELEGRAM_BOT_TOKEN, DISCORD_BOT_TOKEN, or SLACK_BOT_TOKEN" if not has_channel else "")
+    all_ok &= check(
+        "At least one channel token set",
+        has_channel,
+        "set TELEGRAM_BOT_TOKEN, DISCORD_BOT_TOKEN, or SLACK_BOT_TOKEN in .env" if not has_channel else "",
+    )
 
     # OWNER_IDS — warn if missing (fail-open without it)
     owner_ids = env.get("OWNER_IDS", "").strip()

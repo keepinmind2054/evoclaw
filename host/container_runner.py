@@ -191,21 +191,26 @@ def _read_secrets() -> dict:
         "ASSISTANT_NAME",
     ])
 
-def _validate_secrets(secrets: dict) -> None:
+def _validate_secrets(secrets: dict) -> bool:
     """Validate that at least one LLM API key is present; warn on startup for missing keys.
 
+    Returns True when at least one valid LLM key is present, False otherwise.
     Emits a CRITICAL log when no LLM key is found (agent will be unable to call any LLM),
     and an individual WARNING for each key that is set but appears malformed (too short).
+
+    p12b: now returns a bool so callers (main.py startup summary) can act on the result.
     """
     llm_keys = ["GOOGLE_API_KEY", "NIM_API_KEY", "OPENAI_API_KEY", "CLAUDE_API_KEY"]
     has_any = any(secrets.get(k, "").strip() for k in llm_keys)
     if not has_any:
         log.critical(
-            "No LLM API key is set (%s). "
-            "EvoClaw will start but every agent invocation will fail. "
-            "Set at least one of these keys in .env and restart.",
+            "STARTUP FAILURE: No LLM API key is set (%s). "
+            "Every agent invocation will fail until at least one key is added to .env. "
+            "Add one of these keys to .env and restart: %s",
+            ", ".join(llm_keys),
             ", ".join(llm_keys),
         )
+        return False
     else:
         # Warn on each key that is present but suspiciously short (likely a placeholder).
         for key in llm_keys:
@@ -216,6 +221,7 @@ def _validate_secrets(secrets: dict) -> None:
                     "check that it is not a placeholder value.",
                     key, len(val),
                 )
+    return True
 
 def _build_volume_mounts(group: dict) -> list[str]:
     """
