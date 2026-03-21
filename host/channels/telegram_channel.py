@@ -79,17 +79,33 @@ class TelegramChannel:
                     groups = {g["jid"]: g for g in self._registered_groups}
                     group = groups.get(jid)
                     if group and group.get("requires_trigger", True):
-                        if not text.lower().startswith(f"@{config.ASSISTANT_NAME.lower()}"):
+                        # Fix(p12a): use TRIGGER_PATTERN (regex with \b) for consistency
+                        # with Discord and _process_group_messages; the previous
+                        # str.startswith() check had no word-boundary so "@Eveline"
+                        # would incorrectly pass when ASSISTANT_NAME="Eve".
+                        if not config.TRIGGER_PATTERN.match(text):
                             return
 
-                    await self._on_message(
-                        jid=jid,
-                        sender=sender,
-                        sender_name=sender_name,
-                        content=text,
-                        is_group=update.effective_chat.type in ("group", "supergroup"),
-                        channel="telegram",
-                    )
+                    # Fix(p12a): wrap pipeline call in try/except so that any
+                    # exception raised inside _on_message (RBAC, DB, immune check,
+                    # dedup) does not propagate back into python-telegram-bot's
+                    # dispatcher and crash the update handler, which would cause
+                    # that update to be silently dropped and logged as an unhandled
+                    # application error.
+                    try:
+                        await self._on_message(
+                            jid=jid,
+                            sender=sender,
+                            sender_name=sender_name,
+                            content=text,
+                            is_group=update.effective_chat.type in ("group", "supergroup"),
+                            channel="telegram",
+                        )
+                    except Exception as _exc:
+                        log.error(
+                            "Telegram handle: unhandled exception in _on_message for jid=%s: %s",
+                            jid, _exc, exc_info=True,
+                        )
 
                 self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
 

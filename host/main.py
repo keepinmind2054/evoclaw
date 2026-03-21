@@ -248,6 +248,12 @@ def _is_rate_limited(jid: str) -> bool:
 # Prevents duplicate processing caused by webhook retries or channel double-delivery.
 # Uses an OrderedDict as a bounded LRU cache: oldest entries are evicted when full.
 _DEDUP_MAX = 1000  # maximum entries before oldest is evicted
+# Fix(p12a): store (insertion_time, True) instead of bare True so that entries
+# older than _DEDUP_TTL_SECS are expired on the next lookup.  Without TTL, a
+# fingerprint inserted once permanently blocks an identical message from ever
+# being re-processed (e.g. a user legitimately resending the same text hours
+# later, or after the DB was cleared and the user retries the same prompt).
+_DEDUP_TTL_SECS = 300.0  # 5 minutes — safely covers all webhook retry windows
 _seen_msg_fingerprints: collections.OrderedDict = collections.OrderedDict()
 _dedup_lock: asyncio.Lock | None = None  # initialized in main() after event loop starts
 
@@ -256,7 +262,9 @@ async def _is_duplicate_message(jid: str, sender: str, content: str) -> bool:
     """Return True if this (jid, sender, content) combination was seen recently.
 
     A SHA-256 fingerprint of the three values is used as the key to bound memory
-    usage. If the dedup set is full, the oldest entry is evicted (LRU eviction).
+    usage. If the dedup store is full, the oldest entry is evicted (LRU eviction).
+    Entries older than _DEDUP_TTL_SECS are also expired so legitimate re-sends
+    after the TTL window are not mistakenly blocked.
 
     The entire check-then-insert is wrapped in a single async with _dedup_lock:
     block so no two coroutines can check/insert simultaneously (Fix #105).
@@ -267,11 +275,16 @@ async def _is_duplicate_message(jid: str, sender: str, content: str) -> bool:
         return False
     raw = f"{jid}\x00{sender}\x00{content}"
     fp = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()
+    now = time.time()
     async with _dedup_lock:
         if fp in _seen_msg_fingerprints:
-            _seen_msg_fingerprints.move_to_end(fp)  # mark as recently used
-            return True
-        _seen_msg_fingerprints[fp] = True
+            inserted_at = _seen_msg_fingerprints[fp]
+            if now - inserted_at < _DEDUP_TTL_SECS:
+                _seen_msg_fingerprints.move_to_end(fp)  # mark as recently used
+                return True
+            # TTL expired — treat as a fresh message and overwrite the entry
+            del _seen_msg_fingerprints[fp]
+        _seen_msg_fingerprints[fp] = now
         if len(_seen_msg_fingerprints) > _DEDUP_MAX:
             _seen_msg_fingerprints.popitem(last=False)  # evict oldest
         return False
@@ -481,6 +494,11 @@ async def _on_message(jid: str, sender: str, sender_name: str, content: str,
     # 更新 chats 表的最後訊息時間與頻道資訊（用於管理介面顯示）
     db.store_chat_metadata(jid, sender_name, ts, channel, is_group)
 
+    # Fix(p12a): immediately trigger message processing instead of waiting up to
+    # POLL_INTERVAL (default 2 s) for _message_loop to notice the new row.
+    # GroupQueue serialises per-group so this is safe to call concurrently.
+    _group_queue.enqueue_message_check(jid)
+
     # 在訊息儲存後才送出 typing indicator，確保 DB 寫入不會被 network I/O 延遲阻塞
     ch = find_channel(jid)
     if ch and hasattr(ch, "send_typing"):
@@ -517,30 +535,31 @@ async def _process_group_messages(group: dict, messages: list[dict],
 
     # ── Consecutive failure guard: prevent infinite retry loops ───────────────
     if _group_fail_lock is None:
-        # Fix: previously returned immediately here, which caused the message to
-        # be silently dropped — GroupQueue had already cleared pending_messages
-        # before calling this function so the message would never be retried.
-        # Instead, skip the guard and proceed with processing.  This can only
-        # happen during the brief window between process start and main() init,
-        # so the risk of infinite loops is negligible.
+        # Fix(p12a): the previous code logged a warning here then fell through
+        # to "async with _group_fail_lock" which raises TypeError: 'NoneType'
+        # object does not support the asynchronous context manager protocol.
+        # Instead, skip the guard entirely during the brief startup window
+        # before main() initialises the lock.  The risk of infinite loops
+        # without the guard is negligible in that tiny window.
         log.warning("_group_fail_lock not initialized — skipping consecutive failure guard and proceeding")
-    async with _group_fail_lock:
-        fail_count = _group_fail_counts.get(jid, 0)
-        last_fail = _group_fail_timestamps.get(jid, 0.0)
-        if fail_count >= _GROUP_MAX_FAILS:
-            if time.time() - last_fail < _GROUP_FAIL_COOLDOWN:
-                log.warning(
-                    "Group %s has failed %d times consecutively, cooling down for %ds",
-                    jid, fail_count, int(_GROUP_FAIL_COOLDOWN - (time.time() - last_fail))
-                )
-                return
-            else:
-                # Cooldown expired — decay counter and allow retry
-                # Instead of resetting to 0, reduce by 2 so repeated failures
-                # accumulate longer cooldowns
-                _group_fail_counts[jid] = max(0, _group_fail_counts.get(jid, 0) - 2)
-                _group_fail_timestamps.pop(jid, None)
-                log.info("group %s cooldown expired; fail_count decayed to %d", jid, _group_fail_counts[jid])
+    else:
+        async with _group_fail_lock:
+            fail_count = _group_fail_counts.get(jid, 0)
+            last_fail = _group_fail_timestamps.get(jid, 0.0)
+            if fail_count >= _GROUP_MAX_FAILS:
+                if time.time() - last_fail < _GROUP_FAIL_COOLDOWN:
+                    log.warning(
+                        "Group %s has failed %d times consecutively, cooling down for %ds",
+                        jid, fail_count, int(_GROUP_FAIL_COOLDOWN - (time.time() - last_fail))
+                    )
+                    return
+                else:
+                    # Cooldown expired — decay counter and allow retry
+                    # Instead of resetting to 0, reduce by 2 so repeated failures
+                    # accumulate longer cooldowns
+                    _group_fail_counts[jid] = max(0, _group_fail_counts.get(jid, 0) - 2)
+                    _group_fail_timestamps.pop(jid, None)
+                    log.info("group %s cooldown expired; fail_count decayed to %d", jid, _group_fail_counts[jid])
 
     requires_trigger = bool(group.get("requires_trigger", True))
     is_main = bool(group.get("is_main"))
@@ -897,6 +916,15 @@ async def main() -> None:
     7. 同時啟動訊息輪詢、IPC watcher 及排程器三個背景迴圈
     """
 
+    # Fix(p12a): move all global declarations to the top of main() before any
+    # reference to those names.  Previously "global _identity_store" appeared
+    # after _identity_store was assigned on line ~929, which raises
+    # SyntaxError: name '_identity_store' is used prior to global declaration
+    # and prevents the module from loading entirely.
+    global _registered_groups, _sender_allowlist, _stop_event, _group_fail_lock, _dedup_lock
+    global _startup_time, _HEARTBEAT_INTERVAL, _last_heartbeat, _leader, _rbac_store
+    global _identity_store, _MONITOR_JID, _DISCORD_WEBHOOK_URL
+
     # Phase 1 (UnifiedClaw): Initialize Universal Memory Bus, WSBridge, AgentIdentityStore
     # _identity_store is declared as a module-level global so _process_group_messages
     # can access it without a NameError (it is a module-level function, not a closure).
@@ -930,10 +958,6 @@ async def main() -> None:
             log.info("[Phase2] SdkApi OK (port %s) | MemorySummarizer OK", _sdk_api.port)
         except Exception as _e3:
             log.error("[Phase2] Initialization failed — memory summarizer unavailable: %s", _e3)
-
-    global _registered_groups, _sender_allowlist, _stop_event, _group_fail_lock, _dedup_lock
-    global _startup_time, _HEARTBEAT_INTERVAL, _last_heartbeat, _leader, _rbac_store
-    global _identity_store
 
     # Phase 3: Bot Registry + RBAC
     _bot_registry = None
@@ -1022,7 +1046,6 @@ async def main() -> None:
     # If MONITOR_JID is set, ensure it's registered in DB so the router can
     # deliver messages to it.  Safe to call every startup — INSERT OR REPLACE
     # is idempotent.
-    global _MONITOR_JID
     _MONITOR_JID = os.environ.get("MONITOR_JID", "")
     if not _MONITOR_JID:
         # Also check .env file
@@ -1050,7 +1073,6 @@ async def main() -> None:
             log.warning("Failed to register monitor group: %s", _me)
 
     # ── Discord webhook ─────────────────────────────────────────────────────────
-    global _DISCORD_WEBHOOK_URL
     _DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
     if not _DISCORD_WEBHOOK_URL:
         try:

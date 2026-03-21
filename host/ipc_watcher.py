@@ -78,7 +78,14 @@ def _sanitize_error_for_notification(error: str) -> str:
 
 def _notify_main_group_error(filename: str, error: str) -> None:
     """Send IPC error notification to main group by writing a new IPC message file.
-    The error text is sanitized to remove internal filesystem paths before delivery."""
+    The error text is sanitized to remove internal filesystem paths before delivery.
+
+    Fix(p12a): previously used Path.write_text() which is non-atomic — the OS
+    creates the file (triggering inotify CREATE) while the write is still in
+    progress, so the host may read a partial JSON and log a parse error.  Now
+    uses an atomic write: write to a .tmp sibling then os.rename() so the
+    inotify MOVED_TO event fires only after the file is fully written.
+    """
     try:
         groups = db.get_all_registered_groups()
         main = next((g for g in groups if g.get("is_main")), None)
@@ -96,7 +103,11 @@ def _notify_main_group_error(filename: str, error: str) -> None:
             "text": f"IPC Error: failed to process `{safe_filename}`\n```\n{safe_error}\n```",
         }
         out = ipc_dir / f"ipc_error_alert_{int(time.time() * 1000)}.json"
-        out.write_text(json.dumps(payload), encoding="utf-8")
+        # Atomic write: write to .tmp then rename so inotify MOVED_TO fires only
+        # after the file is complete, preventing partial-JSON reads.
+        tmp = out.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.rename(out)
     except Exception as exc:
         log.debug("_notify_main_group_error failed: %s", exc)
 
@@ -1122,6 +1133,11 @@ async def _start_ipc_watcher_inotify(get_groups_fn: Callable, route_fn: Callable
 
     _last_refresh = asyncio.get_event_loop().time()
     _REFRESH_INTERVAL = 30.0  # Re-scan groups every 30s
+    # Fix(p12a): the inotify path never called _cleanup_stale_results(), so on
+    # Linux (the primary deployment) subagent result files accumulated forever.
+    # Mirror the polling backend: run cleanup roughly every 60 s.
+    _last_result_cleanup = asyncio.get_event_loop().time()
+    _RESULT_CLEANUP_INTERVAL = 60.0  # seconds between stale-result sweeps
 
     while not stop_event.is_set():
         try:
@@ -1137,6 +1153,14 @@ async def _start_ipc_watcher_inotify(get_groups_fn: Callable, route_fn: Callable
             if now - _last_refresh > _REFRESH_INTERVAL:
                 _refresh_watches()
                 _last_refresh = now
+
+            # Periodically purge stale subagent result files
+            if now - _last_result_cleanup > _RESULT_CLEANUP_INTERVAL:
+                try:
+                    await _cleanup_stale_results()
+                except Exception as _cse:
+                    log.debug("inotify: stale result cleanup error: %s", _cse)
+                _last_result_cleanup = now
 
             # Process events
             triggered_folders: set = set()
