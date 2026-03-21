@@ -77,8 +77,11 @@ def compute_fitness(jid: str, window_days: int = 7) -> float:
 
     n = len(rows)
 
-    # 成功率：失敗的 run 會拉低分數
-    success_rate = sum(1 for r in rows if r.get("success", 1)) / n
+    # BUG-FIX: default for missing "success" key was 1 (truthy), meaning runs
+    # without an explicit success field were counted as successes, inflating the
+    # fitness score and hiding real failures.  Default to False (0) instead —
+    # a missing success flag is ambiguous and should not be treated as success.
+    success_rate = sum(1 for r in rows if r.get("success", False)) / n
 
     # 速度分數：線性映射，目標 5 秒 = 1.0，30 秒以上 = 0.0
     # Only include successful runs with positive response times.

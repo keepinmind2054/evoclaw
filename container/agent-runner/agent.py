@@ -896,7 +896,10 @@ def _load_dynamic_tools() -> None:
 
 # 向 Gemini function calling API 宣告可用的工具
 # Gemini 根據這些宣告決定何時呼叫哪個工具（function call）
-TOOL_DECLARATIONS = [
+# BUG-FIX: Guard with _GOOGLE_AVAILABLE so that importing this module when only
+# the OpenAI or Claude backend is installed does not raise AttributeError on
+# types.FunctionDeclaration (types is None when google-genai is absent).
+TOOL_DECLARATIONS = [] if not _GOOGLE_AVAILABLE or types is None else [
     types.FunctionDeclaration(
         name="Bash",
         description="Execute a bash command in /workspace/group.",
@@ -1290,22 +1293,31 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
             _log("⚠️ FAKE-PROGRESS", f"Claude called only send_message (no real work) — streak={_only_notify_turns}")
             if _only_notify_turns >= 2 and n < MAX_ITER - 2:
                 _log("🚨 FAKE-PROGRESS", f"Injecting anti-fabrication warning after {_only_notify_turns} fake-report turns")
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": "__system__",
+                # BUG-FIX: Anthropic API requires every tool_result.tool_use_id to match
+                # a real tool_use block from the preceding assistant message.  A synthetic
+                # "__system__" id that has no matching tool_use causes a 400 validation
+                # error that crashes the loop.  Inject the warning as a follow-up *user*
+                # message instead — it is semantically equivalent and always API-valid.
+                messages.append({"role": "user", "content": tool_results})
+                messages.append({
+                    "role": "user",
                     "content": (
                         "【系統警告】你已連續多輪只呼叫 send_message，沒有呼叫任何實質工具（Bash、Read、Write、run_agent 等）。"
                         "立刻停止假報告。你的下一步必須是：呼叫 Bash tool 執行指令、Read 讀取檔案、或 mcp__evoclaw__run_agent 委派任務。"
                     ),
                 })
+                # Skip the normal messages.append below since we already appended above
+                tool_results = None  # sentinel: messages already appended
         else:
             _only_notify_turns = 0  # reset streak when doing real work silently
             _turns_since_notify += 1
             if _turns_since_notify >= 5 and n < MAX_ITER - 2:
                 _log("⏰ MILESTONE", f"Claude: no send_message for {_turns_since_notify} turns — injecting reminder")
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": "__system_milestone__",
+                # BUG-FIX: same issue — inject as a separate user message, not a
+                # tool_result with a fake tool_use_id that Anthropic would reject.
+                messages.append({"role": "user", "content": tool_results})
+                messages.append({
+                    "role": "user",
                     "content": (
                         f"⏰ 你已執行 {_turns_since_notify} 輪未向用戶回報進度。"
                         "請在繼續工作的同時，用 mcp__evoclaw__send_message 發送一條簡短的進度更新（1-2 句話）。"
@@ -1313,8 +1325,10 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
                     ),
                 })
                 _turns_since_notify = 0
+                tool_results = None  # sentinel: messages already appended
 
-        messages.append({"role": "user", "content": tool_results})
+        if tool_results is not None:
+            messages.append({"role": "user", "content": tool_results})
 
         # Trim history to prevent unbounded growth (keep index 0 = first user msg)
         if len(messages) > _MAX_HISTORY_MESSAGES:
@@ -1529,7 +1543,13 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
             # yet the model still produced no tool calls — something is fundamentally wrong.
             if _no_tool_turns >= 3:
                 _log("❌ NO-TOOL", f"Model made no tool call for {_no_tool_turns} consecutive turns — breaking")
-                final_response = msg.content or ""
+                # BUG-FIX: when msg.content is None (API returns null for tool-only
+                # messages) fall back to an explicit error string rather than empty
+                # string, so the user sees "agent gave up" rather than a confusing
+                # generic "(處理完成...)" fallback message.
+                final_response = (msg.content or "").strip() or (
+                    "（系統：模型連續多輪未呼叫工具，強制終止。請重新提問或簡化任務。）"
+                )
                 break
 
             # ── Fallback: detect bash code blocks the model forgot to run ─────
@@ -1559,19 +1579,31 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
             # Log the detection; the real enforcement happens via tool_choice="required"
             # on the NEXT iteration (Fix #167 + #169: API-level enforcement is primary,
             # text re-prompt is secondary fallback for providers that don't support "required").
-            _FAKE_STATUS_RE = _re_cb.compile(r'\*\([^)]*\)\*|\*\[[^\]]*\]\*', _re_cb.DOTALL)
+            # BUG-FIX: the original regex only matched *(...)* and *[...]* patterns.
+            # Add the same extended set used by the Claude/Gemini loops so that
+            # non-Qwen OpenAI models (GPT-4, etc.) also get full fake-status coverage.
+            _FAKE_STATUS_RE = _re_cb.compile(
+                r'\*\([^)]*\)\*'                                                   # *(正在執行...)*
+                r'|\*\[[^\]]*\]\*'                                                  # *[running...]*
+                r'|✅\s*Done'                                                      # ✅ Done
+                r'|✅\s*完成'                                                      # ✅ 完成
+                r'|【[^】]*(?:已|正在|將|完成|處理|執行)[^】]*】'                    # 【已完成】
+                r'|（[^）]{2,30}(?:已|正在|處理|執行)[^）]{0,20}）'                 # （已完成）
+                r'|(?:I\s+have\s+(?:completed|finished|executed|run|written))'     # English fake-done
+                r'|(?:Task\s+(?:is\s+)?(?:complete|done|finished))'               # Task complete
+                r'|(?:Successfully\s+(?:completed|executed|ran|written))',          # Successfully executed
+                _re_cb.DOTALL | _re_cb.IGNORECASE,
+            )
             _fake_hits = _FAKE_STATUS_RE.findall(content)
-            # 擴展假狀態偵測，涵蓋 Qwen 常見的虛假回應格式
-            _QWEN_FAKE_PATTERNS = [
-                r'【[^】]*(?:已|正在|將|完成|處理|執行)[^】]*】',  # 【已完成】
-                r'（[^）]{2,30}(?:已|正在|處理|執行)[^）]{0,20}）',  # （已完成）
+            # 擴展假狀態偵測，涵蓋常見的虛假回應格式（所有 OpenAI-compatible models）
+            _EXTENDED_FAKE_PATTERNS = [
                 r'(?:已|正在|即將).{0,8}(?:完成|處理|執行|分析)',  # 已完成、正在處理
             ]
-            for _qp in _QWEN_FAKE_PATTERNS:
+            for _qp in _EXTENDED_FAKE_PATTERNS:
                 try:
-                    _qwen_fake_hits = _re_cb.findall(_qp, content)
-                    if _qwen_fake_hits:
-                        _fake_hits = (_fake_hits or []) + _qwen_fake_hits
+                    _ext_fake_hits = _re_cb.findall(_qp, content)
+                    if _ext_fake_hits:
+                        _fake_hits = (_fake_hits or []) + _ext_fake_hits
                 except Exception:
                     pass
             if _fake_hits and n < MAX_ITER - 1:
@@ -1875,32 +1907,36 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
             _log("⚠️ FAKE-PROGRESS", f"Gemini called only send_message (no real work) — streak={_only_notify_turns}")
             if _only_notify_turns >= 2 and n < MAX_ITER - 2:
                 _log("🚨 FAKE-PROGRESS", f"Injecting anti-fabrication warning after {_only_notify_turns} fake-report turns")
-                fn_responses.append(types.Part(function_response=types.FunctionResponse(
-                    name="mcp__evoclaw__send_message",
-                    response={"result": (
-                        "【系統警告】你已連續多輪只呼叫 send_message，沒有呼叫任何實質工具（Bash、Read、Write、run_agent 等）。"
-                        "立刻停止假報告。你的下一步必須是：呼叫 Bash tool 執行指令、Read 讀取檔案、或 mcp__evoclaw__run_agent 委派任務。"
-                    )},
-                )))
+                # BUG-FIX: Appending an extra FunctionResponse for mcp__evoclaw__send_message
+                # creates a duplicate FunctionResponse for the same function name in a
+                # single user turn.  Gemini may reject or misinterpret this.  Instead,
+                # flush the real fn_responses first, then inject a separate user text
+                # turn with the warning — this is always well-formed per the protocol.
+                history.append(types.Content(role="user", parts=fn_responses))
+                history.append(types.Content(role="user", parts=[types.Part(text=(
+                    "【系統警告】你已連續多輪只呼叫 send_message，沒有呼叫任何實質工具（Bash、Read、Write、run_agent 等）。"
+                    "立刻停止假報告。你的下一步必須是：呼叫 Bash tool 執行指令、Read 讀取檔案、或 mcp__evoclaw__run_agent 委派任務。"
+                ))]))
+                fn_responses = None  # sentinel: history already appended
         else:
             _only_notify_turns = 0  # reset streak when doing real work silently
             _turns_since_notify += 1
             if _turns_since_notify >= 5 and n < MAX_ITER - 2:
                 _log("⏰ MILESTONE", f"Gemini: no send_message for {_turns_since_notify} turns — injecting reminder")
-                # Inject as a pseudo tool response using the last tool's name
-                _last_tool = next(iter(_tool_names_this_turn), "Bash")
-                fn_responses.append(types.Part(function_response=types.FunctionResponse(
-                    name=_last_tool,
-                    response={"result": (
-                        f"⏰ 你已執行 {_turns_since_notify} 輪未向用戶回報進度。"
-                        "請在繼續工作的同時，用 mcp__evoclaw__send_message 發送一條簡短的進度更新（1-2 句話）。"
-                        "注意：只有在呼叫了 Bash/Read/Write 等實質工具之後才需要回報，不要虛報進度。"
-                    )},
-                )))
+                # BUG-FIX: same issue — flush real fn_responses, then add a separate
+                # user text turn for the reminder rather than a duplicate FunctionResponse.
+                history.append(types.Content(role="user", parts=fn_responses))
+                history.append(types.Content(role="user", parts=[types.Part(text=(
+                    f"⏰ 你已執行 {_turns_since_notify} 輪未向用戶回報進度。"
+                    "請在繼續工作的同時，用 mcp__evoclaw__send_message 發送一條簡短的進度更新（1-2 句話）。"
+                    "注意：只有在呼叫了 Bash/Read/Write 等實質工具之後才需要回報，不要虛報進度。"
+                ))]))
                 _turns_since_notify = 0
+                fn_responses = None  # sentinel: history already appended
 
         # 工具結果以 user role 加回 history（Gemini function calling 協議要求）
-        history.append(types.Content(role="user", parts=fn_responses))
+        if fn_responses is not None:
+            history.append(types.Content(role="user", parts=fn_responses))
 
         # ── MEMORY.md reminder on penultimate turn ────────────────────────────
         if not _memory_written and n == MAX_ITER - 2:
@@ -2380,7 +2416,8 @@ def main():
             result = run_agent_openai(_openai_client_holder, system_instruction, prompt, chat_jid, _model, conversation_history, pool=_active_pool, apply_key_fn=_apply_openai_key, group_folder=group_folder, max_iter=_dynamic_max_iter)
         elif use_claude:
             _log("🤖 MODEL", f"claude/{claude_model}")
-            result = run_agent_claude(_claude_client_holder, claude_model, system_instruction, prompt, chat_jid, conversation_history, pool=claude_pool, apply_key_fn=_apply_claude_key, max_iter=_dynamic_max_iter)
+            # BUG-FIX: pass group_folder so MEMORY.md detection uses the correct path
+            result = run_agent_claude(_claude_client_holder, claude_model, system_instruction, prompt, chat_jid, conversation_history, pool=claude_pool, apply_key_fn=_apply_claude_key, max_iter=_dynamic_max_iter, group_folder=group_folder)
         else:
             _gemini_model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
             _log("🤖 MODEL", f"gemini/{_gemini_model}")
@@ -2388,12 +2425,43 @@ def main():
         # 若 agent 已透過 mcp__evoclaw__send_message 工具主動發送訊息，
         # 則清空 result 欄位，避免 host 的 container_runner 再次發送（雙重訊息 + 超長訊息 bug）
         # 若 agent 沒有呼叫工具（純文字回覆），則由 host 負責發送 result
-        emit_result = result if result and result.strip() else ("" if _messages_sent_via_tool else result)
+        #
+        # BUG-FIX: the old ternary was: result if result and result.strip() else
+        # ("" if _messages_sent_via_tool else result).  When result is None and
+        # _messages_sent_via_tool is falsy this evaluates to None, not "".  The
+        # subsequent `not emit_result` guard handles None correctly but the
+        # semantics are confusing.  Rewrite as an explicit two-step assignment so
+        # the intent is unambiguous and None is never propagated downstream.
+        _result_text = (result or "").strip()
+        if _result_text and not _messages_sent_via_tool:
+            # Agent produced text AND did not send via tool — let host deliver it.
+            emit_result = _result_text
+        elif _messages_sent_via_tool:
+            # Agent already delivered content via send_message tool — clear result
+            # so the host does not double-send.
+            emit_result = ""
+        else:
+            # Neither text output nor tool messages — will be caught by fallback below.
+            emit_result = ""
         # Guard: if the agent loop produced no output at all (empty result, no tool messages),
         # emit a minimal fallback so the user never sees pure silence.
         if not emit_result and not _messages_sent_via_tool:
             _log("⚠️ EMPTY-RESULT", "Agent loop returned no output and sent no tool messages — emitting fallback")
             emit_result = "（系統：處理完成，但未產生回應，請重試。）"
+        # BUG-FIX: report fitness after a successful run so the evolution engine
+        # actually receives quality data.  Previously _report_fitness() was defined
+        # but never called, leaving fitness scores perpetually unupdated.
+        # Score heuristic: non-empty substantive result = 0.9, generic fallback = 0.3.
+        if _REPORTER_AVAILABLE and _phase1_reporter:
+            try:
+                import asyncio as _asyncio_report
+                _fitness_score = 0.9 if emit_result and emit_result not in (
+                    "（處理完成，但未能產生文字回應，請重新詢問。）",
+                    "（系統：處理完成，但未產生回應，請重試。）",
+                ) else 0.3
+                _asyncio_report.run(_report_fitness(_fitness_score, {"has_tool_calls": bool(_messages_sent_via_tool)}))
+            except Exception as _fit_err:
+                _log("⚠️ FITNESS", f"fitness report failed: {_fit_err}")
         # Preserve the incoming sessionId so the host can track conversation continuity.
         # Only fall back to generating a new UUID if no sessionId was provided.
         preserved_session_id = session_id if session_id else str(uuid.uuid4())

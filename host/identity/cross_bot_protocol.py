@@ -34,7 +34,13 @@ MSG_STATUS        = "status"
 MSG_PING          = "ping"
 MSG_PONG          = "pong"
 
-_ALLOWED_MSG_TYPES = frozenset({"hello", "ack", "message", "heartbeat", "query", "response"})
+# BUG-FIX: _ALLOWED_MSG_TYPES was a stale set that did not include the MSG_*
+# constants defined above (memory_share, task_delegate, ping, pong, status).
+# handle() silently dropped all those message types.  Use the actual constants.
+_ALLOWED_MSG_TYPES = frozenset({
+    MSG_HELLO, MSG_ACK, MSG_MEMORY_SHARE, MSG_TASK_DELEGATE,
+    MSG_STATUS, MSG_PING, MSG_PONG,
+})
 
 
 @dataclass
