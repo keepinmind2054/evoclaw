@@ -82,13 +82,21 @@ WHATSAPP_WEBHOOK_PORT = _env_int("WHATSAPP_WEBHOOK_PORT", 8080)
 DASHBOARD_HOST: str = os.getenv("DASHBOARD_HOST", "127.0.0.1")
 DASHBOARD_PORT = _env_int("DASHBOARD_PORT", 8765)
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")  # If set, enables HTTP Basic Auth
-# Warn at import time if dashboard has no password (Fix #191)
-if not DASHBOARD_PASSWORD:
-    import logging as _log_cfg
-    _log_cfg.getLogger(__name__).warning(
-        "DASHBOARD_PASSWORD is not set — dashboard has NO authentication. "
-        "Set DASHBOARD_PASSWORD to enable HTTP Basic Auth."
-    )
+# p12b fix: defer the DASHBOARD_PASSWORD warning to a function so it can be called
+# after logging is fully configured (previously fired at import time before handlers
+# were set up, causing the warning to be emitted by the root logger's default handler
+# with inconsistent formatting or, in some configurations, lost entirely).
+def warn_dashboard_no_password() -> None:
+    """Emit a warning if the dashboard has no authentication configured.
+
+    Call this once from main() after _setup_logging() has run.
+    """
+    if not DASHBOARD_PASSWORD:
+        import logging as _log_cfg
+        _log_cfg.getLogger(__name__).warning(
+            "DASHBOARD_PASSWORD is not set — dashboard has NO authentication. "
+            "Set DASHBOARD_PASSWORD in .env to enable HTTP Basic Auth."
+        )
 DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "admin")
 WEBPORTAL_ENABLED = os.environ.get("WEBPORTAL_ENABLED", "false").lower() == "true"
 WEBPORTAL_PORT = _env_int("WEBPORTAL_PORT", 8766)
@@ -107,10 +115,10 @@ ENABLED_CHANNELS = [
 # Keys that can be modified via the dashboard /api/env endpoint
 EDITABLE_ENV_KEYS: frozenset = frozenset({
     "CLAUDE_API_KEY",
-    "TELEGRAM_TOKEN",
+    "TELEGRAM_BOT_TOKEN",   # p12b fix: was TELEGRAM_TOKEN — channel code reads TELEGRAM_BOT_TOKEN
     "WHATSAPP_TOKEN",
-    "DISCORD_TOKEN",
-    "SLACK_TOKEN",
+    "DISCORD_BOT_TOKEN",    # p12b fix: was DISCORD_TOKEN — channel code reads DISCORD_BOT_TOKEN
+    "SLACK_BOT_TOKEN",      # p12b fix: was SLACK_TOKEN — channel code reads SLACK_BOT_TOKEN
     "GMAIL_CLIENT_ID",
     "GMAIL_CLIENT_SECRET",
     "GMAIL_REFRESH_TOKEN",
@@ -132,8 +140,8 @@ DATABASE_URL: str = os.environ.get("DATABASE_URL", "")  # e.g. postgresql://user
 
 # Multi-instance Leader Election
 LEADER_ELECTION_ENABLED: bool = os.environ.get("LEADER_ELECTION_ENABLED", "false").lower() == "true"
-LEADER_HEARTBEAT_INTERVAL: int = int(os.environ.get("LEADER_HEARTBEAT_INTERVAL", "10"))
-LEADER_LEASE_TIMEOUT: int = int(os.environ.get("LEADER_LEASE_TIMEOUT", "30"))
+LEADER_HEARTBEAT_INTERVAL: int = _env_int("LEADER_HEARTBEAT_INTERVAL", 10)  # p12b fix: use _env_int for safe coercion
+LEADER_LEASE_TIMEOUT: int = _env_int("LEADER_LEASE_TIMEOUT", 30)            # p12b fix: use _env_int for safe coercion
 INSTANCE_ID: str = os.environ.get("INSTANCE_ID", f"{socket.gethostname()}:{os.getpid()}")
 
 

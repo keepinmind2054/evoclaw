@@ -534,15 +534,9 @@ async def _process_group_messages(group: dict, messages: list[dict],
         log.debug("Phase 1: identity tracking failed (non-fatal): %s", _id_exc)
 
     # ── Consecutive failure guard: prevent infinite retry loops ───────────────
-    if _group_fail_lock is None:
-        # Fix(p12a): the previous code logged a warning here then fell through
-        # to "async with _group_fail_lock" which raises TypeError: 'NoneType'
-        # object does not support the asynchronous context manager protocol.
-        # Instead, skip the guard entirely during the brief startup window
-        # before main() initialises the lock.  The risk of infinite loops
-        # without the guard is negligible in that tiny window.
-        log.warning("_group_fail_lock not initialized — skipping consecutive failure guard and proceeding")
-    else:
+    # Guard: skip if _group_fail_lock not yet initialized (brief startup window).
+    # "async with None" raises TypeError, so we guard here.
+    if _group_fail_lock is not None:
         async with _group_fail_lock:
             fail_count = _group_fail_counts.get(jid, 0)
             last_fail = _group_fail_timestamps.get(jid, 0.0)
@@ -560,6 +554,8 @@ async def _process_group_messages(group: dict, messages: list[dict],
                     _group_fail_counts[jid] = max(0, _group_fail_counts.get(jid, 0) - 2)
                     _group_fail_timestamps.pop(jid, None)
                     log.info("group %s cooldown expired; fail_count decayed to %d", jid, _group_fail_counts[jid])
+    else:
+        log.warning("_group_fail_lock not initialized — skipping consecutive failure guard")
 
     requires_trigger = bool(group.get("requires_trigger", True))
     is_main = bool(group.get("is_main"))
@@ -916,11 +912,9 @@ async def main() -> None:
     7. 同時啟動訊息輪詢、IPC watcher 及排程器三個背景迴圈
     """
 
-    # Fix(p12a): move all global declarations to the top of main() before any
-    # reference to those names.  Previously "global _identity_store" appeared
-    # after _identity_store was assigned on line ~929, which raises
-    # SyntaxError: name '_identity_store' is used prior to global declaration
-    # and prevents the module from loading entirely.
+    # Declare all module-level globals at the top of main() before any use.
+    # Previously "global _identity_store" appeared after _identity_store was
+    # assigned, raising SyntaxError and preventing the module from loading.
     global _registered_groups, _sender_allowlist, _stop_event, _group_fail_lock, _dedup_lock
     global _startup_time, _HEARTBEAT_INTERVAL, _last_heartbeat, _leader, _rbac_store
     global _identity_store, _MONITOR_JID, _DISCORD_WEBHOOK_URL
@@ -1007,6 +1001,8 @@ async def main() -> None:
         _HEARTBEAT_INTERVAL = 1800.0
 
     log.info("EvoClaw starting up...")
+    # p12b: emit deferred config warnings now that logging is fully configured
+    config.warn_dashboard_no_password()
 
     # 初始化 SQLite 資料庫，建立所有必要的資料表
     db_path = config.STORE_DIR / "messages.db"
@@ -1084,7 +1080,8 @@ async def main() -> None:
         log.info("Discord webhook configured")
 
     # Validate LLM secrets once at startup instead of per-container-run (Fix #190)
-    _validate_secrets(_read_secrets())
+    # p12b: capture return value for startup summary below
+    _llm_secrets_ok = _validate_secrets(_read_secrets())
 
     # 確保群組資料夾與全域共享資料夾存在
     config.GROUPS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1241,6 +1238,27 @@ async def main() -> None:
             log.info(f"Channel '{channel_name}' loaded and connected")
         except Exception as e:
             log.error(f"Failed to load channel '{channel_name}': {e}")
+
+    # ── p12b: Startup validation summary ─────────────────────────────────────
+    # Emit a clear, scannable status block so operators immediately know whether
+    # all required components connected successfully.  Fails fast with a CRITICAL
+    # log if zero channels loaded — the bot would run but never receive messages.
+    _llm_status = "OK" if _llm_secrets_ok else "MISSING — agents will fail"
+    log.info("--- EvoClaw startup summary ---")
+    log.info("  LLM key:       %s", _llm_status)
+    for _ch in _loaded_channels:
+        _connected = _ch.is_connected() if hasattr(_ch, "is_connected") else True
+        _status = "connected" if _connected else "FAILED TO CONNECT"
+        log.info("  Channel %-10s %s", f"{_ch.name}:", _status)
+    if not _loaded_channels:
+        log.critical(
+            "STARTUP FAILURE: No channels loaded. "
+            "EvoClaw is running but cannot receive any messages. "
+            "Check that ENABLED_CHANNELS is set and the corresponding token "
+            "(e.g. TELEGRAM_BOT_TOKEN) is present in .env."
+        )
+    log.info("  Registered groups: %d", len(_registered_groups))
+    log.info("--- end startup summary ---")
 
     # ── 優雅關機：接到 SIGTERM/SIGINT 時設旗標讓各迴圈自然退出 ──────────────
     _shutdown_count = 0
