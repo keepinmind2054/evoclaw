@@ -6,6 +6,7 @@ Covers:
 - Shared layer FTS5 write + search (SharedMemoryStore)
 - MemoryBus.remember / MemoryBus.recall integration
 - MemoryBus.forget removes from shared store
+- Regression tests for p14b bug fixes
 
 All tests run without external services.  sqlite-vec is not required — the
 VectorStore silently degrades to a no-op when the extension is absent.
@@ -306,3 +307,168 @@ class TestMemoryBusPatchHotMemory:
         content = (agent_dir / "MEMORY.md").read_text(encoding="utf-8")
         assert "Initial memory." in content
         assert "Appended memory." in content
+
+    @pytest.mark.asyncio
+    async def test_patch_enforces_max_bytes(self, bus, groups_dir):
+        """patch_hot_memory() must not grow MEMORY.md beyond max_bytes."""
+        agent_id = "size-limit-agent"
+        agent_dir = groups_dir / agent_id
+        agent_dir.mkdir(parents=True, exist_ok=True)
+
+        # Fill with 7900 bytes of content then append 400 more — total would
+        # exceed the 8192-byte default limit.
+        initial = "x" * 7900
+        (agent_dir / "MEMORY.md").write_text(initial, encoding="utf-8")
+
+        result = await bus.patch_hot_memory(agent_id, "y" * 400, max_bytes=8192)
+        assert result is True
+
+        final = (agent_dir / "MEMORY.md").read_bytes()
+        assert len(final) <= 8192, (
+            f"MEMORY.md grew to {len(final)} bytes, exceeding the 8192-byte limit"
+        )
+
+
+# ── p14b regression tests ─────────────────────────────────────────────────────
+
+
+class TestP14bDeleteAuthorization:
+    """p14b-6: SharedMemoryStore.delete must NOT allow non-owners to delete shared memories."""
+
+    def test_owner_can_delete_shared_memory(self, shared_store):
+        """The agent that wrote a shared memory should be able to delete it."""
+        mid = shared_store.write("Shared fact", agent_id="owner", scope="shared")
+        assert shared_store.delete(mid, agent_id="owner") is True
+
+    def test_non_owner_cannot_delete_shared_memory(self, shared_store):
+        """A different agent must NOT be able to delete another agent's shared memory."""
+        mid = shared_store.write("Shared fact", agent_id="owner", scope="shared")
+        deleted = shared_store.delete(mid, agent_id="attacker")
+        assert deleted is False, (
+            "Non-owner was able to delete a shared memory (authorization bypass)"
+        )
+        # Memory should still be searchable by anyone.
+        results = shared_store.search("Shared fact", agent_id="attacker")
+        assert len(results) >= 1
+
+    def test_non_owner_cannot_delete_project_memory(self, shared_store):
+        """A different agent must NOT be able to delete a project-scoped memory."""
+        mid = shared_store.write(
+            "Project secret",
+            agent_id="owner",
+            scope="project",
+            project="proj-x",
+        )
+        deleted = shared_store.delete(mid, agent_id="intruder")
+        assert deleted is False
+
+
+class TestP14bVectorScoreCap:
+    """p14b-7: Vector result scores must stay within [0.0, 1.0]."""
+
+    @pytest.mark.asyncio
+    async def test_recall_scores_within_bounds(self, bus):
+        """All Memory objects returned by recall() must have score in [0.0, 1.0]."""
+        agent_id = "score-check-agent"
+        for i in range(3):
+            await bus.remember(f"Fact {i}", agent_id=agent_id, scope="shared")
+
+        memories = await bus.recall(
+            "Fact",
+            agent_id=agent_id,
+            include_sources=("shared",),
+            k=10,
+        )
+        for m in memories:
+            assert 0.0 <= m.score <= 1.0, (
+                f"Memory score {m.score} is outside [0.0, 1.0] range for source={m.source}"
+            )
+
+
+class TestP14bSummarizerOutputValidation:
+    """p14b-12/13: MemorySummarizer must validate LLM output before storing."""
+
+    def test_looks_like_summary_accepts_bullets(self):
+        from host.memory.summarizer import _looks_like_summary
+        assert _looks_like_summary("- User prefers Python\n- Deadline is March 31\n") is True
+        assert _looks_like_summary("• Key fact one\n• Key fact two\n") is True
+        assert _looks_like_summary("bullet [important thing]\n") is True
+
+    def test_looks_like_summary_rejects_garbage(self):
+        from host.memory.summarizer import _looks_like_summary
+        assert _looks_like_summary("") is False
+        assert _looks_like_summary("   \n\n  ") is False
+        assert _looks_like_summary("Error: rate limit exceeded") is False
+        assert _looks_like_summary("ok") is False
+
+    @pytest.mark.asyncio
+    async def test_compress_memory_rejects_larger_output(self, tmp_path):
+        """compress_memory() must fall back to truncation if LLM returns larger content."""
+        from host.memory.summarizer import MemorySummarizer, COMPRESS_THRESHOLD
+
+        summarizer = MemorySummarizer()
+
+        # Build content that is well above the threshold and above the
+        # target_bytes (4096) so _truncate_memory actually reduces the size.
+        # 1200 × "- fact\n" = 8400 bytes, above both COMPRESS_THRESHOLD (6144)
+        # and MAX_MEMORY_BYTES (8192).
+        original_content = "- fact\n" * 1200
+        original_size = len(original_content.encode("utf-8"))
+        assert original_size > COMPRESS_THRESHOLD
+
+        # LLM returns something even larger than the original.
+        inflated_result = "x" * (original_size + 1000)
+
+        async def _fake_llm(prompt, max_tokens=300):
+            return inflated_result
+
+        summarizer._call_llm = _fake_llm
+
+        result = await summarizer.compress_memory("agent1", original_content, target_bytes=4096)
+        # compress_memory must NOT store the inflated result — it must fall
+        # back to _truncate_memory which keeps only the last 4096 bytes.
+        result_size = len(result.encode("utf-8"))
+        assert result_size <= 4096 + 200, (  # +200 for the "<!-- memory compressed -->" header
+            f"compress_memory() stored a {result_size}-byte result for a {original_size}-byte "
+            f"input when the LLM returned {len(inflated_result)} bytes (inflated)"
+        )
+        assert result_size < original_size, (
+            "compress_memory() returned a result not smaller than the original"
+        )
+
+    @pytest.mark.asyncio
+    async def test_compress_memory_rejects_empty_output(self):
+        """compress_memory() must fall back to truncation if LLM returns empty string."""
+        from host.memory.summarizer import MemorySummarizer
+
+        summarizer = MemorySummarizer()
+
+        async def _empty_llm(prompt, max_tokens=300):
+            return ""
+
+        summarizer._call_llm = _empty_llm
+
+        content = "- fact\n" * 300
+        result = await summarizer.compress_memory("agent1", content)
+        # Should get the truncated version, not an empty string.
+        assert len(result) > 0
+
+
+class TestP14bHotMemoryTruncation:
+    """p14b-1: UTF-8 safe truncation in hot memory."""
+
+    def test_safe_truncate_utf8_does_not_split_multibyte(self):
+        from host.memory.hot import _safe_truncate_utf8
+        # 3-byte UTF-8 chars (e.g. Japanese CJK)
+        text = "あ" * 5000  # each "あ" is 3 bytes → 15000 bytes total
+        result = _safe_truncate_utf8(text, 8192)
+        # result must be valid UTF-8 (no UnicodeDecodeError)
+        result.encode("utf-8")
+        assert len(result.encode("utf-8")) <= 8192
+        # Must not end with a partial sequence — re-encoding must be stable
+        assert result.encode("utf-8").decode("utf-8") == result
+
+    def test_safe_truncate_within_limit_unchanged(self):
+        from host.memory.hot import _safe_truncate_utf8
+        text = "hello world"
+        assert _safe_truncate_utf8(text, 8192) == text
