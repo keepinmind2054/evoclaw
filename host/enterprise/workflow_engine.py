@@ -330,9 +330,15 @@ class WorkflowEngine:
         """
         _kwargs = kwargs or {}
 
-        def skill_step_fn(_ctx: dict) -> Any:
+        # BUG-FIX: skill_loader.exec_skill() is an async function; the previous
+        # sync skill_step_fn called it without await, which returned a coroutine
+        # object (always truthy) instead of the actual loaded module.  This
+        # caused every skill call to silently fall through to load() / raise
+        # FileNotFoundError rather than executing handler.py.  The function is
+        # now async so the await is valid.
+        async def skill_step_fn(_ctx: dict) -> Any:
             try:
-                module = skill_loader.exec_skill(skill_name)
+                module = await skill_loader.exec_skill(skill_name)
                 if module is not None:
                     run_fn = getattr(module, "run", None)
                     if run_fn is not None:

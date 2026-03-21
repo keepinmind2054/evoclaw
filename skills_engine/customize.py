@@ -47,7 +47,16 @@ def start_customize(description: str, files_to_track: list[str]) -> None:
 
     session_path = _session_path()
     session_path.parent.mkdir(parents=True, exist_ok=True)
-    session_path.write_text(yaml.dump(session_data, allow_unicode=True), encoding="utf-8")
+    # BUG-FIX: write session file atomically so a crash mid-write doesn't leave
+    # a corrupt YAML file that makes is_customize_active() return True while
+    # commit_customize() / abort_customize() fail with a parse error.
+    content = yaml.dump(session_data, allow_unicode=True)
+    tmp_path = Path(str(session_path) + ".tmp")
+    try:
+        tmp_path.write_text(content, encoding="utf-8")
+        tmp_path.replace(session_path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
     # Stage the current state of tracked files as the "before" baseline via git
     if not shutil.which("git"):

@@ -45,10 +45,20 @@ def merge_npm_dependencies(
 def merge_env_additions(existing: list[str], incoming: list[str]) -> list[str]:
     """
     Merge env variable additions. Deduplicates by variable name (KEY=value → KEY).
+    BUG-FIX: comment lines (starting with '#') are now excluded from key
+    extraction so they don't accidentally block legitimate KEY=value additions.
     """
-    existing_keys = {line.split("=")[0].strip() for line in existing if "=" in line}
+    existing_keys = {
+        line.split("=")[0].strip()
+        for line in existing
+        if "=" in line and not line.lstrip().startswith("#")
+    }
     result = list(existing)
     for line in incoming:
+        # Skip comment lines in incoming additions too
+        if line.lstrip().startswith("#"):
+            result.append(line)
+            continue
         key = line.split("=")[0].strip()
         if key not in existing_keys:
             result.append(line)

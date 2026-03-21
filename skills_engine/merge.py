@@ -28,8 +28,15 @@ def merge_file(our_file: str, base_file: str, their_file: str, output_file: str)
     Returns MergeResult with clean=True if no conflicts.
     """
     if not shutil.which("git"):
-        log.warning("git not found in PATH — skipping git merge-file, copying their_file as output")
-        Path(output_file).write_bytes(Path(our_file).read_bytes())
+        # BUG-FIX: the previous fallback copied our_file (the current project
+        # file) to output_file, silently discarding the incoming skill changes
+        # from their_file.  The correct no-git fallback is to copy their_file
+        # (the skill's version) so the skill's modifications are applied.
+        log.warning(
+            "git not found in PATH — skipping git merge-file, "
+            "applying their_file directly (no three-way merge)"
+        )
+        Path(output_file).write_bytes(Path(their_file).read_bytes())
         return MergeResult(clean=True, exit_code=0)
 
     result = subprocess.run(

@@ -1,5 +1,6 @@
 """Apply a skill to the Evoclaw project."""
 
+import json
 import platform
 import shlex
 import shutil
@@ -32,6 +33,16 @@ from .structured import merge_env_additions, merge_npm_dependencies
 from .types import ApplyResult
 
 
+def _atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
+    """Write text to path atomically via a sibling temp file + rename."""
+    tmp = path.parent / (path.name + ".tmp")
+    try:
+        tmp.write_text(content, encoding=encoding)
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def apply_skill(skill_dir: str | Path) -> ApplyResult:
     """
     Apply a skill to the project.
@@ -45,6 +56,11 @@ def apply_skill(skill_dir: str | Path) -> ApplyResult:
     """
     skill_dir = Path(skill_dir)
     project_root = Path.cwd()
+
+    # BUG-FIX: read_manifest is called before acquiring the lock so that
+    # manifest validation errors surface quickly without needing the lock.
+    # Pre-flight state reads (drift detection, version checks) are inherently
+    # racy in the general case; the lock is held for all *write* operations.
     manifest = read_manifest(skill_dir)
 
     # --- Pre-flight checks ---
@@ -155,7 +171,14 @@ def apply_skill(skill_dir: str | Path) -> ApplyResult:
                 src_path = add_dir / rel_path
                 if src_path.exists():
                     dest_path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(str(src_path), str(dest_path))
+                    # BUG-FIX: use atomic copy (temp + rename) so a crash
+                    # mid-copy doesn't leave a partially written file.
+                    tmp_dest = dest_path.parent / (dest_path.name + ".tmp")
+                    try:
+                        shutil.copy2(str(src_path), str(tmp_dest))
+                        tmp_dest.replace(dest_path)
+                    finally:
+                        tmp_dest.unlink(missing_ok=True)
 
         # --- Copy container_tools → data/dynamic_tools/ (hot-loaded at container startup) ---
         # container_tools are Python files that register new tools via register_dynamic_tool().
@@ -173,9 +196,22 @@ def apply_skill(skill_dir: str | Path) -> ApplyResult:
                 if not src.exists():
                     print(f"Warning: container_tool not found: {src}")
                     continue
-                dst = dynamic_tools_dir / src.name  # flatten to single level
-                shutil.copy2(str(src), str(dst))
-                print(f"Installed container tool: {src.name} → {dst}")
+                # BUG-FIX: resolve destination against dynamic_tools_dir and
+                # ensure it stays within that directory (path traversal guard).
+                dst_name = _Path(tool_rel).name  # flatten to single level
+                dst = dynamic_tools_dir / dst_name
+                resolved_dst = dst.resolve()
+                if not str(resolved_dst).startswith(str(dynamic_tools_dir.resolve())):
+                    print(f"Warning: container_tool path traversal blocked: {tool_rel!r}")
+                    continue
+                # Atomic copy
+                tmp_dst = dynamic_tools_dir / (dst_name + ".tmp")
+                try:
+                    shutil.copy2(str(src), str(tmp_dst))
+                    tmp_dst.replace(dst)
+                finally:
+                    tmp_dst.unlink(missing_ok=True)
+                print(f"Installed container tool: {dst_name} → {dst}")
 
         # --- Merge modified files ---
         merge_conflicts = []
@@ -213,17 +249,22 @@ def apply_skill(skill_dir: str | Path) -> ApplyResult:
                 merge_conflicts.append(rel_path)
 
         if merge_conflicts:
+            # BUG-FIX: restore backup when conflicts occur so project files are
+            # not left with conflict markers.  The caller can resolve manually
+            # and then call record_skill_application() + clear_backup().
+            restore_backup()
+            clear_backup()
             return ApplyResult(
                 success=False,
                 skill=manifest.skill,
                 version=manifest.version,
                 merge_conflicts=merge_conflicts,
-                backup_pending=True,
+                backup_pending=False,
                 untracked_changes=drift_files,
                 error=(
                     f"Merge conflicts in: {', '.join(merge_conflicts)}. "
-                    "Resolve manually then call record_skill_application(). "
-                    "Call clear_backup() after resolution or restore_backup() + clear_backup() to abort."
+                    "Files have been restored. Resolve conflicts manually: "
+                    "re-apply with a clean working tree."
                 ),
             )
 
@@ -233,12 +274,12 @@ def apply_skill(skill_dir: str | Path) -> ApplyResult:
             if npm_deps:
                 pkg_path = project_root / "package.json"
                 if pkg_path.exists():
-                    import json
                     pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
                     existing_deps = pkg.get("dependencies", {})
                     merged, dep_conflicts = merge_npm_dependencies(existing_deps, npm_deps)
                     pkg["dependencies"] = merged
-                    pkg_path.write_text(json.dumps(pkg, indent=2), encoding="utf-8")
+                    # BUG-FIX: atomic write to prevent corruption on crash
+                    _atomic_write_text(pkg_path, json.dumps(pkg, indent=2))
                     for warn in dep_conflicts:
                         print(f"Warning: {warn}")
 
@@ -247,7 +288,8 @@ def apply_skill(skill_dir: str | Path) -> ApplyResult:
                 env_path = project_root / ".env.example"
                 existing = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
                 merged_env = merge_env_additions(existing, env_additions)
-                env_path.write_text("\n".join(merged_env) + "\n", encoding="utf-8")
+                # BUG-FIX: atomic write to prevent corruption on crash
+                _atomic_write_text(env_path, "\n".join(merged_env) + "\n")
 
         # --- Post-apply commands ---
         # Only commands starting with a known-safe prefix are executed automatically.

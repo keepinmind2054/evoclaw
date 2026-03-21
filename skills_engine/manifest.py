@@ -16,13 +16,30 @@ def read_manifest(skill_dir: str | Path) -> SkillManifest:
     if not manifest_path.exists():
         raise FileNotFoundError(f"Manifest not found: {manifest_path}")
 
-    data = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    raw = manifest_path.read_text(encoding="utf-8")
+    # BUG-FIX: yaml.safe_load returns None on empty file; guard against that.
+    data = yaml.safe_load(raw)
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"Manifest is empty or not a valid YAML mapping: {manifest_path}"
+        )
 
-    # Validate required fields
-    required = ["skill", "version", "core_version", "adds", "modifies"]
-    for field in required:
-        if data.get(field) is None:
+    # Validate required fields with type-appropriate checks
+    required_str = ["skill", "version", "core_version"]
+    for field in required_str:
+        if not data.get(field):
             raise ValueError(f"Manifest missing required field: {field}")
+
+    required_list = ["adds", "modifies"]
+    for field in required_list:
+        val = data.get(field)
+        # None means the key is absent; must be an explicit list (may be [])
+        if val is None:
+            raise ValueError(f"Manifest missing required field: {field}")
+        if not isinstance(val, list):
+            raise ValueError(
+                f"Manifest field '{field}' must be a list, got {type(val).__name__}"
+            )
 
     manifest = SkillManifest(
         skill=data["skill"],
@@ -44,15 +61,37 @@ def read_manifest(skill_dir: str | Path) -> SkillManifest:
         container_tools=data.get("container_tools") or [],
     )
 
-    # Validate paths don't escape project root
+    # Validate paths don't escape project root — adds and modifies
     all_paths = manifest.adds + manifest.modifies
     for p in all_paths:
-        if ".." in p or os.path.isabs(p):
-            raise ValueError(
-                f"Invalid path in manifest: {p} (must be relative without '..')"
-            )
+        _validate_relative_path(p, "adds/modifies")
+
+    # BUG-FIX: also validate file_ops paths for traversal
+    for op in manifest.file_ops:
+        for key in ("from", "to", "path"):
+            if op.get(key):
+                _validate_relative_path(op[key], f"file_ops[{key}]")
+
+    # BUG-FIX: also validate container_tools paths for traversal
+    for p in manifest.container_tools:
+        _validate_relative_path(p, "container_tools")
 
     return manifest
+
+
+def _validate_relative_path(p: str, context: str) -> None:
+    """Raise ValueError if path contains '..' components or is absolute."""
+    if os.path.isabs(p):
+        raise ValueError(
+            f"Invalid path in manifest ({context}): {p!r} (must be relative)"
+        )
+    # Normalise and check for traversal via Path resolution
+    normalised = Path(p)
+    for part in normalised.parts:
+        if part == "..":
+            raise ValueError(
+                f"Invalid path in manifest ({context}): {p!r} (contains '..')"
+            )
 
 
 def check_core_version(manifest: SkillManifest) -> dict:
