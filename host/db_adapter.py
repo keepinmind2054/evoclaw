@@ -27,6 +27,12 @@ class _SqliteAdapter:
         db_path = os.environ.get("DB_PATH", "data/messages.db")
         conn = sqlite3.connect(db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        # Mirror the pragmas used by init_database() in db.py so that any
+        # secondary connection opened through this adapter also benefits from
+        # WAL mode, reduced lock contention, and a retry window on SQLITE_BUSY.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
     def execute(self, conn, sql: str, params=()) -> Any:
