@@ -228,7 +228,14 @@ def _sync_evolve() -> None:
             fitness = compute_fitness(jid, FITNESS_WINDOW_DAYS)
 
             # 計算平均回應時間（用於回答風格調整）
-            valid_times = [r["response_ms"] for r in runs if r.get("response_ms")]
+            # Fix p14c: mirror the filtering used in fitness.py — only include successful
+            # runs with a strictly positive response_ms.  The original truthiness check
+            # r.get("response_ms") admitted negative values and included failed runs,
+            # causing avg_ms passed to evolve_genome_from_fitness to be misleadingly slow.
+            valid_times = [
+                r["response_ms"] for r in runs
+                if r.get("response_ms") and r["response_ms"] > 0 and r.get("success")
+            ]
             avg_ms = sum(valid_times) / len(valid_times) if valid_times else 0
 
             # 執行基因組演化（根據適應度和速度調整行為參數）
