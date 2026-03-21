@@ -13,6 +13,7 @@ import base64
 import http.server
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import threading
@@ -1590,17 +1591,41 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    # BUG-DB-01 (HIGH): No body-size limit — an attacker can send an
+    # arbitrarily large POST body and exhaust process memory.
+    _MAX_BODY = 256 * 1024  # 256 KB
+
     def _read_body(self) -> dict:
         length = int(self.headers.get("Content-Length", 0))
+        if length > self._MAX_BODY:
+            self.send_response(413)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            raise ValueError(f"Request body too large: {length} bytes")
         if length:
             return json.loads(self.rfile.read(length))
         return {}
 
     def do_GET(self):
+        path_raw = self.path.split("?")[0]
+
+        # BUG-DB-07 (MEDIUM): /health and /metrics were behind auth, making
+        # them unusable by external probes (Kubernetes, load-balancers, etc.)
+        # without embedding credentials.  Serve them without authentication.
+        # They intentionally expose only aggregate counts and a pass/fail
+        # status — no sensitive data.
+        if path_raw == "/health":
+            h = _get_health()
+            self._json(h, 200 if h["status"] == "ok" else 503)
+            return
+        if path_raw == "/metrics":
+            self._handle_metrics()
+            return
+
         if not self._auth():
             self._require_auth(); return
 
-        path = self.path.split("?")[0]
+        path = path_raw
         query = self.path[len(path)+1:] if "?" in self.path else ""
         qs = {}
         for part in query.split("&"):
@@ -1614,6 +1639,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            # BUG-DB-06 (HIGH): No security headers — add CSP and related
+            # headers to reduce XSS and click-jacking risk.
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline';"
+            )
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
             self.end_headers()
             self.wfile.write(body)
 
@@ -1634,14 +1667,26 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._json(_get_claude_mds())
         elif path == "/api/logs":
             from . import log_buffer
-            since = int(qs.get("since", 0))
+            # BUG-DB-02 (MEDIUM): Unvalidated integer query params — cap them.
+            try:
+                since = max(0, int(qs.get("since", 0)))
+            except (ValueError, TypeError):
+                since = 0
             level = qs.get("level", "ALL")
-            limit = int(qs.get("limit", 200))
+            try:
+                limit = max(1, min(int(qs.get("limit", 200)), 1000))
+            except (ValueError, TypeError):
+                limit = 200
             self._json(log_buffer.get_logs(since, level, limit))
 
         elif path == "/api/messages":
             jid = qs.get("jid", "")
-            limit = int(qs.get("limit", 100))
+            # BUG-DB-02 (MEDIUM): Unvalidated `limit` parameter — an attacker
+            # can request millions of rows and exhaust memory.  Cap at 500.
+            try:
+                limit = max(1, min(int(qs.get("limit", 100)), 500))
+            except (ValueError, TypeError):
+                limit = 100
             if jid:
                 rows = _fetch(
                     "SELECT id, chat_jid, sender, sender_name, content, timestamp, "
@@ -1802,7 +1847,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/container-logs":
             jid = qs.get("jid", "")
             status = qs.get("status", "")
-            limit = int(qs.get("limit", 50))
+            # BUG-DB-02 (MEDIUM): Cap limit to prevent OOM.
+            try:
+                limit = max(1, min(int(qs.get("limit", 50)), 500))
+            except (ValueError, TypeError):
+                limit = 50
             from . import db as _db_module
             rows = _db_module.get_container_logs(jid=jid, limit=limit, status=status)
             self._json({"logs": rows, "count": len(rows)})
@@ -1824,13 +1873,23 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         # POST /api/tasks/<id>/cancel
         if path.startswith("/api/tasks/") and path.endswith("/cancel"):
             task_id = path[len("/api/tasks/"):-len("/cancel")]
+            # BUG-DB-05 (MEDIUM): Validate task_id is a sane identifier to
+            # avoid surprising SQL behaviour with crafted path segments.
+            if not re.fullmatch(r"[a-zA-Z0-9_\-]{1,128}", task_id):
+                self._json({"ok": False, "error": "Invalid task id"}, 400); return
             ok = _write_db("UPDATE scheduled_tasks SET status='cancelled' WHERE id=?", (task_id,))
             self._json({"ok": ok})
 
         # POST /api/tasks/<id>/update
         elif path.startswith("/api/tasks/") and path.endswith("/update"):
             task_id = path[len("/api/tasks/"):-len("/update")]
-            body = self._read_body()
+            # BUG-DB-05 (MEDIUM): Same task_id validation.
+            if not re.fullmatch(r"[a-zA-Z0-9_\-]{1,128}", task_id):
+                self._json({"ok": False, "error": "Invalid task id"}, 400); return
+            try:
+                body = self._read_body()
+            except ValueError:
+                return  # 413 already sent
             sv = body.get("schedule_value", "")
             if sv:
                 ok = _write_db("UPDATE scheduled_tasks SET schedule_value=? WHERE id=?", (sv, task_id))
@@ -1841,6 +1900,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         # POST /api/containers/<name>/stop
         elif path.startswith("/api/containers/") and path.endswith("/stop"):
             name = path[len("/api/containers/"):-len("/stop")]
+            # BUG-DB-04 (HIGH): No input validation on container name — a
+            # crafted URL like /api/containers/../../etc/passwd/stop could
+            # leak path information, and an unexpected name string could be
+            # passed to docker.  Enforce the evoclaw-* naming convention so
+            # only bot containers can be stopped via the dashboard.
+            if not re.fullmatch(r"evoclaw-[a-zA-Z0-9_\-]{1,128}", name):
+                self._json({"ok": False, "error": "Invalid container name"}, 400)
+                return
             try:
                 subprocess.run(["docker", "stop", name], timeout=10, capture_output=True)
                 self._json({"ok": True})
@@ -1849,7 +1916,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
         # POST /api/env
         elif path == "/api/env":
-            body = self._read_body()
+            try:
+                body = self._read_body()
+            except ValueError:
+                return  # 413 already sent
             key = body.get("key", "").strip()
             value = body.get("value", "").strip()
             if not key:
@@ -1878,7 +1948,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
         # POST /api/dev/start — create a new DevEngine session and trigger via IPC
         elif path == "/api/dev/start":
-            body = self._read_body()
+            try:
+                body = self._read_body()
+            except ValueError:
+                return  # 413 already sent
             prompt = body.get("prompt", "").strip()
             mode   = body.get("mode", "auto")
             if not prompt:
@@ -1922,7 +1995,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
         # POST /api/dev/cancel
         elif path == "/api/dev/cancel":
-            body = self._read_body()
+            try:
+                body = self._read_body()
+            except ValueError:
+                return  # 413 already sent
             session_id = body.get("session_id", "")
             try:
                 from .dev_engine import load_session, save_session
@@ -1939,7 +2015,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
         # POST /api/dev/resume (marks paused session for resumption — actual resume via IPC)
         elif path == "/api/dev/resume":
-            body = self._read_body()
+            try:
+                body = self._read_body()
+            except ValueError:
+                return  # 413 already sent
             session_id = body.get("session_id", "")
             try:
                 from .dev_engine import load_session
@@ -1970,7 +2049,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
         # POST /api/claude-mds
         elif path == "/api/claude-mds":
-            body = self._read_body()
+            try:
+                body = self._read_body()
+            except ValueError:
+                return  # 413 already sent
             rel_path = body.get("path", "")
             content = body.get("content", "")
             if not rel_path:
@@ -2016,10 +2098,19 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             pass  # client disconnected
 
     def _handle_metrics(self):
+        # BUG-DB-03 (HIGH): Table names were interpolated directly into SQL
+        # via an f-string.  Although the list is a literal here, a future
+        # maintainer could accidentally introduce a dynamic value.  Use a
+        # strict allowlist and validate each entry before querying.
+        _ALLOWED_METRIC_TABLES = frozenset({
+            "messages", "scheduled_tasks", "registered_groups",
+            "sessions", "evolution_runs", "immune_threats",
+        })
         lines = []
-        tables = ["messages", "scheduled_tasks", "registered_groups", "sessions", "evolution_runs", "immune_threats"]
-        for t in tables:
-            row = _fetch_one(f"SELECT COUNT(*) as c FROM {t}")
+        for t in sorted(_ALLOWED_METRIC_TABLES):
+            if not re.fullmatch(r"[a-z_]+", t):
+                continue  # paranoid: skip any non-identifier table name
+            row = _fetch_one(f"SELECT COUNT(*) as c FROM {t}")  # noqa: S608 — safe: allowlist verified above
             if row:
                 lines.append(f"evoclaw_{t}_total {row['c']}")
         body = ("\n".join(lines) + "\n").encode()

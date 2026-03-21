@@ -1,5 +1,6 @@
 """Message formatting and channel routing"""
 import re
+import threading
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -10,15 +11,25 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 _channels: list = []
+# BUG-RT-01 (MEDIUM): _channels was mutated and iterated without any
+# synchronisation.  If channels are registered from one thread while another
+# is routing messages the list could be corrupted.  Use a RLock so that
+# register_channel() and find_channel() serialise safely.
+_channels_lock = threading.RLock()
 
 _INTERNAL_TAG = re.compile(r"<internal>.*?</internal>", re.DOTALL)
 _XML_CHARS = str.maketrans({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;"})
 
 def register_channel(ch) -> None:
-    _channels.append(ch)
+    with _channels_lock:
+        _channels.append(ch)
 
 def find_channel(jid: str):
-    return next((c for c in _channels if c.owns_jid(jid)), None)
+    # BUG-RT-01 (MEDIUM): Take a snapshot under the lock to avoid
+    # concurrent modification during iteration.
+    with _channels_lock:
+        snapshot = list(_channels)
+    return next((c for c in snapshot if c.owns_jid(jid)), None)
 
 def escape_xml(s: str) -> str:
     return s.translate(_XML_CHARS)

@@ -37,7 +37,14 @@ def install() -> None:
 
 
 def get_logs(since_idx: int = 0, level: str = None, limit: int = 200) -> list:
-    """Return log entries with idx > since_idx, optionally filtered by level."""
+    """Return log entries with idx > since_idx, optionally filtered by level.
+
+    BUG-LB-01 (MEDIUM): `limit` was forwarded from caller without a cap
+    here.  Even though the dashboard now caps at 1000, defensive clamping
+    inside the buffer prevents misuse from other callers.
+    """
+    # Clamp limit defensively
+    limit = max(1, min(int(limit), _MAX_SIZE))
     with _lock:
         items = list(_buffer)
     if since_idx > 0:
