@@ -13,6 +13,7 @@ Stage 7 (Deploy) runs in the host process and writes files to disk.
 
 import json
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -24,11 +25,29 @@ from . import config, db
 
 log = logging.getLogger(__name__)
 
+# BUG-DE-1: session_id is constructed from time+uuid but is accepted as raw
+# input by get_dev_logs() and _dev_log_path(), allowing path traversal via
+# crafted session IDs (e.g. "../../etc/passwd").  This pattern validates that
+# the session_id only contains safe characters.
+_SESSION_ID_RE = re.compile(r"^dev_[0-9]+_[0-9a-f]{6}$")
+
+
+def _sanitize_session_id(session_id: str) -> str:
+    """Raise ValueError if session_id does not match the expected safe pattern.
+
+    Prevents path traversal attacks via crafted session IDs passed to
+    get_dev_logs() or any other function that constructs file paths from the id.
+    """
+    if not _SESSION_ID_RE.match(session_id):
+        raise ValueError(f"Invalid session_id: {session_id!r}")
+    return session_id
+
 
 # ── Dev log helpers (per-session file-based log for Dashboard terminal) ────────
 
 def _dev_log_path(session_id: str) -> Path:
     """Return path to the per-session log file."""
+    _sanitize_session_id(session_id)  # BUG-DE-1 FIX
     log_dir = config.DATA_DIR / "dev_logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir / f"{session_id}.log"
@@ -46,13 +65,20 @@ def _write_dev_log(session_id: str, text: str) -> None:
 
 
 def get_dev_logs(session_id: str, offset: int = 0) -> list[str]:
-    """Return log lines starting from *offset* (line index)."""
+    """Return log lines starting from *offset* (line index).
+
+    BUG-DE-1 FIX: session_id is validated before being used to build a path
+    to prevent path traversal via e.g. session_id='../../etc/passwd'.
+    """
     try:
-        p = _dev_log_path(session_id)
+        p = _dev_log_path(session_id)  # raises ValueError on bad id
         if not p.exists():
             return []
         lines = p.read_text(encoding="utf-8").splitlines()
         return lines[offset:]
+    except ValueError:
+        log.warning("get_dev_logs: rejected unsafe session_id %r", session_id)
+        return []
     except Exception:
         return []
 
@@ -437,10 +463,24 @@ def _deploy_files(session: DevSession) -> tuple[bool, str]:
     Stage 7 (host-process): parse '--- FILE: path ---' blocks from the
     implement artifact and write them to disk within the project root.
     Returns (success, summary_message).
+
+    BUG-DE-2 FIX: Deployments are only permitted when the REVIEW stage
+    explicitly passed (artifact contains "## Overall Assessment" with "PASS").
+    A FAIL review blocks the deploy stage entirely.
     """
     written: list[str] = []
     errors:  list[str] = []
     base = config.BASE_DIR.resolve()
+
+    # BUG-DE-2 FIX: Gate deploy on a passing code review.
+    review_artifact = session.artifacts.get("review", "")
+    if not _review_passed(review_artifact):
+        msg = (
+            "Deploy blocked: REVIEW stage did not produce a clear PASS. "
+            "Fix the issues identified in the review artifact before deploying."
+        )
+        log.error("DevEngine: %s (session=%s)", msg, session.session_id)
+        return False, msg
 
     for artifact_key in ("implement", "document"):
         content = session.artifacts.get(artifact_key, "")
@@ -475,6 +515,36 @@ def _deploy_files(session: DevSession) -> tuple[bool, str]:
     if errors:
         summary += f" | {len(errors)} error(s): {', '.join(errors)}"
     return len(errors) == 0, summary
+
+
+def _review_passed(review_text: str) -> bool:
+    """Return True only when the review artifact explicitly contains a PASS verdict.
+
+    BUG-DE-2 FIX: Looks for '## Overall Assessment' section followed by 'PASS'
+    on the same or next non-blank line.  Returns False if the review is absent,
+    empty, or contains 'FAIL'.
+    """
+    if not review_text:
+        return False
+    # Simple heuristic: check for "PASS" in the Overall Assessment section.
+    # A "FAIL" anywhere in the assessment beats any "PASS" mention.
+    lines = review_text.splitlines()
+    in_assessment = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## Overall Assessment"):
+            in_assessment = True
+            continue
+        if in_assessment:
+            if stripped.startswith("##"):
+                # Left the assessment section without finding a verdict
+                break
+            upper = stripped.upper()
+            if "FAIL" in upper:
+                return False
+            if "PASS" in upper:
+                return True
+    return False
 
 
 def _write_one_file(
@@ -515,6 +585,9 @@ class DevEngine:
 
     async def start(self, prompt: str, mode: str = "auto") -> DevSession:
         """Create a new session and persist it."""
+        # BUG-DE-3 FIX: Validate mode to prevent unknown statuses being persisted.
+        if mode not in ("auto", "interactive"):
+            raise ValueError(f"Invalid DevEngine mode: {mode!r}. Must be 'auto' or 'interactive'.")
         session = DevSession(
             session_id=f"dev_{int(time.time())}_{uuid.uuid4().hex[:6]}",
             prompt=prompt,
@@ -522,8 +595,8 @@ class DevEngine:
             mode=mode,
         )
         save_session(session)
-        _write_dev_log(session.session_id, f"🚀 DevEngine session 建立（mode={mode}）")
-        _write_dev_log(session.session_id, f"📝 Prompt: {prompt[:200]}")
+        _write_dev_log(session.session_id, f"DevEngine session created (mode={mode})")
+        _write_dev_log(session.session_id, f"Prompt: {prompt[:200]}")
         log.info(f"DevEngine: new session {session.session_id} mode={mode}")
         return session
 
@@ -553,52 +626,52 @@ class DevEngine:
             # Skip stages already completed (enables resume)
             if stage.value in session.artifacts:
                 log.debug(f"DevEngine: skip {stage.value} (already done)")
-                _write_dev_log(session.session_id, f"⏭ 跳過（已完成）：{stage.value}")
+                _write_dev_log(session.session_id, f"Skip (already done): {stage.value}")
                 continue
 
             session.current_stage = stage.value
             save_session(session)
 
             stage_label = f"[{stage.value.upper()}]"
-            _write_dev_log(session.session_id, f"🔧 {stage_label} 開始執行...")
-            await _notify(f"🔧 *{stage_label}* 開始執行...")
+            _write_dev_log(session.session_id, f"{stage_label} starting...")
+            await _notify(f"*{stage_label}* starting...")
 
             if stage == DevStage.DEPLOY:
                 ok, msg = _deploy_files(session)
-                artifact = f"{'✅' if ok else '⚠️'} {msg}"
+                artifact = f"{'OK' if ok else 'ERROR'} {msg}"
                 if not ok:
                     session.status = "failed"
                     session.error = msg
                     save_session(session)
-                    _write_dev_log(session.session_id, f"❌ Deploy 失敗：{msg}")
-                    await _notify(f"❌ Deploy 失敗：{msg}")
+                    _write_dev_log(session.session_id, f"Deploy failed: {msg}")
+                    await _notify(f"Deploy failed: {msg}")
                     return False
-                _write_dev_log(session.session_id, f"✅ {stage_label} 完成 — {msg}")
+                _write_dev_log(session.session_id, f"{stage_label} done — {msg}")
             else:
                 artifact = await _run_llm_stage(stage, session, group)
                 if not artifact:
                     session.status = "failed"
                     session.error = f"Stage {stage.value} returned no output"
                     save_session(session)
-                    _write_dev_log(session.session_id, f"❌ {stage_label} 失敗（LLM 無輸出）")
-                    await _notify(f"❌ *{stage_label}* 失敗（LLM 無輸出）")
+                    _write_dev_log(session.session_id, f"{stage_label} failed (LLM no output)")
+                    await _notify(f"*{stage_label}* failed (LLM no output)")
                     return False
                 _write_dev_log(session.session_id,
-                               f"✅ {stage_label} 完成（{len(artifact)} 字元）")
+                               f"{stage_label} done ({len(artifact)} chars)")
 
             session.artifacts[stage.value] = artifact
             save_session(session)
-            await _notify(f"✅ *{stage_label}* 完成")
+            await _notify(f"*{stage_label}* done")
 
             # Interactive mode: pause and let caller resume
             if session.mode == "interactive":
                 session.status = "paused"
                 save_session(session)
                 _write_dev_log(session.session_id,
-                               f"⏸ 已暫停（interactive mode），等待確認繼續...")
+                               f"Paused (interactive mode) — waiting for confirmation...")
                 await _notify(
-                    f"⏸ 已暫停。查看 artifact 後回覆 `continue {session.session_id}` 繼續，"
-                    f"或 `cancel {session.session_id}` 取消。"
+                    f"Paused. Review artifact then reply `continue {session.session_id}` to proceed, "
+                    f"or `cancel {session.session_id}` to abort."
                 )
                 return True  # caller must invoke resume()
 
@@ -607,9 +680,9 @@ class DevEngine:
         save_session(session)
         stages_done = len(session.artifacts)
         _write_dev_log(session.session_id,
-                       f"🎉 DevEngine 完成！{stages_done}/7 個階段全部通過。")
+                       f"DevEngine complete! {stages_done}/7 stages passed.")
         await _notify(
-            f"🎉 *DevEngine 完成！* {stages_done}/7 個階段全部通過。\n"
+            f"*DevEngine complete!* {stages_done}/7 stages passed.\n"
             f"Session ID: `{session.session_id}`"
         )
         return True
