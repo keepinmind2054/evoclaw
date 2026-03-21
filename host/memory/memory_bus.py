@@ -143,13 +143,17 @@ class SharedMemoryStore:
         now = time.time()
         try:
             with self._lock:
-                self._conn.execute(
-                    """INSERT INTO shared_memories
-                       (id, agent_id, project, scope, content, importance, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (memory_id, agent_id, project, scope, content, importance, now, now),
-                )
-                self._conn.commit()
+                try:
+                    self._conn.execute(
+                        """INSERT INTO shared_memories
+                           (id, agent_id, project, scope, content, importance, created_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (memory_id, agent_id, project, scope, content, importance, now, now),
+                    )
+                    self._conn.commit()
+                except sqlite3.Error:
+                    self._conn.rollback()
+                    raise
             logger.debug(f"SharedMemory written: {memory_id} scope={scope}")
         except sqlite3.Error as e:
             logger.error(f"SharedMemory write error: {e}")
@@ -315,18 +319,20 @@ class VectorStore:
         embedding = await self.embed(content)
         if embedding is None:
             return
-        try:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO vec_memories (memory_id, agent_id, scope, content, created_at) VALUES (?,?,?,?,?)",
-                (memory_id, agent_id, scope, content, time.time())
-            )
-            self._conn.execute(
-                "INSERT OR REPLACE INTO vec_index (memory_id, embedding) VALUES (?,?)",
-                (memory_id, json.dumps(embedding))
-            )
-            self._conn.commit()
-        except sqlite3.Error as e:
-            logger.debug(f"VectorStore.store error: {e}")
+        with self._lock:
+            try:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO vec_memories (memory_id, agent_id, scope, content, created_at) VALUES (?,?,?,?,?)",
+                    (memory_id, agent_id, scope, content, time.time())
+                )
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO vec_index (memory_id, embedding) VALUES (?,?)",
+                    (memory_id, json.dumps(embedding))
+                )
+                self._conn.commit()
+            except sqlite3.Error as e:
+                self._conn.rollback()
+                logger.debug(f"VectorStore.store error: {e}")
 
     async def search(self, query: str, agent_id: str, k: int = 5) -> list[dict]:
         """Semantic similarity search. Returns empty list if not available."""
@@ -335,26 +341,27 @@ class VectorStore:
         query_embedding = await self.embed(query)
         if query_embedding is None:
             return []
-        try:
-            rows = self._conn.execute(
-                """SELECT vm.memory_id, vm.content, vm.agent_id, vm.scope,
-                          vi.distance
-                   FROM vec_index vi
-                   JOIN vec_memories vm ON vi.memory_id = vm.memory_id
-                   WHERE vi.embedding MATCH ?
-                     AND (vm.scope = 'shared' OR vm.agent_id = ?)
-                   ORDER BY vi.distance
-                   LIMIT ?""",
-                (json.dumps(query_embedding), agent_id, k)
-            ).fetchall()
-            return [
-                {"memory_id": r[0], "content": r[1], "agent_id": r[2],
-                 "scope": r[3], "distance": r[4]}
-                for r in rows
-            ]
-        except sqlite3.Error as e:
-            logger.debug(f"VectorStore.search error: {e}")
-            return []
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    """SELECT vm.memory_id, vm.content, vm.agent_id, vm.scope,
+                              vi.distance
+                       FROM vec_index vi
+                       JOIN vec_memories vm ON vi.memory_id = vm.memory_id
+                       WHERE vi.embedding MATCH ?
+                         AND (vm.scope = 'shared' OR vm.agent_id = ?)
+                       ORDER BY vi.distance
+                       LIMIT ?""",
+                    (json.dumps(query_embedding), agent_id, k)
+                ).fetchall()
+                return [
+                    {"memory_id": r[0], "content": r[1], "agent_id": r[2],
+                     "scope": r[3], "distance": r[4]}
+                    for r in rows
+                ]
+            except sqlite3.Error as e:
+                logger.debug(f"VectorStore.search error: {e}")
+                return []
 
     def delete(self, memory_id: str) -> bool:
         """Remove a memory from the vector index."""

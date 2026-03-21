@@ -17,10 +17,10 @@ def append_warm_log(jid: str, user_msg: str, assistant_msg: str) -> None:
     """Append a conversation summary to today's warm memory log."""
     today = datetime.now().strftime("%Y-%m-%d")
     ts = datetime.now().strftime("%H:%M")
-    # Build a compact log entry
+    # Build a compact log entry (no emojis — keeps entries plain-text safe)
     u_preview = user_msg[:200].replace("\n", " ") if user_msg else ""
     a_preview = assistant_msg[:200].replace("\n", " ") if assistant_msg else ""
-    entry = f"### {ts}\n👤 {u_preview}\n🤖 {a_preview}\n"
+    entry = f"### {ts}\nUser: {u_preview}\nBot: {a_preview}\n"
     db.append_warm_log(jid, today, entry)
     log.debug("warm_log: appended entry for jid=%s date=%s", jid, today)
 
@@ -44,6 +44,32 @@ async def run_micro_sync(jid: str) -> None:
         log.info("warm: micro_sync complete for jid=%s", jid)
     except Exception as exc:
         log.error("warm: micro_sync failed for jid=%s: %s", jid, exc)
+
+
+async def run_daily_wrapup(jid: str) -> None:
+    """Summarise yesterday's warm logs into hot memory and record the timestamp.
+
+    This ensures the last_daily_wrapup column in group_memory_sync is kept
+    up to date, which the evolution daemon uses to avoid re-running daily
+    wrapup on every restart.
+    """
+    try:
+        recent_logs = db.get_warm_logs_recent(jid, days=1)
+        if not recent_logs:
+            db.record_daily_wrapup(jid)
+            return
+        from .hot import get_hot_memory, update_hot_memory, HOT_MEMORY_MAX_BYTES
+        current_hot = get_hot_memory(jid)
+        today = datetime.now().strftime("%Y-%m-%d")
+        wrapup_note = f"\n\n[Daily wrapup: {today}, {len(recent_logs)} log entries]\n"
+        if wrapup_note not in current_hot:
+            new_hot = current_hot.rstrip() + wrapup_note
+            if len(new_hot.encode()) < HOT_MEMORY_MAX_BYTES:
+                update_hot_memory(jid, new_hot)
+        db.record_daily_wrapup(jid)
+        log.info("warm: daily_wrapup complete for jid=%s", jid)
+    except Exception as exc:
+        log.error("warm: daily_wrapup failed for jid=%s: %s", jid, exc)
 
 
 def prune_old_warm_logs(jid: str) -> int:

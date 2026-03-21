@@ -89,6 +89,12 @@ class RBACStore:
 
     def _init_db(self):
         with self._lock:
+            # Enable WAL mode for concurrent read access and reduced lock
+            # contention.  busy_timeout prevents immediate SQLITE_BUSY failures
+            # when another thread holds a write lock.
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute("PRAGMA busy_timeout=5000")
             self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS rbac_grants (
                     subject_id TEXT NOT NULL,
@@ -98,6 +104,14 @@ class RBACStore:
                     PRIMARY KEY (subject_id, role)
                 )
             """)
+            # Explicit index on subject_id accelerates has_permission() lookups,
+            # which are called on every message.  The PRIMARY KEY (subject_id, role)
+            # creates a composite index but SQLite can use it for subject_id-only
+            # prefix scans; this explicit index avoids full-table scans on the
+            # permission check query.
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_rbac_subject ON rbac_grants(subject_id)"
+            )
             self._conn.commit()
 
     def _get_cached_roles(self, subject_id: str):
@@ -127,21 +141,29 @@ class RBACStore:
 
     def grant(self, subject_id: str, role: Role, granted_by: Optional[str] = None):
         with self._lock:
-            self._conn.execute("""
-                INSERT OR REPLACE INTO rbac_grants (subject_id, role, granted_by, granted_at)
-                VALUES (?,?,?,?)
-            """, (subject_id, role.value, granted_by, time.time()))
-            self._conn.commit()
+            try:
+                self._conn.execute("""
+                    INSERT OR REPLACE INTO rbac_grants (subject_id, role, granted_by, granted_at)
+                    VALUES (?,?,?,?)
+                """, (subject_id, role.value, granted_by, time.time()))
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
         self._invalidate_cache(subject_id)
         logger.info(f"RBAC grant: {subject_id} -> {role.value} (by {granted_by})")
 
     def revoke(self, subject_id: str, role: Role):
         with self._lock:
-            self._conn.execute(
-                "DELETE FROM rbac_grants WHERE subject_id=? AND role=?",
-                (subject_id, role.value)
-            )
-            self._conn.commit()
+            try:
+                self._conn.execute(
+                    "DELETE FROM rbac_grants WHERE subject_id=? AND role=?",
+                    (subject_id, role.value)
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
         self._invalidate_cache(subject_id)
         logger.info(f"RBAC revoke: {subject_id} - {role.value}")
 

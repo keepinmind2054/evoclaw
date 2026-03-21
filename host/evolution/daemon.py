@@ -100,9 +100,12 @@ async def evolution_loop(stop_event: asyncio.Event) -> None:
             _sync_timestamps_loaded = True
             try:
                 from host import db as _ts_db
-                _sync_rows = _ts_db.get_db().execute(
-                    "SELECT MAX(last_micro_sync), MAX(last_weekly_compound) FROM group_memory_sync"
-                ).fetchone()
+                # Hold _db_lock for the duration of the query, as required by
+                # the threading contract documented in db.get_db().
+                with _ts_db._db_lock:
+                    _sync_rows = _ts_db.get_db().execute(
+                        "SELECT MAX(last_micro_sync), MAX(last_weekly_compound) FROM group_memory_sync"
+                    ).fetchone()
                 if _sync_rows and _sync_rows[0]:
                     _last_micro_sync = float(_sync_rows[0])
                 if _sync_rows and _sync_rows[1]:
