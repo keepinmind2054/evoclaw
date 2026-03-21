@@ -450,9 +450,14 @@ class GroupQueue:
             timeout,
             self._active_count,
         )
-        deadline = asyncio.get_event_loop().time() + timeout
+        # p15d BUG-FIX (HIGH): asyncio.get_event_loop() is deprecated in Python
+        # 3.10+ and may return the wrong loop if called from a coroutine running
+        # on a non-default loop.  Use asyncio.get_running_loop() instead, which
+        # always returns the loop the current coroutine is executing on.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
         while self._active_count > 0:
-            remaining = deadline - asyncio.get_event_loop().time()
+            remaining = deadline - loop.time()
             if remaining <= 0:
                 log.warning(
                     "Graceful shutdown timeout: %d container(s) still active",
