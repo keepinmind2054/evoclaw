@@ -542,7 +542,11 @@ async def _run_apply_skill(
             if request_id:
                 result_dir = config.DATA_DIR / "ipc" / group_folder / "results"
                 result_dir.mkdir(parents=True, exist_ok=True)
-                (result_dir / f"{request_id}.json").write_text(
+                # p15b-fix: atomic write (tmp+rename) so the container polling
+                # for this file never reads a partial JSON.
+                _out = result_dir / f"{request_id}.json"
+                _tmp = _out.with_suffix(".json.tmp")
+                _tmp.write_text(
                     json.dumps({
                         "requestId": request_id,
                         "output": msg,
@@ -552,6 +556,7 @@ async def _run_apply_skill(
                     }),
                     encoding="utf-8",
                 )
+                _tmp.rename(_out)
         except Exception as e:
             log.error(f"apply_skill IPC error: {e}")
 
@@ -595,7 +600,10 @@ async def _run_uninstall_skill(
             if request_id:
                 result_dir = config.DATA_DIR / "ipc" / group_folder / "results"
                 result_dir.mkdir(parents=True, exist_ok=True)
-                (result_dir / f"{request_id}.json").write_text(
+                # p15b-fix: atomic write
+                _out = result_dir / f"{request_id}.json"
+                _tmp = _out.with_suffix(".json.tmp")
+                _tmp.write_text(
                     json.dumps({
                         "requestId": request_id,
                         "output": msg,
@@ -603,6 +611,7 @@ async def _run_uninstall_skill(
                     }),
                     encoding="utf-8",
                 )
+                _tmp.rename(_out)
         except Exception as e:
             log.error(f"uninstall_skill IPC error: {e}")
 
@@ -626,7 +635,10 @@ async def _run_list_skills(
         if request_id:
             result_dir = config.DATA_DIR / "ipc" / group_folder / "results"
             result_dir.mkdir(parents=True, exist_ok=True)
-            (result_dir / f"{request_id}.json").write_text(
+            # p15b-fix: atomic write
+            _out = result_dir / f"{request_id}.json"
+            _tmp = _out.with_suffix(".json.tmp")
+            _tmp.write_text(
                 json.dumps({
                     "requestId": request_id,
                     "output": output,
@@ -634,6 +646,7 @@ async def _run_list_skills(
                 }),
                 encoding="utf-8",
             )
+            _tmp.rename(_out)
     except Exception as e:
         log.error(f"list_skills IPC error: {e}")
 
@@ -839,7 +852,10 @@ async def _run_memory_search(
         if request_id:
             result_dir = config.DATA_DIR / "ipc" / group_folder / "results"
             result_dir.mkdir(parents=True, exist_ok=True)
-            (result_dir / f"{request_id}.json").write_text(
+            # p15b-fix: atomic write
+            _out = result_dir / f"{request_id}.json"
+            _tmp = _out.with_suffix(".json.tmp")
+            _tmp.write_text(
                 json.dumps({
                     "requestId": request_id,
                     "output": output,
@@ -847,6 +863,7 @@ async def _run_memory_search(
                 }),
                 encoding="utf-8",
             )
+            _tmp.rename(_out)
         log.info("memory_search IPC: query=%r found %d results for jid=%s", query, len(results), jid)
     except Exception as e:
         log.error("memory_search IPC error: %s", e)
@@ -911,18 +928,25 @@ async def _run_subagent(
         if len(_encoded) > _SUBAGENT_RESULT_MAX_BYTES:
             result_text = _encoded[:_SUBAGENT_RESULT_MAX_BYTES].decode("utf-8", errors="ignore")
             log.warning("Subagent result truncated from %d to %d bytes", len(_encoded), _SUBAGENT_RESULT_MAX_BYTES)
-        output_file.write_text(
+        # p15b-fix: atomic write (tmp+rename) so the parent container polling
+        # for this file never reads a partial JSON midway through the write.
+        _out_tmp = output_file.with_suffix(".json.tmp")
+        _out_tmp.write_text(
             json.dumps({"requestId": request_id, "output": result_text}),
-            encoding="utf-8"
+            encoding="utf-8",
         )
+        _out_tmp.rename(output_file)
         log.info(f"Subagent {request_id} completed, result written to {output_file}")
     except Exception as e:
         log.error(f"Subagent {request_id} error: {e}")
         try:
-            output_file.write_text(
+            # p15b-fix: atomic write for error result too
+            _err_tmp = output_file.with_suffix(".json.tmp")
+            _err_tmp.write_text(
                 json.dumps({"requestId": request_id, "output": f"Subagent error: {e}"}),
-                encoding="utf-8"
+                encoding="utf-8",
             )
+            _err_tmp.rename(output_file)
         except Exception:
             pass
 

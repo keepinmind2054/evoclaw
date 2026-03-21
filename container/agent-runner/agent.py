@@ -504,7 +504,10 @@ def tool_schedule_task(prompt: str, schedule_type: str, schedule_value: str, con
     try:
         tasks_dir = Path(IPC_TASKS_DIR)
         tasks_dir.mkdir(parents=True, exist_ok=True)
-        fname = tasks_dir / f"{int(time.time()*1000)}.json"
+        # p15b-fix: add random suffix to avoid filename collision when two
+        # schedule_task calls land within the same millisecond.
+        uid = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+        fname = tasks_dir / f"{int(time.time()*1000)}-{uid}.json"
         payload = json.dumps({
             "type": "schedule_task",
             "prompt": prompt,
@@ -604,12 +607,17 @@ def tool_run_agent(prompt: str, context_mode: str = "isolated") -> str:
         Path(IPC_RESULTS_DIR).mkdir(parents=True, exist_ok=True)
 
         fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-spawn.json"
-        fname.write_text(json.dumps({
+        # p15b-fix: atomic write (tmp+rename) so the host never reads a partial JSON
+        # when the inotify CREATE event fires before the write completes.
+        _spawn_payload = json.dumps({
             "type": "spawn_agent",
             "requestId": request_id,
             "prompt": prompt,
             "context_mode": context_mode,
-        }), encoding="utf-8")
+        })
+        _spawn_tmp = fname.with_suffix(".tmp")
+        _spawn_tmp.write_text(_spawn_payload, encoding="utf-8")
+        _spawn_tmp.rename(fname)
 
         # Poll for result (up to 300 seconds)
         output_path = Path(IPC_RESULTS_DIR) / f"{request_id}.json"
@@ -675,11 +683,15 @@ def tool_start_remote_control(chat_jid: str = "", sender: str = "") -> str:
         Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
         uid = str(uuid.uuid4())[:8]
         fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-remote-control-{uid}.json"
-        fname.write_text(json.dumps({
+        # p15b-fix: atomic write so inotify never sees a partial file
+        _rc_payload = json.dumps({
             "type": "start_remote_control",
             "jid": effective_jid,
             "sender": sender,
-        }), encoding="utf-8")
+        })
+        _rc_tmp = fname.with_suffix(".tmp")
+        _rc_tmp.write_text(_rc_payload, encoding="utf-8")
+        _rc_tmp.rename(fname)
         _log("📨 IPC", f"type=start_remote_control jid={effective_jid} → {fname.name}")
         return "Remote control session requested — URL will be sent to this chat shortly (up to 30s)."
     except Exception as exc:
@@ -695,10 +707,14 @@ def tool_self_update(chat_jid: str = "") -> str:
         Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
         uid = str(uuid.uuid4())[:8]
         fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-self-update-{uid}.json"
-        fname.write_text(json.dumps({
+        # p15b-fix: atomic write so inotify never sees a partial file
+        _su_payload = json.dumps({
             "type": "self_update",
             "jid": effective_jid,
-        }), encoding="utf-8")
+        })
+        _su_tmp = fname.with_suffix(".tmp")
+        _su_tmp.write_text(_su_payload, encoding="utf-8")
+        _su_tmp.rename(fname)
         _log("📨 IPC", f"type=self_update jid={effective_jid} → {fname.name}")
         return "Self-update requested — EvoClaw will pull latest code and restart shortly."
     except Exception as exc:
@@ -2260,6 +2276,11 @@ def emit(obj: dict):
     將結果 JSON 輸出到 stdout，用 OUTPUT_START/OUTPUT_END 標記包住。
     host 的 container_runner 會從這兩個標記之間截取 JSON。
     使用 flush=True 確保輸出立即寫入，不被 Python 的緩衝區滯留。
+
+    p15b-fix: wrapped in try/except BrokenPipeError so that if the host has
+    already closed the pipe (e.g. due to timeout) the container exits cleanly
+    instead of raising an unhandled exception that would produce confusing
+    traceback output on stderr.
     """
     result_text = obj.get("result") or ""
     if result_text:
@@ -2267,9 +2288,14 @@ def emit(obj: dict):
     _log("📤 OUTPUT", f"{len(result_text)} chars")
     success = obj.get("status") == "success"
     _log("🏁 DONE", f"success={success}")
-    print(OUTPUT_START, flush=True)
-    print(json.dumps(obj), flush=True)
-    print(OUTPUT_END, flush=True)
+    try:
+        print(OUTPUT_START, flush=True)
+        print(json.dumps(obj), flush=True)
+        print(OUTPUT_END, flush=True)
+    except (BrokenPipeError, OSError):
+        # Host closed the pipe (e.g. container timed out and was killed).
+        # Exit quietly — container_runner already handles this case.
+        pass
 
 
 def main():
