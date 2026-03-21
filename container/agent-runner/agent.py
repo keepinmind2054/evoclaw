@@ -1145,6 +1145,7 @@ TOOL_DECLARATIONS = [] if not _GOOGLE_AVAILABLE or types is None else [
         parameters=types.Schema(
             type=types.Type.OBJECT,
             properties={},
+            required=[],
         ),
     ),
     types.FunctionDeclaration(
@@ -1288,10 +1289,10 @@ OPENAI_TOOL_DECLARATIONS = [
     {"type": "function", "function": {"name": "Edit", "description": "Find and replace a string in a file.", "parameters": {"type": "object", "properties": {"file_path": {"type": "string", "description": "Path to the file"}, "old_string": {"type": "string", "description": "Exact text to replace"}, "new_string": {"type": "string", "description": "Replacement text"}}, "required": ["file_path", "old_string", "new_string"]}}},
     {"type": "function", "function": {"name": "mcp__evoclaw__send_message", "description": "Send a message to the user in the chat.", "parameters": {"type": "object", "properties": {"text": {"type": "string", "description": "Message text"}, "sender": {"type": "string", "description": "Optional bot name"}}, "required": ["text"]}}},
     {"type": "function", "function": {"name": "mcp__evoclaw__schedule_task", "description": "Schedule a recurring or one-time task.", "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "What to do when task runs"}, "schedule_type": {"type": "string", "description": "cron, interval, or once"}, "schedule_value": {"type": "string", "description": "Cron expr, ms, or ISO timestamp"}, "context_mode": {"type": "string", "description": "group or isolated"}}, "required": ["prompt", "schedule_type", "schedule_value"]}}},
-    {"type": "function", "function": {"name": "mcp__evoclaw__list_tasks", "description": "List all scheduled tasks for this group.", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "mcp__evoclaw__list_tasks", "description": "List all scheduled tasks for this group.", "parameters": {"type": "object", "properties": {}, "required": []}}},
     {"type": "function", "function": {"name": "mcp__evoclaw__cancel_task", "description": "Cancel (delete) a scheduled task by its ID.", "parameters": {"type": "object", "properties": {"task_id": {"type": "string", "description": "The task ID to cancel"}}, "required": ["task_id"]}}},
-    {"type": "function", "function": {"name": "mcp__evoclaw__pause_task", "description": "Pause a scheduled task.", "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}}},
-    {"type": "function", "function": {"name": "mcp__evoclaw__resume_task", "description": "Resume a paused scheduled task.", "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}}},
+    {"type": "function", "function": {"name": "mcp__evoclaw__pause_task", "description": "Pause a scheduled task (it will not run until resumed).", "parameters": {"type": "object", "properties": {"task_id": {"type": "string", "description": "The task ID to pause"}}, "required": ["task_id"]}}},
+    {"type": "function", "function": {"name": "mcp__evoclaw__resume_task", "description": "Resume a previously paused scheduled task.", "parameters": {"type": "object", "properties": {"task_id": {"type": "string", "description": "The task ID to resume"}}, "required": ["task_id"]}}},
     {"type": "function", "function": {"name": "Glob", "description": "Find files matching a glob pattern (supports ** recursive).", "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}}, "required": ["pattern"]}}},
     {"type": "function", "function": {"name": "Grep", "description": "Search file contents with regex. Returns filename:line:content.", "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}, "include": {"type": "string"}}, "required": ["pattern"]}}},
     {"type": "function", "function": {"name": "WebFetch", "description": "Fetch a URL and return its content as plain text.", "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}}},
@@ -1320,10 +1321,10 @@ CLAUDE_TOOL_DECLARATIONS = [
     {"name": "Edit", "description": "Find and replace a string in a file.", "input_schema": {"type": "object", "properties": {"file_path": {"type": "string"}, "old_string": {"type": "string"}, "new_string": {"type": "string"}}, "required": ["file_path", "old_string", "new_string"]}},
     {"name": "mcp__evoclaw__send_message", "description": "Send a message to the user.", "input_schema": {"type": "object", "properties": {"text": {"type": "string"}, "sender": {"type": "string"}}, "required": ["text"]}},
     {"name": "mcp__evoclaw__schedule_task", "description": "Schedule a task.", "input_schema": {"type": "object", "properties": {"prompt": {"type": "string"}, "schedule_type": {"type": "string"}, "schedule_value": {"type": "string"}, "context_mode": {"type": "string"}}, "required": ["prompt", "schedule_type", "schedule_value"]}},
-    {"name": "mcp__evoclaw__list_tasks", "description": "List all scheduled tasks for this group.", "input_schema": {"type": "object", "properties": {}}},
+    {"name": "mcp__evoclaw__list_tasks", "description": "List all scheduled tasks for this group.", "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "mcp__evoclaw__cancel_task", "description": "Cancel (delete) a scheduled task by its ID.", "input_schema": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}},
-    {"name": "mcp__evoclaw__pause_task", "description": "Pause a scheduled task.", "input_schema": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}},
-    {"name": "mcp__evoclaw__resume_task", "description": "Resume a paused scheduled task.", "input_schema": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}},
+    {"name": "mcp__evoclaw__pause_task", "description": "Pause a scheduled task (it will not run until resumed).", "input_schema": {"type": "object", "properties": {"task_id": {"type": "string", "description": "The task ID to pause"}}, "required": ["task_id"]}},
+    {"name": "mcp__evoclaw__resume_task", "description": "Resume a previously paused scheduled task.", "input_schema": {"type": "object", "properties": {"task_id": {"type": "string", "description": "The task ID to resume"}}, "required": ["task_id"]}},
     {"name": "Glob", "description": "Find files matching a glob pattern (supports ** recursive).", "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}}, "required": ["pattern"]}},
     {"name": "Grep", "description": "Search file contents with regex. Returns filename:line:content.", "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}, "include": {"type": "string"}}, "required": ["pattern"]}},
     {"name": "WebFetch", "description": "Fetch a URL and return its content as plain text.", "input_schema": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}},
@@ -1346,13 +1347,18 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
     """
     import re as _re_claude
     messages = []
-    # 注入對話歷史（原生 multi-turn 格式）
+    # P15A-FIX-8: inject conversation history preserving structured content.
+    # The old code used msg.get("content","") which evaluates to "" for list-typed
+    # content (tool_use/tool_result blocks), silently dropping those messages.
+    # Use the raw content value directly; skip only genuinely empty values.
     if conversation_history:
         for msg in conversation_history:
             role = msg.get("role", "user")
-            text = msg.get("content", "")
-            if text:
-                messages.append({"role": role, "content": text})
+            content = msg.get("content", "")
+            if isinstance(content, str) and not content.strip():
+                continue
+            if content is not None and content != [] and content != "":
+                messages.append({"role": role, "content": content})
     messages.append({"role": "user", "content": user_message})
     MAX_ITER = max_iter
     final_response = ""
@@ -1366,14 +1372,18 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
         "mcp__evoclaw__run_agent",
     ])
     # Extended fake-status regex covering Claude's common hallucination patterns
+    # P15A-FIX-1: added English fake-done patterns (previously only in OpenAI loop)
     _FAKE_STATUS_RE = _re_claude.compile(
         r'\*\([^)]*\)\*'           # *(正在執行...)*
         r'|\*\[[^\]]*\]\*'          # *[running...]*
         r'|✅\s*Done'              # ✅ Done
         r'|✅\s*完成'              # ✅ 完成
         r'|【[^】]*(?:已|正在|將|完成|處理|執行)[^】]*】'   # 【已完成】
-        r'|（[^）]{2,30}(?:已|正在|處理|執行)[^）]{0,20}）', # （已完成）
-        _re_claude.DOTALL,
+        r'|（[^）]{2,30}(?:已|正在|處理|執行)[^）]{0,20}）' # （已完成）
+        r'|(?:I\s+have\s+(?:completed|finished|executed|run|written))'  # English fake-done
+        r'|(?:Task\s+(?:is\s+)?(?:complete|done|finished))'            # Task complete
+        r'|(?:Successfully\s+(?:completed|executed|ran|written))',      # Successfully executed
+        _re_claude.DOTALL | _re_claude.IGNORECASE,
     )
 
     for n in range(MAX_ITER):
@@ -1413,7 +1423,27 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
             break
 
         if response.stop_reason != "tool_use":
-            # Unexpected stop reason (e.g. max_tokens, stop_sequence) — collect text and exit
+            # P15A-FIX-2: handle max_tokens gracefully.
+            # If Claude hit max_tokens while mid-tool-call, the assistant message
+            # (already appended above) may contain tool_use blocks.  If we simply
+            # break, the next API call will fail with a 400 because the history has
+            # an assistant tool_use without a matching tool_result.  Detect this
+            # case and execute any pending tool_use blocks so history stays valid.
+            _pending_tool_uses = [b for b in response.content if hasattr(b, "type") and b.type == "tool_use"]
+            if _pending_tool_uses and response.stop_reason == "max_tokens":
+                _log("⚠️ MAX-TOKENS", f"Claude hit max_tokens with {len(_pending_tool_uses)} pending tool_use block(s) — executing to keep history valid")
+                _partial_results = []
+                for _tb in _pending_tool_uses:
+                    try:
+                        _tr = execute_tool(_tb.name, _tb.input, chat_jid)
+                    except Exception as _te:
+                        _tr = f"[Tool error: {_te}]"
+                    _tr_str = str(_tr)
+                    if len(_tr_str) > _MAX_TOOL_RESULT_CHARS:
+                        _tr_str = _tr_str[:_MAX_TOOL_RESULT_CHARS] + f"\n[... truncated {len(_tr_str) - _MAX_TOOL_RESULT_CHARS} chars]"
+                    _partial_results.append({"type": "tool_result", "tool_use_id": _tb.id, "content": _tr_str})
+                messages.append({"role": "user", "content": _partial_results})
+            # Unexpected / terminal stop reason — collect text and exit
             final_response = " ".join(
                 block.text for block in response.content
                 if hasattr(block, "text")
@@ -1448,7 +1478,20 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
                         _memory_written = True
                         _log("🧠 MEMORY-WRITE", f"Claude updated MEMORY.md via {block.name} on turn {n}")
 
+        # P15A-FIX-3: if stop_reason was tool_use but we found zero tool_use blocks,
+        # the response is malformed.  Breaking here leaves the last assistant message
+        # (already appended) without a paired tool_result, corrupting history for any
+        # future continuation.  Inject a synthetic error tool_result for each tool_use
+        # block actually present (if any), then break cleanly.
         if not tool_results:
+            _stray_tool_uses = [b for b in response.content if hasattr(b, "type") and b.type == "tool_use"]
+            if _stray_tool_uses:
+                _log("⚠️ EMPTY-RESULTS", f"stop_reason=tool_use but 0 results collected; {len(_stray_tool_uses)} orphan tool_use blocks — injecting error results")
+                _err_results = [
+                    {"type": "tool_result", "tool_use_id": b.id, "content": "[System error: tool_use block not executed]"}
+                    for b in _stray_tool_uses
+                ]
+                messages.append({"role": "user", "content": _err_results})
             break
 
         # ── Milestone Enforcer: anti-fabrication (same logic as OpenAI loop) ──
@@ -1500,9 +1543,26 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
         if tool_results is not None:
             messages.append({"role": "user", "content": tool_results})
 
-        # Trim history to prevent unbounded growth (keep index 0 = first user msg)
+        # P15A-FIX-4: Trim history to prevent unbounded growth while preserving
+        # tool_use / tool_result pairs.  The naive slice messages[:1]+messages[-(N-1):]
+        # can cut between an assistant message with tool_use blocks and the following
+        # user message with tool_result blocks, producing a 400 from the Anthropic API.
+        # Instead, after slicing, advance the tail start until it begins on a message
+        # that is NOT a user tool_result (i.e. its content is not a list starting with
+        # a tool_result type), ensuring the pair is never split.
         if len(messages) > _MAX_HISTORY_MESSAGES:
-            messages = messages[:1] + messages[-(_MAX_HISTORY_MESSAGES - 1):]
+            _keep_head = messages[:1]  # first user message always preserved
+            _tail_start = len(messages) - (_MAX_HISTORY_MESSAGES - 1)
+            # Advance _tail_start past any orphaned user tool_result messages
+            while _tail_start < len(messages):
+                _tm = messages[_tail_start]
+                _tc = _tm.get("content", "")
+                # A user message whose content is a list of tool_result dicts
+                if isinstance(_tc, list) and _tc and isinstance(_tc[0], dict) and _tc[0].get("type") == "tool_result":
+                    _tail_start += 1
+                else:
+                    break
+            messages = _keep_head + messages[_tail_start:]
 
         # ── MEMORY.md reminder on penultimate turn ───────────────────────────
         if not _memory_written and n == MAX_ITER - 2:
@@ -1614,13 +1674,19 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
     """
     import json as _json
     history = [{"role": "system", "content": system_instruction}]
-    # 注入對話歷史（原生 multi-turn 格式）
+    # P15A-FIX-5: inject conversation history preserving structured content.
+    # The old code used msg.get("content","") which evaluates to "" for list-typed
+    # content (tool_result blocks), silently dropping those messages.  Use the raw
+    # content value directly; only skip messages that have genuinely empty content.
     if conversation_history:
         for msg in conversation_history:
             role = msg.get("role", "user")
-            text = msg.get("content", "")
-            if text:
-                history.append({"role": role, "content": text})
+            content = msg.get("content", "")
+            # Accept both string and list content; skip only truly empty values
+            if content or content == 0:  # 0 is falsy but valid; "" and [] are not
+                if isinstance(content, str) and not content.strip():
+                    continue
+                history.append({"role": role, "content": content})
     history.append({"role": "user", "content": user_message})
     MAX_ITER = max_iter
     final_response = ""
@@ -1704,6 +1770,19 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                 for tc in msg.tool_calls
             ]
         history.append(msg_dict)
+
+        # P15A-FIX-7: handle finish_reason=="length" (context length exceeded).
+        # Treat it as a terminal condition: trim history and break cleanly rather
+        # than treating it as a regular no-tool turn and incrementing _no_tool_turns.
+        if stop_reason == "length":
+            _log("⚠️ CTX-OVERFLOW", f"finish_reason=length — context window exceeded; trimming history and stopping")
+            # Aggressively trim history to the most recent quarter to free context
+            _trim_to = max(1, len(history) // 4)
+            history = history[:1] + history[-_trim_to:]
+            final_response = (msg.content or "").strip() or (
+                "（系統：輸入超出模型 context 限制，請縮短對話記錄或簡化提示後重試。）"
+            )
+            break
 
         if not msg.tool_calls:
             _no_tool_turns += 1  # track consecutive no-tool turns (Fix #169)
@@ -1909,9 +1988,20 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                 "content": result_str,
             })
 
-        # Trim history to prevent unbounded growth (keep system msg at index 0)
+        # P15A-FIX-6: Trim history to prevent unbounded growth while preserving
+        # assistant tool_calls / tool-result message pairs.  The naive slice
+        # history[:1]+history[-(N-1):] can sever an assistant message that has
+        # tool_calls from the following tool-role messages, producing a 400 from
+        # the OpenAI API ("tool messages must be preceded by an assistant tool_calls
+        # message").  After slicing, advance the tail start until the first retained
+        # message is NOT a tool-role message.
         if len(history) > _MAX_HISTORY_MESSAGES:
-            history = history[:1] + history[-(_MAX_HISTORY_MESSAGES - 1):]
+            _keep_sys = history[:1]  # system message always preserved
+            _tail_start = len(history) - (_MAX_HISTORY_MESSAGES - 1)
+            # Advance past any orphaned tool-role messages at the new tail boundary
+            while _tail_start < len(history) and history[_tail_start].get("role") == "tool":
+                _tail_start += 1
+            history = _keep_sys + history[_tail_start:]
 
     if not final_response:
         _log("⚠️ LOOP-EXHAUST", f"OpenAI agent loop hit MAX_ITER={MAX_ITER} without finish_reason=stop — no final text collected")
@@ -1969,14 +2059,18 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
     ])
     import re as _re_gemini
     # Fake-status regex: covers both standard and Chinese hallucination patterns
+    # P15A-FIX-10: added English fake-done patterns (previously only in OpenAI loop)
     _FAKE_STATUS_RE_G = _re_gemini.compile(
         r'\*\([^)]*\)\*'          # *(正在執行...)*
         r'|\*\[[^\]]*\]\*'         # *[running...]*
         r'|✅\s*Done'             # ✅ Done
         r'|✅\s*完成'             # ✅ 完成
         r'|【[^】]*(?:已|正在|將|完成|處理|執行)[^】]*】'   # 【已完成】
-        r'|（[^）]{2,30}(?:已|正在|處理|執行)[^）]{0,20}）', # （已完成）
-        _re_gemini.DOTALL,
+        r'|（[^）]{2,30}(?:已|正在|處理|執行)[^）]{0,20}）' # （已完成）
+        r'|(?:I\s+have\s+(?:completed|finished|executed|run|written))'  # English fake-done
+        r'|(?:Task\s+(?:is\s+)?(?:complete|done|finished))'            # Task complete
+        r'|(?:Successfully\s+(?:completed|executed|ran|written))',      # Successfully executed
+        _re_gemini.DOTALL | _re_gemini.IGNORECASE,
     )
 
     for n in range(MAX_ITER):
@@ -1996,10 +2090,21 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
         stop_reason = str(candidate.finish_reason) if candidate else "none"
         _log("🧠 LLM ←", f"stop={stop_reason}")
         if not candidate or not candidate.content or not candidate.content.parts:
-            # Gemini returned empty candidate — check for prompt_feedback (safety block)
+            # P15A-FIX-11: Distinguish safety/recitation blocks from ordinary empty
+            # responses so the caller can surface a meaningful message to the user.
             _feedback = getattr(response, "prompt_feedback", None)
             if _feedback:
                 _log("⚠️ GEMINI-BLOCK", f"prompt_feedback={_feedback}")
+            _sr_lower = stop_reason.lower()
+            if "safety" in _sr_lower:
+                final_response = "（系統：回應被安全過濾器攔截，請調整問題後重試。）"
+                _log("🚨 GEMINI-SAFETY", f"finish_reason={stop_reason} — safety block; returning user-visible error")
+            elif "recitation" in _sr_lower:
+                final_response = "（系統：回應被版權偵測攔截，請以不同方式重新提問。）"
+                _log("⚠️ GEMINI-RECITATION", f"finish_reason={stop_reason} — recitation block")
+            elif "max_tokens" in _sr_lower or stop_reason.strip() == "2":
+                final_response = "（系統：輸入超出模型 context 限制，請縮短對話記錄或簡化提示後重試。）"
+                _log("⚠️ GEMINI-MAXTOKEN", f"finish_reason={stop_reason} — context limit hit")
             break
 
         parts = candidate.content.parts
@@ -2120,9 +2225,26 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
                 "格式：`[YYYY-MM-DD] <做了什麼、關鍵決策、解決方法>`"
             ))]))
 
-        # Trim history to prevent unbounded growth (keep few-shot at indices 0-1)
+        # P15A-FIX-9: Trim history to prevent unbounded growth while preserving
+        # model(function_call) + user(function_response) pairs.  The naive slice
+        # history[:2]+history[-(N-2):] can sever a model message with function_calls
+        # from the following user message that carries the FunctionResponse parts,
+        # which causes Gemini to reject the history with an API error.
+        # After slicing, advance the tail start past any user function_response messages.
         if len(history) > _MAX_HISTORY_MESSAGES:
-            history = history[:2] + history[-(_MAX_HISTORY_MESSAGES - 2):]
+            _keep_fewshot = history[:2]  # few-shot pair always preserved
+            _tail_start = len(history) - (_MAX_HISTORY_MESSAGES - 2)
+            # Advance past any orphaned user messages that carry only function_response parts
+            while _tail_start < len(history):
+                _hm = history[_tail_start]
+                if _hm.role == "user":
+                    _hm_parts = _hm.parts or []
+                    # A pure function_response user message must not be the first retained entry
+                    if _hm_parts and all(getattr(p, "function_response", None) is not None for p in _hm_parts):
+                        _tail_start += 1
+                        continue
+                break
+            history = _keep_fewshot + history[_tail_start:]
 
     if not final_response:
         _log("⚠️ LOOP-EXHAUST", f"Gemini agent loop hit MAX_ITER={MAX_ITER} without text response — no final text collected")
