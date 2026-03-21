@@ -415,6 +415,18 @@ class GroupQueue:
         No new tasks will be accepted after this call.
         """
         self._shutting_down = True
+        # p15b-fix: count in-memory pending_tasks that will be lost so operators
+        # can understand any missed scheduled task firings after restart.
+        # Note: these tasks remain in the DB with status='active' and next_run<=now,
+        # so the scheduler will re-dispatch them on the next poll cycle after restart.
+        _pending_task_count = sum(len(s.pending_tasks) for s in self._groups.values())
+        _pending_msg_count = sum(1 for s in self._groups.values() if s.pending_messages)
+        if _pending_task_count or _pending_msg_count:
+            log.warning(
+                "GroupQueue: shutdown with %d in-memory pending task(s) and %d group(s) with "
+                "pending messages. These will be recovered from DB on next startup.",
+                _pending_task_count, _pending_msg_count,
+            )
         log.info(f"GroupQueue: shutdown signalled (active containers: {self._active_count})")
 
     async def shutdown(self) -> None:

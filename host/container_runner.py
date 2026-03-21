@@ -805,11 +805,6 @@ async def run_container_agent(
             await _notify_error("⚠️ AI 回應格式異常，將自動重試，無需任何操作。|||MONITOR_CONTEXT|||" + _schema_ctx)
             return {"status": "error", "error": "schema mismatch: result is not a dict", "messages": []}
 
-        # 若 container 有產生回覆文字，透過 on_output callback 發送到聊天室
-        result_text = result.get("result")
-        if on_output and result_text:
-            await on_output(result_text)
-
         # 三層記憶系統：container 可透過 memory_patch 欄位更新熱記憶
         # agent 在回覆中附上新的記憶內容，host 自動寫入熱記憶供下次對話使用
         if isinstance(result, dict) and result.get("memory_patch"):
@@ -853,8 +848,22 @@ async def run_container_agent(
         except Exception as _auto_mem_exc:
             log.warning("host auto-write MEMORY.md failed for %s: %s", folder, _auto_mem_exc)
 
+        # p15b-fix: advance the cursor (on_success) BEFORE delivering the reply
+        # to the user (on_output).  Previously on_output fired first — if
+        # on_success then raised (e.g. DB error), the cursor was never advanced,
+        # the message loop retried, and the user received a duplicate reply.
+        # Advancing the cursor first is safe: if on_output then fails, the user
+        # simply does not see the reply for this run; the message will NOT be
+        # retried (cursor already advanced) but the silent drop is far less
+        # disruptive than a duplicate.  Operators will see the on_output error
+        # in logs and can investigate.
         if on_success:
             await on_success()
+
+        # 若 container 有產生回覆文字，透過 on_output callback 發送到聊天室
+        result_text = result.get("result")
+        if on_output and result_text:
+            await on_output(result_text)
 
         return result
 

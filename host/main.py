@@ -5,6 +5,7 @@ Orchestrates message polling, container execution, IPC, and scheduling.
 """
 import asyncio
 import collections
+import contextlib
 import hashlib
 import logging
 import os
@@ -26,6 +27,11 @@ _GROUP_FAIL_COOLDOWN = 60.0  # seconds
 # One error notification per group per _ERROR_NOTIFY_COOLDOWN seconds.
 _error_notify_times: dict[str, float] = {}
 _ERROR_NOTIFY_COOLDOWN = 300.0  # 5 minutes
+# p15b-fix: lock to prevent TOCTOU race on _error_notify_times between
+# concurrent on_error callbacks for the same group.  Two coroutines that both
+# check (now - last < cooldown) simultaneously can both pass the gate and both
+# send a notification, defeating the rate limiter.
+_error_notify_lock: asyncio.Lock | None = None  # initialised in main()
 
 # ── Monitor group (watchdog destination) ──────────────────────────────────────
 # If MONITOR_JID is set in .env, error notifications are also forwarded there.
@@ -636,12 +642,20 @@ async def _process_group_messages(group: dict, messages: list[dict],
         if is_urgent:
             msg = msg[len(_URGENT_PREFIX):]
 
-        now = time.time()
-        last = _error_notify_times.get(jid, 0.0)
-        if not is_urgent and now - last < _ERROR_NOTIFY_COOLDOWN:
-            log.debug("on_error rate-limited for %s (%.0fs remaining)", jid, _ERROR_NOTIFY_COOLDOWN - (now - last))
-            return
-        _error_notify_times[jid] = now
+        # p15b-fix: acquire the rate-limiter lock to prevent TOCTOU race where
+        # two concurrent on_error calls for the same group both read a stale
+        # timestamp, both pass the cooldown check, and both send a notification.
+        if _error_notify_lock is not None:
+            _rate_ctx = _error_notify_lock
+        else:
+            _rate_ctx = contextlib.nullcontext()
+        async with _rate_ctx:
+            now = time.time()
+            last = _error_notify_times.get(jid, 0.0)
+            if not is_urgent and now - last < _ERROR_NOTIFY_COOLDOWN:
+                log.debug("on_error rate-limited for %s (%.0fs remaining)", jid, _ERROR_NOTIFY_COOLDOWN - (now - last))
+                return
+            _error_notify_times[jid] = now
 
         # Split user-facing message from optional monitor context
         if _MONITOR_CTX_SEP in msg:
@@ -677,9 +691,17 @@ async def _process_group_messages(group: dict, messages: list[dict],
     async def _on_success_tracked():
         nonlocal _run_succeeded
         _run_succeeded = True
-        async with _group_fail_lock:
-            _group_fail_counts.pop(jid, None)
-            _group_fail_timestamps.pop(jid, None)
+        # p15b-fix: guard against _group_fail_lock being None during the brief
+        # startup window before main() has initialised it.  Previously this
+        # would raise TypeError: 'async with' requires an asynchronous context
+        # manager, silently aborting the cursor advance and causing the message
+        # to be retried indefinitely.
+        if _group_fail_lock is not None:
+            async with _group_fail_lock:
+                _group_fail_counts.pop(jid, None)
+                _group_fail_timestamps.pop(jid, None)
+        else:
+            log.warning("_on_success_tracked: _group_fail_lock not yet initialised — skipping counter reset")
         if on_success:
             await on_success()
 
@@ -917,7 +939,7 @@ async def main() -> None:
     # assigned, raising SyntaxError and preventing the module from loading.
     global _registered_groups, _sender_allowlist, _stop_event, _group_fail_lock, _dedup_lock
     global _startup_time, _HEARTBEAT_INTERVAL, _last_heartbeat, _leader, _rbac_store
-    global _identity_store, _MONITOR_JID, _DISCORD_WEBHOOK_URL
+    global _identity_store, _MONITOR_JID, _DISCORD_WEBHOOK_URL, _error_notify_lock
 
     # Phase 1 (UnifiedClaw): Initialize Universal Memory Bus, WSBridge, AgentIdentityStore
     # _identity_store is declared as a module-level global so _process_group_messages
@@ -991,6 +1013,7 @@ async def main() -> None:
     _stop_event = asyncio.Event()
     _group_fail_lock = asyncio.Lock()
     _dedup_lock = asyncio.Lock()
+    _error_notify_lock = asyncio.Lock()  # p15b-fix: serialise rate-limit checks
     _startup_time = time.time()
     _last_heartbeat = _startup_time  # Don't fire heartbeat immediately; wait one full interval
 
