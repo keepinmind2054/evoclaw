@@ -1,3 +1,68 @@
+## [1.19.0] — 2026-03-21
+
+### Fixed (Phase 12: 深度可靠性修復 — 46 個問題)
+
+四個 PR 並行深度分析修復，涵蓋訊息管線可靠性、agent 反幻覺行為、設定啟動驗證與資料庫持久性。
+
+#### Message Pipeline Reliability (PR #360 — 8 fixes)
+
+- **`global _identity_store` SyntaxError（CRITICAL）** — `main.py` 在首次賦值後才宣告 global → SyntaxError，bot 完全無法載入；修復：將宣告移至函式最頂端
+- **`_group_fail_lock` None TypeError（CRITICAL）** — `main.py` 啟動視窗內 `async with _group_fail_lock` 時 lock 為 None → 每條訊息都 TypeError crash；修復：加入 None guard
+- **訊息分發延遲（HIGH）** — 訊息最長等待 2 秒才分發：dedup 已儲存但從未呼叫 `enqueue_message_check()`；修復：補上缺失的呼叫
+- **Discord 空字串回覆（HIGH）** — `discord_channel.py` 傳送空字串回覆給 Discord API → HTTP 400；修復：加入空內容 guard
+- **Pipeline 例外靜默崩潰（HIGH）** — `telegram_channel.py` / `discord_channel.py` 未處理 pipeline 例外 → channel handler 靜默崩潰；修復：加入 try/except 包裝
+- **Trigger 偵測不一致（MEDIUM）** — Telegram 使用 `startswith()`，Discord 使用 regex `\b`；修復：統一為 regex 邊界匹配
+- **Linux inotify 過期結果檔案洩漏（MEDIUM）** — inotify 路徑從未清理過期結果檔案 → 磁碟洩漏；修復：加入清理邏輯
+- **`ipc_watcher.py` 非原子寫入（MEDIUM）** — error-notify 路徑使用非原子寫入 → 部分 JSON 讀取；修復：改用 `tmp + os.replace()` 原子寫入
+- **Dedup store 無 TTL（LOW）** — Dedup 儲存無過期機制 → 合法重送訊息永久被封鎖；修復：加入 TTL
+
+#### Agent Anti-Hallucination & Behavior (PR #359 — 14 fixes)
+
+- **`TOOL_DECLARATIONS` 匯入時 AttributeError（CRITICAL）** — `agent.py` 在 Google SDK 不存在時仍在匯入期建構 `TOOL_DECLARATIONS` → `AttributeError: 'NoneType'.FunctionDeclaration` crash；修復：延遲建構至 runtime
+- **Claude backend `group_folder` 缺失（CRITICAL）** — `agent.py` 呼叫 `run_agent_claude()` 未傳入 `group_folder` → 所有 MEMORY.md 寫入路徑錯誤；修復：補上 `group_folder` 參數
+- **反幻覺 milestone enforcer 注入無效 `tool_result`（CRITICAL）** — `agent.py` anti-hallucination enforcer 注入帶有假 `tool_use_id` 的 `tool_result` → Claude API HTTP 400；反幻覺系統本身導致 agent 崩潰；修復：改用有效的 assistant 訊息格式
+- **`_ALLOWED_MSG_TYPES` 過舊（HIGH）** — `cross_bot_protocol.py` 的 frozenset 未包含 `memory_share`、`task_delegate`、`ping`、`pong`、`status` → 所有此類訊息靜默丟棄；修復：更新至完整訊息類型集合
+- **OpenAI 3 輪無工具退出訊息無意義（HIGH）** — 顯示通用訊息而非明確說明；修復：改為具體的中文說明
+- **Skill 例外未捕捉（HIGH）** — `skill_loader.py` skill 例外可能導致整個 host process 崩潰；修復：加入 try/except
+- **SKILL.md 無大小限制（HIGH）** — `skill_loader.py` 無大小上限 → 可能填滿 LLM context window；修復：加入大小限制
+- **`evolution/fitness.py` 缺少 `success` key 預設 True（HIGH）** — 缺少 key 預設為成功 → 膨脹適應度分數，掩蓋真實失敗；修復：預設為 False
+- **Gemini 反幻覺重複 `FunctionResponse`（MEDIUM）** — 注入重複的 `FunctionResponse` → API 拒絕；修復：去重邏輯
+- **OpenAI 假狀態 regex 不完整（MEDIUM）** — 比 Gemini/Claude backend 涵蓋範圍更少；修復：補齊所有模式
+- **`_report_fitness()` 從未呼叫（MEDIUM）** — 定義但從未呼叫 → 進化引擎從未收到容器品質資料；修復：在適當時機呼叫
+- **soul.md 工具呼叫上限 3-4 次（MEDIUM）** — 直接違背 MAX_ITER=20，導致複雜任務提前假完成；修復：移除過低上限
+- **soul.md 缺少英文假完成語句（MEDIUM）** — 禁止模式未涵蓋英文；修復：補齊英文模式
+- **`emit_result` 可傳播 None（LOW）** — ternary 可回傳 `None` 而非 `str`；修復：加入 `str()` 轉換保護
+
+#### Config Complexity & Startup Validation (PR #361 — 12 fixes)
+
+- **`global _identity_store` SyntaxError（CRITICAL）** — 同 PR #360，從設定角度確認修復
+- **`_group_fail_lock` None TypeError（CRITICAL）** — 同 PR #360，從設定角度確認修復
+- **`EDITABLE_ENV_KEYS` token 名稱錯誤（HIGH）** — `config.py` 使用 `TELEGRAM_TOKEN` 而非 `TELEGRAM_BOT_TOKEN` → dashboard 寫入死 env var，token 變更靜默忽略；修復：更正所有 token 名稱
+- **`LEADER_HEARTBEAT_INTERVAL` int() 無 guard（HIGH）** — `config.py` 未使用 `_env_int()` → 匯入時 ValueError crash；修復：改用 `_env_int()`
+- **`.env` 從 CWD 相對路徑載入（HIGH）** — `env.py` 使用相對路徑 → 從非專案目錄啟動時失敗且錯誤靜默吞噬；修復：改用絕對路徑
+- **零 channel 載入無 CRITICAL log（HIGH）** — Bot 可在完全沒有 channel 的情況下啟動，無任何警示；修復：加入 CRITICAL 級別警告
+- **`DASHBOARD_PASSWORD` 警告在 logging 設定前觸發（MEDIUM）** — 警告可能遺失；修復：延遲至 logging 設定完成後
+- **`validate_env.py` 將缺少 channel token 視為非致命（MEDIUM）** — 修復：升級為致命錯誤
+- **`.env.example` 預設 port 錯誤（MEDIUM）** — 8767 應為 8769；修復：更正
+- **`.env.minimal` 缺少關鍵變數（LOW）** — 缺少 `ENABLED_CHANNELS` 和模型選擇變數；修復：補齊
+- **`run.py` 無預飛檢查（LOW）** — WARNING 埋在 log 中而非立即清晰錯誤；修復：加入 pre-flight check
+- **`NIM_API_KEY` 無效 key 偵測時機（LOW）** — 記錄為刻意取捨
+
+#### Database & Persistence Reliability (PR #362 — 12 fixes)
+
+- **25 個寫入函式無 rollback（CRITICAL）** — `db.py` 例外時未提交的交易靜默遺失；修復：所有寫入路徑加入 try/except/rollback
+- **`append_warm_log` FTS insert 非原子（HIGH）** — `db.py` FTS insert 與主 insert 非原子 → crash 時 FTS 索引不同步；修復：合併入同一交易
+- **`delete_warm_logs_before` FTS delete 非原子（HIGH）** — `db.py` FTS delete 非原子 → 孤立 FTS 條目；修復：合併入同一交易
+- **`evolution/daemon.py` 無 `_db_lock`（HIGH）** — 直接呼叫 `get_db()` 未加鎖 → 並發下 SQLite ProgrammingError；修復：加入 `_db_lock`
+- **RBAC 連線缺少調校（HIGH）** — `rbac/roles.py` 缺少 WAL mode、busy_timeout、索引 → 每條訊息全表掃描；修復：加入完整連線調校
+- **`db_adapter.py` 未調校 SQLite 連線（HIGH）** — 無 WAL、無 timeout、每次提交完整 fsync；修復：加入連線調校
+- **`memory_bus.py` VectorStore 並發腐化（HIGH）** — `store()` 和 `search()` 存取 `self._conn` 無鎖 → 並發腐化；無 rollback；修復：加入鎖和 rollback
+- **`migrations/sqlite_to_pg.py` SQL injection（HIGH）** — 資料表/欄位名稱來自 SQLite 檔案，未驗證直接插入 SQL；修復：加入白名單驗證
+- **缺少 `record_daily_wrapup()` 函式（MEDIUM）** — daily wrapup 欄位永遠為 0，每次重啟都重跑；修復：補上函式實作
+- **`rbac/roles.py` grant/revoke 無 rollback（MEDIUM）** — 修復：加入 try/except/rollback
+- **`memory_bus.py` `SharedMemoryStore.write` 無 rollback（MEDIUM）** — 修復：加入 try/except/rollback
+- **`add_indexes_migration.py` 錯誤欄位名稱（MEDIUM）** — 3 個索引參照錯誤欄位名 → 靜默 OperationalError，關鍵索引遺失；修復：更正所有欄位名稱
+
 ## [1.18.0] — 2026-03-21
 
 ### Fixed (Phase 11: 深度可靠性修復 — 43 個問題)
