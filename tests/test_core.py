@@ -21,22 +21,36 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 @pytest.fixture
 def db_path(tmp_path):
-    """Create a real temp SQLite DB for testing."""
+    """Create a real temp SQLite DB for testing.
+
+    p13d fix: the original fixture referenced ``_DB_PATH`` and ``_conn``
+    which do not exist in ``host.db`` (the module uses ``_db``).  The
+    ``hasattr`` guards silently swallowed this mismatch, so the fixture
+    appeared to work but was actually leaving the module pointing at
+    whatever DB was initialised first (often the previous test's DB or an
+    empty one), making tests non-deterministic.
+
+    The correct approach is to close any existing ``_db`` connection and
+    re-initialise the module with the fresh temp path.
+    """
     import host.db as db_module
     p = tmp_path / "test.db"
-    db_module.init_database(p)
-    old = db_module._DB_PATH if hasattr(db_module, "_DB_PATH") else None
-    db_module._DB_PATH = p
-    # Reset connection cache so new path is used
-    if hasattr(db_module, "_conn"):
+    # Close any open connection from a previous test before re-initialising.
+    if db_module._db is not None:
         try:
-            db_module._conn.close()
+            db_module._db.close()
         except Exception:
             pass
-        db_module._conn = None
+        db_module._db = None
+    db_module.init_database(p)
     yield p
-    if old is not None:
-        db_module._DB_PATH = old
+    # Tear down: close the connection so the temp file can be deleted.
+    if db_module._db is not None:
+        try:
+            db_module._db.close()
+        except Exception:
+            pass
+        db_module._db = None
 
 
 @pytest.fixture

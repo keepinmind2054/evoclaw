@@ -56,6 +56,10 @@ MAX_CONCURRENT_CONTAINERS = _env_int("MAX_CONCURRENT_CONTAINERS", 5)
 # Set to empty string "" to disable the limit (e.g. CONTAINER_MEMORY="" CONTAINER_CPUS="").
 CONTAINER_MEMORY = os.environ.get("CONTAINER_MEMORY", "512m")
 CONTAINER_CPUS = os.environ.get("CONTAINER_CPUS", "1.0")
+# CONTAINER_PIDS_LIMIT: maximum number of processes the container may spawn.
+# Prevents fork bombs inside an untrusted agent container.
+# Set to -1 to disable (not recommended for production).
+CONTAINER_PIDS_LIMIT: int = _env_int("CONTAINER_PIDS_LIMIT", 256)
 
 # Timezone
 TIMEZONE = os.environ.get("TZ", os.environ.get("TIMEZONE", "UTC"))
