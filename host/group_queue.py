@@ -193,12 +193,15 @@ class GroupQueue:
                     from . import main as _main_mod
                     _route = getattr(_main_mod, "route_outbound", None)
                     if _route:
-                        import asyncio as _asyncio_notify
-                        if _asyncio_notify.get_event_loop().is_running():
-                            _asyncio_notify.create_task(
-                                _route(group_jid, "⚠️ 排程任務佇列已滿，此任務無法執行，請稍後再試。"),
-                                name=f"task-queue-full-notify-{group_jid}"
-                            )
+                        # p16a-fix: drop deprecated get_event_loop().is_running() check.
+                        # create_task() raises RuntimeError when no loop is running;
+                        # catch that instead of pre-checking.
+                        asyncio.create_task(
+                            _route(group_jid, "⚠️ 排程任務佇列已滿，此任務無法執行，請稍後再試。"),
+                            name=f"task-queue-full-notify-{group_jid}"
+                        )
+                except RuntimeError:
+                    pass  # No running event loop — skip notification silently
                 except Exception as _ne:
                     log.warning("Failed to send task-queue-full notification to %s: %s", group_jid, _ne)
                 return
@@ -305,11 +308,18 @@ class GroupQueue:
             try:
                 from . import main as _main_mod
                 _route = getattr(_main_mod, "route_outbound", None)
-                if _route and asyncio.get_event_loop().is_running():
+                if _route:
+                    # p16a-fix: use get_running_loop() instead of deprecated
+                    # get_event_loop() (deprecated in Python 3.10+, may return
+                    # a different loop when called from a non-default loop).
+                    # create_task() itself raises RuntimeError when no loop is
+                    # running, so wrap in try/except rather than checking first.
                     asyncio.create_task(
                         _route(group_jid, "⚠️ 系統暫時無法處理訊息，請稍後重新傳送。"),
                         name=f"retry-exceeded-notify-{group_jid}"
                     )
+            except RuntimeError:
+                pass  # No event loop running — silently skip notification
             except Exception as _ne:
                 log.warning("Failed to send retry-exceeded notification to %s: %s", group_jid, _ne)
             return

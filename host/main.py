@@ -98,6 +98,19 @@ except ImportError as _e3p:
     logging.getLogger("evoclaw").warning("[Phase3] Components not available: %s", _e3p)
 
 
+def _task_done_callback_main(task: "asyncio.Task") -> None:
+    """Log unhandled exceptions from fire-and-forget tasks created in main().
+
+    Mirrors group_queue._task_done_callback so all background tasks get the
+    same error visibility regardless of which module created them.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.error("Unhandled exception in background task %s: %s", task.get_name(), exc, exc_info=exc)
+
+
 async def _discord_notify(content: str) -> None:
     """POST a message to the Discord webhook (if configured).
 
@@ -655,7 +668,12 @@ async def _process_group_messages(group: dict, messages: list[dict],
             if not is_urgent and now - last < _ERROR_NOTIFY_COOLDOWN:
                 log.debug("on_error rate-limited for %s (%.0fs remaining)", jid, _ERROR_NOTIFY_COOLDOWN - (now - last))
                 return
-            _error_notify_times[jid] = now
+            # p16a-fix: only update the cooldown timestamp for non-urgent messages.
+            # Previously, urgent messages also reset the timer, which would block
+            # subsequent non-urgent errors for 5 minutes after any URGENT notification —
+            # defeating the purpose of the rate limiter for normal error storms.
+            if not is_urgent:
+                _error_notify_times[jid] = now
 
         # Split user-facing message from optional monitor context
         if _MONITOR_CTX_SEP in msg:
@@ -736,7 +754,13 @@ async def _process_group_messages(group: dict, messages: list[dict],
                 jid, _err_detail,
                 extra={"run_id": run_id, "jid": jid, "folder": folder},
             )
-            async with _group_fail_lock:
+            # p16a-fix: guard against _group_fail_lock being None (startup window or tests).
+            # Matches the same guard pattern used at lines 545 and 696.
+            if _group_fail_lock is not None:
+                async with _group_fail_lock:
+                    _group_fail_counts[jid] = _group_fail_counts.get(jid, 0) + 1
+                    _group_fail_timestamps[jid] = time.time()
+            else:
                 _group_fail_counts[jid] = _group_fail_counts.get(jid, 0) + 1
                 _group_fail_timestamps[jid] = time.time()
             # Notify user so they know something went wrong instead of seeing silence.
@@ -761,7 +785,12 @@ async def _process_group_messages(group: dict, messages: list[dict],
             int(_backstop_timeout), jid,
             extra={"run_id": run_id, "jid": jid, "folder": folder},
         )
-        async with _group_fail_lock:
+        # p16a-fix: guard against _group_fail_lock being None (startup window or tests).
+        if _group_fail_lock is not None:
+            async with _group_fail_lock:
+                _group_fail_counts[jid] = _group_fail_counts.get(jid, 0) + 1
+                _group_fail_timestamps[jid] = time.time()
+        else:
             _group_fail_counts[jid] = _group_fail_counts.get(jid, 0) + 1
             _group_fail_timestamps[jid] = time.time()
         # DO NOT call on_success() — cursor stays behind so message is retried
@@ -828,6 +857,10 @@ async def _message_loop() -> None:
                     for jid in stale_jids:
                         _per_jid_cursors.pop(jid, None)
                         _group_msg_timestamps.pop(jid, None)
+                        # p16a-fix: also prune _error_notify_times which was previously
+                        # omitted from this cleanup, causing a slow memory leak for
+                        # frequently-deregistered groups over long uptimes.
+                        _error_notify_times.pop(jid, None)
                         async with _group_fail_lock:
                             _group_fail_counts.pop(jid, None)
                             _group_fail_timestamps.pop(jid, None)
@@ -969,7 +1002,12 @@ async def main() -> None:
         try:
             _sdk_api = _SdkApi(_memory_bus, _identity_store)
             _summarizer = _MemorySummarizer()
-            asyncio.create_task(_sdk_api.start())
+            # p16a-fix: store the task handle so it is cancelled during shutdown
+            # instead of being an untracked fire-and-forget coroutine that leaks
+            # past the finally block's bulk-cancel (which only sees tasks created
+            # before gather() starts).
+            _sdk_api_task = asyncio.create_task(_sdk_api.start(), name="sdk-api")
+            _sdk_api_task.add_done_callback(_task_done_callback_main)
             log.info("[Phase2] SdkApi OK (port %s) | MemorySummarizer OK", _sdk_api.port)
         except Exception as _e3:
             log.error("[Phase2] Initialization failed — memory summarizer unavailable: %s", _e3)
@@ -1189,7 +1227,10 @@ async def main() -> None:
         except Exception as exc:
             log.warning("Container image pre-pull failed (non-fatal): %s", exc)
 
-    asyncio.create_task(_prepull_image(), name="image-prepull")
+    # p16a-fix: store task handle and add done callback so exceptions are logged
+    # and the task appears in asyncio.all_tasks() for proper shutdown cancellation.
+    _prepull_task = asyncio.create_task(_prepull_image(), name="image-prepull")
+    _prepull_task.add_done_callback(_task_done_callback_main)
 
     # ── 將 GroupQueue 與實際的訊息處理邏輯串接 ──────────────────────────────
     async def _process_messages_for_jid(jid: str) -> bool:
