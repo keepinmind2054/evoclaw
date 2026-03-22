@@ -275,21 +275,34 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
         # 寫入旗標檔案通知 _message_loop 重新從 DB 載入群組清單
         # 用檔案旗標（而非直接呼叫函式）是因為 IPC watcher 與 message loop
         # 在不同的 asyncio task 中，透過旗標可以避免跨 task 的直接耦合
+        # p16c BUG-FIX (MEDIUM): use atomic tmp+rename so the main loop never reads
+        # an empty or half-written flag file if it polls exactly at write time.
         flag = config.DATA_DIR / "refresh_groups.flag"
-        flag.write_text("1", encoding="utf-8")
+        _flag_tmp = flag.with_suffix(".flag.tmp")
+        _flag_tmp.write_text("1", encoding="utf-8")
+        _flag_tmp.rename(flag)
         log.info("Groups refresh requested via IPC")
 
     elif msg_type == "reset_group":
         # 重置指定群組的失敗計數器，解凍被 cooldown 鎖定的群組。
-        # 僅限 monitor 群組（is_monitor=True）或主群組可呼叫，防止普通群組互相干擾。
+        # 僅限主群組可呼叫，防止普通群組互相干擾或濫用重置功能。
+        # p16c BUG-FIX (HIGH): the comment described a main/monitor restriction but
+        # no code enforced it, allowing any group's container to reset the failure
+        # counter of any other group — a privilege-escalation vector.
+        if not is_main:
+            raise PermissionError("Only main group can reset group failure counters")
         target_jid = payload.get("jid", "")
         if not target_jid:
             raise ValueError("reset_group requires 'jid' field")
         # Write a flag file — main.py's _message_loop reads it and resets counters
         # Using file flag avoids cross-task direct coupling (same pattern as refresh_groups)
+        # p16c BUG-FIX (MEDIUM): use atomic tmp+rename so the main loop never reads
+        # a partial JSON payload if it polls exactly at write time.
         import json as _json
         flag = config.DATA_DIR / "reset_group.flag"
-        flag.write_text(_json.dumps({"jid": target_jid, "ts": time.time()}), encoding="utf-8")
+        _reset_tmp = flag.with_suffix(".flag.tmp")
+        _reset_tmp.write_text(_json.dumps({"jid": target_jid, "ts": time.time()}), encoding="utf-8")
+        _reset_tmp.rename(flag)
         log.info("reset_group requested via IPC for jid=%s by group=%s", target_jid, group_folder)
 
     elif msg_type == "apply_skill":
