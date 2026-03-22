@@ -570,6 +570,14 @@ async def run_container_agent(
     input_bytes = input_json.encode("utf-8")
 
     proc = None  # asyncio subprocess reference — used for direct kill on CancelledError
+    # p16c BUG-FIX (CRITICAL): stderr_lines must be initialised at function scope
+    # before the platform branch.  On Windows the subprocess is run via
+    # asyncio.to_thread(), so the Linux-only _stream_stderr() closure that
+    # populates this list is never executed.  When no output markers are found
+    # the error-reporting block at the bottom of the try references stderr_lines,
+    # causing an unhandled NameError on Windows that masks the real failure and
+    # prevents the on_error notification from being delivered.
+    stderr_lines: list[str] = []
     try:
         if sys.platform == "win32":
             # On Windows, asyncio subprocess pipes can deadlock with Docker.
@@ -610,7 +618,7 @@ async def run_container_agent(
             await proc.stdin.drain()
             proc.stdin.close()
 
-            stderr_lines: list[str] = []
+            # stderr_lines already declared at function scope above (p16c fix); reuse it.
             _MAX_STDERR_LINES = 5000  # Cap to prevent unbounded memory growth
 
             async def _stream_stderr() -> None:
@@ -744,9 +752,16 @@ async def run_container_agent(
             # Guard against proc being None (Docker failed to spawn at OS level)
             _container_ran = proc is not None and proc.returncode in _AGENT_EXIT_CODES
 
+            # p16c BUG-FIX (MEDIUM): distinguish OOM (exit 137) in the user-facing
+            # on_error notification.  Previously the OOM path emitted the same generic
+            # Chinese message as any other crash, leaving operators and users with no
+            # indication that the memory limit was breached and should be raised.
+            # We now emit a specific OOM message for exit 137 and keep the generic
+            # message for all other non-zero exits.
+            _exit_code = proc.returncode if proc is not None else None
             if _container_ran:
                 # Log OOM explicitly so operators can act (raise --memory limit)
-                if proc is not None and proc.returncode == 137:
+                if _exit_code == 137:
                     log.error(
                         "Container %s was OOM-killed (exit 137). "
                         "Consider raising CONTAINER_MEMORY in config (currently %r). "
@@ -763,7 +778,7 @@ async def run_container_agent(
                 _record_docker_success(folder)
             else:
                 # Exit code indicates Docker itself failed (not an agent-level issue)
-                log.warning("Container exit code %s indicates Docker daemon issue — recording failure", proc.returncode if proc else '?')
+                log.warning("Container exit code %s indicates Docker daemon issue — recording failure", _exit_code if _exit_code is not None else '?')
                 _record_docker_failure(folder)
             # Bundle stderr context for monitor channel (separator parsed by on_error in main.py)
             # Use the streaming-collected stderr_lines when available (non-Windows path),
@@ -772,11 +787,19 @@ async def run_container_agent(
             _stderr_ctx_lines = [_redact_secrets(l) for l in (_ctx_source or [])[-15:]]
             _stderr_ctx = (
                 f"container: {container_name}\n"
-                f"exit_code: {proc.returncode if proc else '?'}\n"
+                f"exit_code: {_exit_code if _exit_code is not None else '?'}\n"
                 f"stderr (last {len(_stderr_ctx_lines)} lines):\n" +
                 ("\n".join(_stderr_ctx_lines) if _stderr_ctx_lines else "(empty)")
             )
-            await _notify_error("⚠️ 系統暫時發生問題，請稍後再傳訊息，會自動重試。|||MONITOR_CONTEXT|||" + _stderr_ctx)
+            # User-visible message: OOM gets a specific hint; other failures get the generic message.
+            if _exit_code == 137:
+                _user_msg = (
+                    "⚠️ 系統記憶體不足（容器被強制終止），請稍後再試。"
+                    "如果問題持續請通知管理員調高記憶體上限。"
+                )
+            else:
+                _user_msg = "⚠️ 系統暫時發生問題，請稍後再傳訊息，會自動重試。"
+            await _notify_error(_user_msg + "|||MONITOR_CONTEXT|||" + _stderr_ctx)
             return {"status": "error", "error": "no output markers", "messages": []}
 
         # 截取兩個標記之間的內容並解析為 JSON
@@ -828,12 +851,31 @@ async def run_container_agent(
 
         # 三層記憶系統：container 可透過 memory_patch 欄位更新熱記憶
         # agent 在回覆中附上新的記憶內容，host 自動寫入熱記憶供下次對話使用
-        if isinstance(result, dict) and result.get("memory_patch"):
-            try:
-                update_hot_memory(jid, result["memory_patch"])
-                log.debug("hot_memory: updated via memory_patch for jid=%s", jid)
-            except Exception as _mem_exc:
-                log.warning("hot_memory: failed to apply memory_patch for jid=%s: %s", jid, _mem_exc)
+        # p16c NOTE (LOW): as of the current agent.py, emit() never includes
+        # "memory_patch" — this field was planned but not yet wired up on the
+        # container side, so this branch is dead code for now.  When the agent
+        # is extended to produce memory patches, include this field in the
+        # emit({...}) call in container/agent-runner/agent.py.
+        # p16c BUG-FIX (MEDIUM): validate that memory_patch is a non-empty string
+        # before calling update_hot_memory().  A non-string value (e.g. dict, list)
+        # would propagate to content.encode("utf-8") in hot.py and raise AttributeError,
+        # which was silently swallowed — the bad patch was never applied but the
+        # failure reason was obscured.  Explicit type + emptiness guard makes the
+        # error immediately visible and prevents future regressions if update_hot_memory
+        # ever removes its own try/except.
+        _memory_patch = result.get("memory_patch") if isinstance(result, dict) else None
+        if _memory_patch:
+            if not isinstance(_memory_patch, str):
+                log.warning(
+                    "hot_memory: memory_patch for jid=%s has unexpected type %s — skipping update",
+                    jid, type(_memory_patch).__name__,
+                )
+            else:
+                try:
+                    update_hot_memory(jid, _memory_patch)
+                    log.debug("hot_memory: updated via memory_patch for jid=%s", jid)
+                except Exception as _mem_exc:
+                    log.warning("hot_memory: failed to apply memory_patch for jid=%s: %s", jid, _mem_exc)
 
         # 更新 session ID：agent 執行後可能建立新的 session，存入 DB 供下次使用
         if result.get("newSessionId"):
