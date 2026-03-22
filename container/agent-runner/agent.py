@@ -547,7 +547,10 @@ def tool_cancel_task(task_id: str) -> str:
         return "Error: task_id is required."
     try:
         Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
-        fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-cancel.json"
+        # P16B-FIX-2: add random uid suffix (same pattern as schedule_task / spawn_agent)
+        # to prevent filename collision when two cancel calls land in the same millisecond.
+        _uid = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+        fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-{_uid}-cancel.json"
         payload = json.dumps({"type": "cancel_task", "task_id": task_id})
         tmp = fname.with_suffix(".tmp")
         tmp.write_text(payload, encoding="utf-8")
@@ -565,7 +568,9 @@ def tool_pause_task(task_id: str) -> str:
         return "Error: task_id is required."
     try:
         Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
-        fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-pause.json"
+        # P16B-FIX-2: add random uid suffix to prevent filename collision.
+        _uid = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+        fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-{_uid}-pause.json"
         payload = json.dumps({"type": "pause_task", "task_id": task_id})
         tmp = fname.with_suffix(".tmp")
         tmp.write_text(payload, encoding="utf-8")
@@ -583,7 +588,9 @@ def tool_resume_task(task_id: str) -> str:
         return "Error: task_id is required."
     try:
         Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
-        fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-resume.json"
+        # P16B-FIX-2: add random uid suffix to prevent filename collision.
+        _uid = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+        fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-{_uid}-resume.json"
         payload = json.dumps({"type": "resume_task", "task_id": task_id})
         tmp = fname.with_suffix(".tmp")
         tmp.write_text(payload, encoding="utf-8")
@@ -1659,7 +1666,12 @@ def _execute_tool_inner(name: str, args: dict, chat_jid: str) -> str:
             Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
             uid = str(uuid.uuid4())[:8]
             fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-reset-{uid}.json"
-            fname.write_text(json.dumps({"type": "reset_group", "jid": target_jid}), encoding="utf-8")
+            # P16B-FIX-1: use atomic write (tmp+rename) consistent with all other IPC writes.
+            # A direct write_text() risks the host's inotify handler reading a partial JSON
+            # if the OS flushes the file mid-write (e.g. on a slow volume mount).
+            _reset_tmp = fname.with_suffix(".tmp")
+            _reset_tmp.write_text(json.dumps({"type": "reset_group", "jid": target_jid}), encoding="utf-8")
+            _reset_tmp.rename(fname)  # POSIX rename() is atomic
             _log("📨 IPC", f"type=reset_group jid={target_jid} → {fname.name}")
             return f"reset_group IPC sent for {target_jid} — fail counters will be cleared on next host poll cycle"
         except Exception as exc:
@@ -1698,11 +1710,18 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
         for msg in conversation_history:
             role = msg.get("role", "user")
             content = msg.get("content", "")
-            # Accept both string and list content; skip only truly empty values
-            if content or content == 0:  # 0 is falsy but valid; "" and [] are not
-                if isinstance(content, str) and not content.strip():
-                    continue
-                history.append({"role": role, "content": content})
+            # P16B-FIX-6: accept both string and list content; skip only truly empty
+            # values.  The old guard `content or content == 0` contained a dead branch
+            # (`content == 0` can never occur in conversation history — message content
+            # is always a string or list) and was semantically confusing.  Replaced with
+            # an explicit check: skip empty strings and empty lists only.
+            if content is None:
+                continue
+            if isinstance(content, str) and not content.strip():
+                continue
+            if isinstance(content, list) and not content:
+                continue
+            history.append({"role": role, "content": content})
     history.append({"role": "user", "content": user_message})
     MAX_ITER = max_iter
     final_response = ""
@@ -1710,7 +1729,10 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
     _turns_since_notify = 0  # turns since last mcp__evoclaw__send_message call (milestone enforcer)
     _only_notify_turns = 0   # consecutive turns with ONLY send_message (no substantive tools)
     _memory_written = False  # True once agent writes to MEMORY.md this session (Enforcer v3)
-    _memory_path_str = str(Path(group_folder) / "MEMORY.md")
+    # P16B-FIX-3: guard against empty group_folder so the path does not resolve to
+    # the relative string "MEMORY.md", which would never match an absolute path in
+    # tool arguments and silently disable the MEMORY.md write-detection logic.
+    _memory_path_str = str(Path(group_folder) / "MEMORY.md") if group_folder else "/workspace/group/MEMORY.md"
     # Tools that represent actual work (not just reporting)
     _SUBSTANTIVE_TOOLS = frozenset([
         "Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch",
@@ -2056,7 +2078,19 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
     if conversation_history:
         for msg in conversation_history:
             role = "model" if msg.get("role") == "assistant" else "user"
-            text = msg.get("content", "")
+            _raw_content = msg.get("content", "")
+            # P16B-FIX-8: Gemini only accepts string text parts.  If conversation
+            # history was captured from a Claude/OpenAI session it may contain
+            # list-typed content (tool_use/tool_result blocks).  Coerce to a string
+            # representation so Gemini does not receive a non-string Part.text value
+            # (which would raise TypeError or produce garbled output).
+            if isinstance(_raw_content, list):
+                text = " ".join(
+                    item.get("text", "") if isinstance(item, dict) else str(item)
+                    for item in _raw_content
+                ).strip()
+            else:
+                text = str(_raw_content).strip() if _raw_content else ""
             if text:
                 history.append(types.Content(role=role, parts=[types.Part(text=text)]))
     history.append(types.Content(role="user", parts=[types.Part(text=user_message)]))
@@ -2089,11 +2123,16 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
         _re_gemini.DOTALL | _re_gemini.IGNORECASE,
     )
 
+    # P16B-FIX-7: cache GEMINI_MODEL once before the loop rather than re-reading
+    # os.environ on every iteration.  os.environ is a dict-like but reading it 20+
+    # times per request is wasteful, and a concurrent env mutation mid-loop would
+    # cause the model name to change between turns — an impossible-to-debug failure.
+    _gemini_model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+
     for n in range(MAX_ITER):
         _log("🧠 LLM →", f"turn={n} provider=gemini")
-        _gemini_model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
         response = _llm_call_with_retry(lambda: client_holder[0].models.generate_content(
-            model=_gemini_model,
+            model=_gemini_model_name,
             contents=history,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
@@ -2271,6 +2310,15 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+# Phase 1 (UnifiedClaw): Fitness reporter instance (module-level).
+# Declared here (before main()) so the reference is unambiguously initialised
+# when main() runs.  The old placement was after main(), which is valid Python
+# (module-level code runs before any function is called) but misleading to
+# readers who might assume _phase1_reporter is undefined inside main().
+# P16B-FIX-17: moved declaration to before main() for clarity.
+_phase1_reporter = None
+
+
 def emit(obj: dict):
     """
     將結果 JSON 輸出到 stdout，用 OUTPUT_START/OUTPUT_END 標記包住。
@@ -2332,6 +2380,14 @@ def main():
     prompt = inp.get("prompt", "")
     group_folder = inp.get("groupFolder", "")
     chat_jid = inp.get("chatJid", "")
+    # P16B-FIX-15: warn early when critical fields are missing so the failure is
+    # traceable in stderr logs rather than producing silent misbehaviour later
+    # (e.g. MEMORY.md path resolving to a relative "MEMORY.md", file tools operating
+    # on the wrong directory, or IPC messages having no destination JID).
+    if not group_folder:
+        _log("⚠️ INPUT", "groupFolder is empty — MEMORY.md tracking and file tools may malfunction. Check container_runner input_data.")
+    if not chat_jid:
+        _log("⚠️ INPUT", "chatJid is empty — send_message / send_file tools will fail without an explicit chat_jid argument.")
     # Store at module level so tool_send_file can auto-detect it if the LLM omits chat_jid
     _input_chat_jid = chat_jid
     secrets = inp.get("secrets", {})
@@ -2418,8 +2474,17 @@ def main():
     claude_api_key = claude_pool.current()
 
     claude_model = os.environ.get("CLAUDE_MODEL", "claude-3-5-haiku-latest")
+    # Backend priority: NIM / OpenAI-compat > Claude > Gemini.
+    # Rationale: NIM/OpenAI keys are assumed to be the primary production backend.
+    # Claude is used only when no OpenAI-compat key is present.
     use_openai_compat = bool(nim_api_key or openai_api_key)
     use_claude = bool(claude_api_key and not use_openai_compat)
+
+    # P16B-FIX-5: log a warning when CLAUDE_API_KEY is set but suppressed by a
+    # higher-priority OpenAI-compat key.  Previously this was silent — operators
+    # would set CLAUDE_API_KEY expecting Claude to be used and get NIM instead.
+    if claude_api_key and use_openai_compat:
+        _log("⚠️ BACKEND", "CLAUDE_API_KEY is set but suppressed because NIM_API_KEY or OPENAI_API_KEY is also present (priority: NIM/OpenAI > Claude > Gemini). Unset NIM_API_KEY/OPENAI_API_KEY to use Claude.")
 
     backend = "claude" if use_claude else ("openai-compat" if use_openai_compat else "gemini")
 
@@ -2608,6 +2673,13 @@ def main():
         "system", "系統", "migrate", "migration", "architecture", "架構",
         "寫", "write", "create", "建立", "generate", "產生", "整理", "總結",
         "搜尋", "search", "找", "查", "git", "docker", "python", "code",
+        # P16B-FIX-9: added missing Level B keywords that indicate multi-step tasks
+        # requiring more than 3 tool calls (would be misclassified as Level A = 6 iter).
+        "report", "報告", "schedule", "排程", "plan", "計劃", "計畫",
+        "test", "測試", "review", "審查", "audit", "稽核", "monitor", "監控",
+        "automate", "自動化", "integrate", "整合", "pipeline", "流程",
+        "compare", "比較", "summarize", "summarise", "摘要",
+        "npm", "pip", "yarn", "cargo", "make", "cmake", "gradle",
     ]
     _prompt_lower = prompt.lower() if prompt else ""
     _is_level_b = (
@@ -2729,7 +2801,11 @@ def main():
 
     try:
         if use_openai_compat:
-            _model = os.environ.get("NIM_MODEL") or os.environ.get("OPENAI_MODEL") or os.environ.get("GEMINI_MODEL") or "meta/llama-3.3-70b-instruct"
+            # P16B-FIX-4: do NOT fall back to GEMINI_MODEL for an OpenAI-compat client.
+            # Passing a Gemini model name (e.g. "gemini-2.0-flash") to an OpenAI-compat
+            # endpoint always fails with 404/model-not-found.  Use only NIM/OpenAI model
+            # env vars; if neither is set, fall back to the NIM default instruct model.
+            _model = os.environ.get("NIM_MODEL") or os.environ.get("OPENAI_MODEL") or "meta/llama-3.3-70b-instruct"
             _log("🤖 MODEL", f"openai-compat/{_model}")
             result = run_agent_openai(_openai_client_holder, system_instruction, prompt, chat_jid, _model, conversation_history, pool=_active_pool, apply_key_fn=_apply_openai_key, group_folder=group_folder, max_iter=_dynamic_max_iter)
         elif use_claude:
@@ -2773,10 +2849,19 @@ def main():
         if _REPORTER_AVAILABLE and _phase1_reporter:
             try:
                 import asyncio as _asyncio_report
-                _fitness_score = 0.9 if emit_result and emit_result not in (
+                # P16B-FIX-10: when the agent delivered output via send_message tool,
+                # emit_result is "" (to prevent double-send) but the agent DID succeed.
+                # Treat any run where tool messages were sent as a successful interaction
+                # (score 0.9) even if emit_result is empty.  Only fall back to 0.3 when
+                # NEITHER emit_result NOR tool messages produced any real content.
+                _FALLBACK_STRINGS = frozenset([
                     "（處理完成，但未能產生文字回應，請重新詢問。）",
                     "（系統：處理完成，但未產生回應，請重試。）",
-                ) else 0.3
+                ])
+                _has_real_output = bool(_messages_sent_via_tool) or (
+                    emit_result and emit_result not in _FALLBACK_STRINGS
+                )
+                _fitness_score = 0.9 if _has_real_output else 0.3
                 _asyncio_report.run(_report_fitness(_fitness_score, {"has_tool_calls": bool(_messages_sent_via_tool)}))
             except Exception as _fit_err:
                 _log("⚠️ FITNESS", f"fitness report failed: {_fit_err}")
@@ -2791,9 +2876,6 @@ def main():
         emit({"status": "error", "result": None, "error": f"{type(e).__name__}: {e}"})
 
 
-
-# Phase 1 (UnifiedClaw): Fitness reporter instance (module-level)
-_phase1_reporter = None
 
 async def _init_fitness_reporter(agent_id: str) -> object:
     """Initialize and connect FitnessReporter (Phase 1). No-op if unavailable."""
