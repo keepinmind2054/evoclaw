@@ -1,3 +1,55 @@
+## [1.23.0] — 2026-03-23
+
+### Fixed (Phase 16: Final Audit & UX — 32 fixes)
+
+Four PRs covering main.py final audit, UX & docs improvements, agent.py final audit, and container runner + IPC final fixes.
+
+#### main.py Final Audit (PR #375 — 6 fixes)
+
+- **Two `_group_fail_lock` None-guards still missing in error-increment paths (HIGH)** — only 2 of 4 sites were fixed in previous phases; the remaining two error-increment paths could raise TypeError during the startup window; all four sites now guarded
+- **URGENT errors incorrectly reset the rate-limit cooldown timer (HIGH)** — URGENT alerts reset the rate-limit timer, causing normal errors to be suppressed for 5 minutes after any URGENT alert; timer reset now scoped to non-URGENT errors only
+- **Two `asyncio.create_task()` calls stored no handle → exceptions silently discarded, shutdown couldn't cancel them (HIGH)** — task handles were not retained, so exceptions were silently discarded and the tasks could not be cancelled on shutdown; handles now stored and cancelled during teardown
+- **`_error_notify_times` not pruned for deregistered groups → slow memory leak (MEDIUM)** — entries for deregistered groups accumulated indefinitely; added pruning on group deregistration
+- **`group_queue.py`: deprecated `asyncio.get_event_loop()` on two paths (Python 3.12 incompatible) (MEDIUM)** — two remaining `get_event_loop()` calls were incompatible with Python 3.12+; replaced with `asyncio.get_running_loop()`
+- **`EDITABLE_ENV_KEYS` millisecond-unit intervals undocumented → operator sets 2 instead of 2000 (LOW)** — missing documentation caused operators to set second-unit values instead of millisecond-unit values; inline comments and docs updated with explicit unit annotations
+
+#### UX & Docs (PR #376 — 8 fixes)
+
+- **No typing indicator renewal → user saw silence during 15-60s container runs (HIGH)** — added typing indicator renewal loop: every 4 seconds while container runs, sends typing action so the user sees "typing…" throughout the wait instead of silence
+- **Per-sender rate limiting missing → silent message drop (HIGH)** — added per-sender rate limiting (5 msg/60s, configurable) with a user-visible Chinese message instead of silent drop
+- **RBAC block sent no feedback → silent drop (HIGH)** — RBAC block now sends "您目前沒有使用此機器人的權限" instead of silently dropping the message
+- **Container OOM (exit 137) sent no feedback → silent drop (HIGH)** — OOM exit now sends "AI 執行時記憶體不足" instead of silently dropping the message
+- **QUICK_START.md: `/monitor` misidentified as "register main group" (HIGH)** — `/monitor` is error-alert monitoring, not group registration; corrected description and added `ENABLED_CHANNELS` documentation
+- **Queue depth feedback missing → user saw silence when queued (MEDIUM)** — second message now shows "⏳ 已加入佇列，請稍候" instead of silence when a request is queued
+- **No first-run welcome message for new groups (MEDIUM)** — added first-run welcome message triggered once per new group, stored in DB to prevent re-sending
+- **TROUBLESHOOTING.md missing Chinese error message reference (MEDIUM)** — added complete Chinese error message reference table; `.env.minimal` updated with `CONTAINER_IMAGE`, rate-limit vars, and resource vars
+
+#### agent.py Final Audit (PR #377 — 12 fixes)
+
+- **OpenAI/NIM model selection fell back to `GEMINI_MODEL` → 404 on every NIM session without explicit `NIM_MODEL` (CRITICAL)** — model selection logic fell through to `GEMINI_MODEL` for NIM endpoint, sending `gemini-2.0-flash` to the NIM API and causing 404 on every NIM session; fixed to use `NIM_MODEL` env var with correct fallback
+- **`mcp__evoclaw__reset_group` IPC write was the only non-atomic write remaining in agent.py (HIGH)** — non-atomic write exposed truncation risk; converted to atomic tmp-file + rename
+- **OpenAI backend missing `group_folder` empty-string guard for MEMORY.md path (HIGH)** — Claude and Gemini backends had the guard but OpenAI did not, causing path construction errors on empty `group_folder`; guard added to OpenAI backend
+- **Backend fallback silently skipped Claude when both `CLAUDE_API_KEY` and `NIM_API_KEY` were set (HIGH)** — no warning was emitted when Claude was bypassed due to NIM key presence; warning log added
+- **Gemini history injection: list-type content from Claude/OpenAI sessions raised TypeError (HIGH)** — list-type content was not coerced before injection into Gemini history format; added coercion to handle list-type content correctly
+- **`cancel_task`/`pause_task`/`resume_task` IPC filenames had timestamp-only collision risk (MEDIUM)** — same-millisecond requests produced identical filenames and silently overwrote each other; added random suffix to filenames
+- **OpenAI history injection guard `content == 0` was dead branch; None content not skipped (MEDIUM)** — the guard `content == 0` never triggered; None content passed through unchecked; replaced with `content is None` guard
+- **`GEMINI_MODEL` env read inside loop → env mutation mid-loop changed model mid-request (MEDIUM)** — up to 20 `os.environ` reads per request; env mutation during a long request could silently switch models mid-loop; captured once before loop entry
+- **`_LEVEL_B_KEYWORDS` missing: `report`, `schedule`, `plan`, `test`, `review`, `audit`, `monitor`, `npm`, `pip`, `make` etc → complex tasks misclassified as Level A (MEDIUM)** — missing keywords caused complex tasks to be assigned `MAX_ITER=6` instead of `MAX_ITER=20`, leading to fake-completion from iteration exhaustion; all missing keywords added
+- **Fitness reporter gave score 0.3 (failure) for all send_message-only sessions → corrupted evolution data (MEDIUM)** — sessions that only called `send_message` (valid short-answer sessions) were scored as failures; scoring logic corrected to treat send_message-only sessions as successful
+- **Empty `groupFolder`/`chatJid` inputs had no early warning log (LOW)** — missing early validation made debugging silent failures difficult; added warning log on empty inputs
+- **`_phase1_reporter` declared after `main()` (misleading source order) (LOW)** — function declared after its caller made code harder to follow; moved before `main()`
+
+#### Container Runner + IPC Final (PR #378 — 6 fixes)
+
+- **`stderr_lines` declared inside Linux-only branch but referenced on all platforms → NameError on Windows (CRITICAL)** — `NameError` on Windows masked real container failures; declaration moved outside the platform branch
+- **`reset_group` IPC handler had no permission check → any group's container could reset circuit breaker for any other group (HIGH)** — missing authorization allowed cross-group circuit-breaker manipulation; added permission check to validate requesting group matches target group
+- **`memory_patch` from container not type-checked → dict/list value caused silent AttributeError (MEDIUM)** — unvalidated `memory_patch` values caused silent `AttributeError` on string methods; added type check before processing
+- **OOM exit (137) showed generic error message instead of "記憶體不足" (MEDIUM)** — exit code 137 now detected and mapped to specific "記憶體不足" message for operator clarity
+- **`refresh_groups.flag` and `reset_group.flag` written non-atomically → reader could see empty file mid-write (MEDIUM)** — non-atomic flag writes allowed the reader to observe an empty file; converted to atomic tmp-file + rename writes
+- **`memory_patch` is dead code (container never emits it) — now documented (LOW)** — undocumented dead code path caused confusion; added inline documentation clarifying that `memory_patch` is reserved for future use and not currently emitted by any container
+
+Protocol verification confirmed: container stdout format, IPC directory structure, atomic writes, volume mounts, and security flags are all consistent between container and host.
+
 ## [1.22.0] — 2026-03-21
 
 ### Fixed (Phase 15: Conversation Loop & Delivery — 44 fixes)
