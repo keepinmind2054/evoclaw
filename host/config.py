@@ -117,6 +117,10 @@ ENABLED_CHANNELS = [
 ]
 
 # Keys that can be modified via the dashboard /api/env endpoint
+# NOTE: POLL_INTERVAL, IPC_POLL_INTERVAL, SCHEDULER_POLL_INTERVAL and
+# CONTAINER_TIMEOUT are all specified in MILLISECONDS in the environment
+# (e.g. POLL_INTERVAL=2000 means 2 seconds).  Operators editing these via
+# the dashboard must supply millisecond values, not second values.
 EDITABLE_ENV_KEYS: frozenset = frozenset({
     "CLAUDE_API_KEY",
     "TELEGRAM_BOT_TOKEN",   # p12b fix: was TELEGRAM_TOKEN — channel code reads TELEGRAM_BOT_TOKEN
@@ -130,8 +134,8 @@ EDITABLE_ENV_KEYS: frozenset = frozenset({
     "DASHBOARD_HOST",
     "DASHBOARD_PORT",
     "WEBPORTAL_PORT",
-    "POLL_INTERVAL",
-    "IPC_POLL_INTERVAL",
+    "POLL_INTERVAL",        # milliseconds — e.g. 2000 = 2 s
+    "IPC_POLL_INTERVAL",    # milliseconds — e.g. 1000 = 1 s
     "CONTAINER_IMAGE",
     "MAX_CONCURRENT_CONTAINERS",
     "ASSISTANT_NAME",
