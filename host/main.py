@@ -249,6 +249,36 @@ def _is_rate_limited(jid: str) -> bool:
     return False
 
 
+# ── Per-sender rate limiting (p16d) ───────────────────────────────────────────
+# Prevents a single user from flooding the bot with rapid-fire messages.
+# A sender that exceeds SENDER_RATE_LIMIT_MAX messages within
+# SENDER_RATE_LIMIT_WINDOW_SECS will be rate-limited and notified.
+# Config: SENDER_RATE_LIMIT_MAX (default 5), SENDER_RATE_LIMIT_WINDOW_SECS (default 60)
+_sender_msg_timestamps: dict[str, deque] = {}  # sender_id → deque of float timestamps
+# Track the last time we notified a sender they're rate-limited, to avoid spamming them.
+_sender_rate_limit_notify: dict[str, float] = {}
+_SENDER_RATE_NOTIFY_COOLDOWN = 30.0  # seconds between rate-limit notifications to same sender
+
+
+def _is_sender_rate_limited(sender: str) -> bool:
+    """Return True if this individual sender has exceeded the per-sender rate limit.
+
+    Config via env vars:
+      SENDER_RATE_LIMIT_MAX          (default 5 messages)
+      SENDER_RATE_LIMIT_WINDOW_SECS  (default 60 seconds)
+    """
+    max_msgs = int(os.environ.get("SENDER_RATE_LIMIT_MAX", 5))
+    window = float(os.environ.get("SENDER_RATE_LIMIT_WINDOW_SECS", 60))
+    now = time.time()
+    q = _sender_msg_timestamps.setdefault(sender, deque(maxlen=max_msgs * 2))
+    while q and now - q[0] > window:
+        q.popleft()
+    if len(q) >= max_msgs:
+        return True
+    q.append(now)
+    return False
+
+
 # ── Message deduplication fence ───────────────────────────────────────────────
 # Short-lived in-memory set of recently-seen message fingerprints.
 # Prevents duplicate processing caused by webhook retries or channel double-delivery.
@@ -452,17 +482,45 @@ async def _on_message(jid: str, sender: str, sender_name: str, content: str,
                     "RBAC: sender %s lacks task:submit permission — message rejected (jid=%s)",
                     sender, jid,
                 )
+                # p16d: notify the sender so they are not left wondering why the bot is silent.
+                try:
+                    from .router import route_outbound as _ro_rbac
+                    await _ro_rbac(jid, "⚠️ 您目前沒有使用此機器人的權限，請聯繫管理員申請開通。")
+                except Exception as _rbac_notify_exc:
+                    log.debug("RBAC: failed to send rejection notice: %s", _rbac_notify_exc)
                 return
         except (AttributeError, TypeError) as _rbac_exc:
             log.error("RBAC check error — rejecting message for safety: %s", _rbac_exc)
             return
 
+    # p16d: Per-sender rate limit — prevent a single user from flooding the bot.
+    # Notifies the sender at most once per _SENDER_RATE_NOTIFY_COOLDOWN seconds.
+    if _is_sender_rate_limited(sender):
+        log.debug(
+            "Sender rate limit exceeded for sender=%s in group=%s — message dropped", sender, jid
+        )
+        now = time.time()
+        last_notify = _sender_rate_limit_notify.get(sender, 0.0)
+        if now - last_notify >= _SENDER_RATE_NOTIFY_COOLDOWN:
+            _sender_rate_limit_notify[sender] = now
+            try:
+                from .router import route_outbound as _ro_rl
+                await _ro_rl(jid, "⚠️ 您傳送訊息的速度太快，請稍等片刻再試。")
+            except Exception as _rl_exc:
+                log.debug("sender rate limit: failed to notify %s: %s", sender, _rl_exc)
+        return
+
     # Per-group rate limit: drop excess messages to prevent one group from
-    # starving others.  Logged at DEBUG to avoid log spam under sustained load.
+    # starving others.  Notifies user so they know the system is throttling.
     if _is_rate_limited(jid):
         log.debug(
             "Rate limit exceeded for group %s (sender=%s) — message dropped", jid, sender
         )
+        try:
+            from .router import route_outbound as _ro_grp
+            await _ro_grp(jid, "⚠️ 此群組的訊息量已達上限，請稍等片刻後再試。")
+        except Exception as _grp_rl_exc:
+            log.debug("group rate limit: failed to notify %s: %s", jid, _grp_rl_exc)
         return
 
     # 去重複檢查：防止頻道 webhook 重試造成相同訊息被處理兩次
@@ -500,12 +558,44 @@ async def _on_message(jid: str, sender: str, sender_name: str, content: str,
     # 更新 chats 表的最後訊息時間與頻道資訊（用於管理介面顯示）
     db.store_chat_metadata(jid, sender_name, ts, channel, is_group)
 
+    # p16d: First-run welcome message — sent the very first time a group or DM is seen.
+    # Helps new users understand how to interact with the bot without reading docs.
+    try:
+        _is_new_chat = db.get_state(f"welcomed:{jid}") is None
+        if _is_new_chat:
+            db.set_state(f"welcomed:{jid}", "1")
+            _trigger = config.ASSISTANT_NAME
+            _welcome = (
+                f"👋 你好！我是 {_trigger}，很高興認識你！\n\n"
+                f"在群組中，請用「@{_trigger}」開頭呼叫我（例如：@{_trigger} 今天天氣如何？）。\n"
+                f"私訊我可以直接傳訊息，不需要特殊指令。\n\n"
+                f"我正在準備中，請稍候片刻…"
+            )
+            try:
+                await route_outbound(jid, _welcome)
+            except Exception as _welcome_exc:
+                log.debug("first-run welcome failed for %s: %s", jid, _welcome_exc)
+    except Exception as _fr_exc:
+        log.debug("first-run check failed for %s: %s", jid, _fr_exc)
+
     # Fix(p12a): immediately trigger message processing instead of waiting up to
     # POLL_INTERVAL (default 2 s) for _message_loop to notice the new row.
     # GroupQueue serialises per-group so this is safe to call concurrently.
+
+    # p16d: Queue depth feedback — if the group already has a container running,
+    # tell the user they are in a queue so they know their message was received.
+    _group_state = _group_queue._get_group(jid)
+    _already_active = _group_state.active
     _group_queue.enqueue_message_check(jid)
+    if _already_active:
+        try:
+            await route_outbound(jid, "⏳ 正在處理上一則訊息，您的請求已加入佇列，請稍候…")
+        except Exception as _queue_notify_exc:
+            log.debug("queue depth notify failed for %s: %s", jid, _queue_notify_exc)
 
     # 在訊息儲存後才送出 typing indicator，確保 DB 寫入不會被 network I/O 延遲阻塞
+    # p16d: typing indicator is also renewed every 4 seconds while the container runs;
+    # see the _typing_renewal_loop started in _process_group_messages.
     ch = find_channel(jid)
     if ch and hasattr(ch, "send_typing"):
         try:
@@ -708,6 +798,32 @@ async def _process_group_messages(group: dict, messages: list[dict],
         "Invoking container agent",
         extra={"run_id": run_id, "jid": jid, "folder": folder, "session_id": session_id},
     )
+
+    # p16d: Typing indicator renewal loop — Telegram typing expires every 5 seconds;
+    # without renewal the user sees the indicator vanish after 5s even though the
+    # container may run for 30-60s.  We start a background task that re-sends the
+    # typing action every 4 seconds until the container finishes.
+    _typing_stop = asyncio.Event()
+
+    async def _typing_renewal_loop() -> None:
+        """Re-send typing indicator every 4 seconds while the container runs."""
+        _ch = find_channel(jid)
+        if not _ch or not hasattr(_ch, "send_typing"):
+            return
+        while not _typing_stop.is_set():
+            try:
+                await _ch.send_typing(jid)
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(_typing_stop.wait(), timeout=4.0)
+            except asyncio.TimeoutError:
+                pass  # Normal — keep looping
+
+    _typing_task = asyncio.create_task(
+        _typing_renewal_loop(), name=f"typing-renewal-{jid}"
+    )
+
     # run_container_agent manages its own internal timeout (config.CONTAINER_TIMEOUT)
     # and handles docker kill on expiry.  We add a slightly longer backstop timeout
     # here (+30s grace) so a pathological case where the internal timeout itself hangs
@@ -775,6 +891,14 @@ async def _process_group_messages(group: dict, messages: list[dict],
             )
         except Exception as _tout_exc:
             log.warning("Failed to send timeout notification to %s: %s", jid, _tout_exc)
+    finally:
+        # p16d: Stop the typing renewal loop regardless of success/failure/timeout.
+        _typing_stop.set()
+        _typing_task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(_typing_task), timeout=1.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
 
 
 async def _message_loop() -> None:

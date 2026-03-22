@@ -753,6 +753,11 @@ async def run_container_agent(
                         "Circuit breaker NOT tripped — Docker daemon is healthy.",
                         container_name, config.CONTAINER_MEMORY,
                     )
+                    # p16d: inform the user that the task was killed due to memory limits
+                    # so they can simplify their request rather than wondering about silence.
+                    await _notify_error(
+                        "⚠️ AI 執行時記憶體不足（已被系統終止），請嘗試縮短或簡化您的請求，系統將自動重試。"
+                    )
                 else:
                     log.info("Container %s crashed before emit() but Docker is healthy — resetting circuit breaker", container_name)
                 _record_docker_success(folder)

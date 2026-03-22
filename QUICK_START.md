@@ -36,8 +36,10 @@ GOOGLE_API_KEY=your-gemini-key        # Recommended: free tier at aistudio.googl
 # OPENAI_API_KEY=your-openai-key      # GPT-4 series
 # CLAUDE_API_KEY=your-claude-key      # Most reliable, but costs more
 
-# Channel — pick ONE:
+# Channel — pick ONE and set ENABLED_CHANNELS to match:
+ENABLED_CHANNELS=telegram             # Must match the channel you configure below
 TELEGRAM_BOT_TOKEN=your-telegram-token  # Easiest to obtain via @BotFather
+# DISCORD_BOT_TOKEN=your-discord-token  # Also set ENABLED_CHANNELS=discord
 
 # Owner — strongly recommended:
 # Your Telegram user ID. Use /userinfobot to find it.
@@ -47,6 +49,9 @@ OWNER_IDS=123456789
 
 > **Note on Qwen:** Qwen models are accessed via `NIM_API_KEY` (NVIDIA NIM) or `OPENAI_API_KEY`
 > (with `OPENAI_BASE_URL` pointed at the Qwen endpoint). There is no separate `QWEN_API_KEY`.
+
+> **Note on ENABLED_CHANNELS:** This field is required. Without it the bot starts with no active
+> channels. Set it to `telegram`, `discord`, or a comma-separated list if you use both.
 
 ### 3. Build the Docker image and start
 
@@ -63,18 +68,31 @@ python run.py
 
 ### 4. Register a group
 
-After starting, send `/monitor` from your Telegram group to register it as the main group.
-This registers the group in EvoClaw's database and enables error alerts there.
+EvoClaw must know which group to respond in. There are two ways:
 
-Alternatively, use the interactive script:
+**Option A — Interactive script (recommended for first setup):**
 
 ```bash
 python scripts/register_group.py
 ```
 
+**Option B — Send a message to your bot on Telegram:**
+Start a conversation with your bot. On first contact the bot sends a welcome message
+explaining how to trigger it (use `@BotName your question`).
+
+**Optional — Set up a monitor group (for error alerts):**
+Send `/monitor` from a dedicated Telegram group to register it as the error-alert
+destination. This is separate from your main working group and is optional.
+
 ### 5. Test
 
-Find your bot on Telegram and send a message. If you get a reply, setup is complete.
+Find your bot on Telegram and send:
+
+```
+@YourBotName hello
+```
+
+If the bot replies (may take 15–30 seconds on cold start), setup is complete.
 
 ---
 
@@ -86,9 +104,11 @@ Find your bot on Telegram and send a message. If you get a reply, setup is compl
 | Docker not running | Start Docker Desktop or run `sudo systemctl start docker` |
 | No reply from bot | Check `TROUBLESHOOTING.md` |
 | Wrong API key format | Check `.env` — no spaces around the `=` sign, no quotes |
-| Slow response (15-30 s) | Normal — first Docker container cold-start takes time |
+| Slow response (15-30 s) | Normal — first Docker container cold-start takes time; typing indicator shows while processing |
 | `evoclaw-agent image not found` | Run `make build` first |
 | No admin access | Set `OWNER_IDS` in `.env` with your Telegram user ID |
+| Bot doesn't respond in group | Set `ENABLED_CHANNELS=telegram` in `.env`; make sure the group is registered |
+| Rate limited ("速度太快") | You're sending messages too fast — wait 60 seconds |
 
 ---
 
