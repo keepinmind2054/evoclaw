@@ -34,6 +34,26 @@ def read_env_file(keys: list[str], env_path: Path | None = None) -> dict[str, st
             # Strip surrounding quotes
             if len(val) >= 2 and val[0] in ('"', "'") and val[-1] == val[0]:
                 val = val[1:-1]
+            else:
+                # BUG-ENV-01 FIX: strip inline comments from unquoted values.
+                # A line like KEY=myvalue # comment sets KEY to
+                # "myvalue # comment" instead of "myvalue".  Only strip when
+                # the value is NOT quoted — quoted values may legitimately
+                # contain " # " characters that must be preserved.
+                #
+                # Two comment forms are handled:
+                #   KEY=value # comment   -> "value"  (space before #)
+                #   KEY=  # comment       -> ""        (value is only a comment;
+                #                                       regex strips leading spaces
+                #                                       so val starts with "#")
+                # Note: KEY=value#tag is NOT treated as a comment because there
+                # is no space before the "#", matching common .env conventions.
+                if val.startswith("#"):
+                    val = ""
+                else:
+                    comment_idx = val.find(" #")
+                    if comment_idx != -1:
+                        val = val[:comment_idx].rstrip()
             result[key] = val
     except Exception as exc:
         # p12b fix: log instead of silently swallowing — helps diagnose permission
