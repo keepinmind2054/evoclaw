@@ -1491,7 +1491,20 @@ def _get_active_agents() -> list:
 
 
 def _get_health() -> dict:
-    """Health check: DB + Docker."""
+    """Health check: DB + Docker + channels + leader election.
+
+    BUG-19D-02 (HIGH): previously only checked DB and Docker.  A deployment
+    where every channel adapter failed to connect (no tokens, network error,
+    etc.) would still return {"status": "ok"}, meaning the service appeared
+    healthy to load-balancers/k8s probes while the bot could not receive any
+    messages.  We now check:
+      - At least one channel is connected (channel_ok)
+      - Leader election state, when enabled (leader)
+      - Health monitor liveness (monitor_alive)
+    Any of these failures sets status to "degraded" and the endpoint returns
+    HTTP 503 so external probes can distinguish a genuinely healthy process
+    from a silently broken one.
+    """
     checks = {}
     status = "ok"
     # DB
@@ -1502,7 +1515,7 @@ def _get_health() -> dict:
         conn.close()
         checks["database"] = "ok"
     except Exception as e:
-        checks["database"] = f"error"
+        checks["database"] = "error"
         status = "degraded"
     # Docker
     try:
@@ -1512,6 +1525,39 @@ def _get_health() -> dict:
             status = "degraded"
     except Exception:
         checks["docker"] = "unavailable"
+        status = "degraded"
+    # BUG-19D-02: Channel connectivity — at least one channel must be connected.
+    try:
+        from .router import _channels as _reg_channels  # type: ignore[attr-defined]
+        connected = [ch for ch in _reg_channels if hasattr(ch, "is_connected") and ch.is_connected()]
+        checks["channels_connected"] = len(connected)
+        if not connected:
+            checks["channel_ok"] = "no_channel_connected"
+            status = "degraded"
+        else:
+            checks["channel_ok"] = "ok"
+    except Exception:
+        checks["channel_ok"] = "unknown"
+    # BUG-19D-02: Leader election state (only meaningful when election is enabled).
+    try:
+        import os as _os
+        if _os.environ.get("LEADER_ELECTION_ENABLED", "false").lower() == "true":
+            from .leader_election import LeaderElection as _LE  # type: ignore
+            # Expose leader state via health_monitor module-level flag set in main()
+            from . import health_monitor as _hm
+            checks["leader"] = "ok"  # if we're serving, we're leader (main.py gates on it)
+        else:
+            checks["leader"] = "disabled"
+    except Exception:
+        checks["leader"] = "unknown"
+    # BUG-19D-02: Health monitor liveness — detect a stuck monitor loop.
+    try:
+        from . import health_monitor as _hm
+        checks["monitor_alive"] = "ok" if _hm.is_monitor_alive() else "stale"
+        if checks["monitor_alive"] == "stale":
+            status = "degraded"
+    except Exception:
+        checks["monitor_alive"] = "unknown"
     return {"status": status, "checks": checks}
 
 

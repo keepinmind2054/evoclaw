@@ -48,6 +48,14 @@ KillMode=mixed
 # so 90s is still safe — systemd will SIGKILL if Python hangs past that.
 TimeoutStopSec=90
 
+# BUG-19D-03 (MEDIUM): LimitNOFILE was not set.  The IPC watcher uses
+# inotify (on Linux) to watch many per-group directories simultaneously.
+# Each inotify watch descriptor consumes one file descriptor.  Without a
+# raised limit, deployments with many groups hit the kernel default (1024)
+# and inotify_add_watch() starts returning EMFILE, silently stopping IPC
+# event delivery.  Set a generous limit so the system can scale.
+LimitNOFILE=65536
+
 # Log to journald (view with: journalctl -u evoclaw -f)
 StandardOutput=journal
 StandardError=journal
