@@ -35,9 +35,21 @@ def _preflight_check() -> None:
     except ImportError:
         return  # host package not importable yet — skip preflight
 
-    LLM_KEYS = ["GOOGLE_API_KEY", "NIM_API_KEY", "OPENAI_API_KEY", "CLAUDE_API_KEY"]
+    import logging as _log_run
+    LLM_KEYS = ["GOOGLE_API_KEY", "NIM_API_KEY", "OPENAI_API_KEY", "CLAUDE_API_KEY", "ANTHROPIC_API_KEY"]
     CHANNEL_KEYS = ["TELEGRAM_BOT_TOKEN", "DISCORD_BOT_TOKEN", "SLACK_BOT_TOKEN"]
     secrets = read_env_file(LLM_KEYS + CHANNEL_KEYS)
+
+    # p21c: Warn if the user set ANTHROPIC_API_KEY but not CLAUDE_API_KEY.
+    # EvoClaw reads CLAUDE_API_KEY; without this alias awareness the user would
+    # silently fall back to Gemini even with a valid Anthropic key in .env.
+    import os as _os_run
+    if (_os_run.environ.get("ANTHROPIC_API_KEY") or secrets.get("ANTHROPIC_API_KEY")) and \
+            not (_os_run.environ.get("CLAUDE_API_KEY") or secrets.get("CLAUDE_API_KEY")):
+        _log_run.getLogger(__name__).warning(
+            "ANTHROPIC_API_KEY detected but EvoClaw uses CLAUDE_API_KEY. "
+            "Using ANTHROPIC_API_KEY as fallback. Consider renaming to CLAUDE_API_KEY."
+        )
 
     missing = []
     if not any(secrets.get(k, "").strip() for k in LLM_KEYS):

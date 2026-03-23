@@ -26,6 +26,7 @@ class DiscordChannel:
         self._connected = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
+        self._discord_thread: Optional[threading.Thread] = None
 
         env = read_env_file(["DISCORD_BOT_TOKEN"])
         self._token = env.get("DISCORD_BOT_TOKEN", "")
@@ -40,7 +41,38 @@ class DiscordChannel:
     def owns_jid(self, jid: str) -> bool:
         return jid.startswith("dc:")
 
+    def _start_discord_thread(self) -> threading.Thread:
+        """Start (or restart) the Discord client in a background daemon thread.
+
+        Stores the thread as ``self._discord_thread`` so the watchdog in
+        ``is_connected()`` can check ``is_alive()`` and trigger a restart when
+        the thread dies unexpectedly (e.g. due to an unhandled exception in the
+        discord.py event loop).
+        """
+        def run_client():
+            try:
+                self._loop.run_until_complete(self._client.start(self._token))
+            except Exception as exc:
+                log.error("Discord client thread exited with error: %s", exc)
+
+        t = threading.Thread(target=run_client, daemon=True, name="discord-client")
+        t.start()
+        return t
+
     def is_connected(self) -> bool:
+        # Watchdog: if the daemon thread has died, attempt to restart it so
+        # Discord does not silently stop working after an unhandled exception.
+        if (
+            hasattr(self, "_discord_thread")
+            and self._discord_thread is not None
+            and not self._discord_thread.is_alive()
+            and self._client is not None
+            and not self._client.is_closed()
+        ):
+            log.error("Discord daemon thread died unexpectedly — restarting")
+            # Reset the event loop since the previous one may be stopped/closed.
+            self._loop = asyncio.new_event_loop()
+            self._discord_thread = self._start_discord_thread()
         return self._connected and self._client is not None and not self._client.is_closed()
 
     async def connect(self) -> None:
@@ -157,12 +189,7 @@ class DiscordChannel:
 
         # Run the discord client in a background thread with its own event loop
         self._loop = asyncio.new_event_loop()
-
-        def run_client():
-            self._loop.run_until_complete(self._client.start(self._token))
-
-        self._thread = threading.Thread(target=run_client, daemon=True, name="discord-client")
-        self._thread.start()
+        self._discord_thread = self._start_discord_thread()
         log.info("Discord channel starting in background thread")
 
     async def _get_channel(self, jid: str) -> Optional[discord.abc.Messageable]:
@@ -322,9 +349,11 @@ class DiscordChannel:
         self._client = None
         if self._loop and not self._loop.is_closed():
             self._loop.call_soon_threadsafe(self._loop.stop)
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=5)
-            if self._thread.is_alive():
+        # Join whichever thread reference is set (legacy self._thread or new self._discord_thread)
+        _thread_to_join = self._discord_thread or self._thread
+        if _thread_to_join and _thread_to_join.is_alive():
+            _thread_to_join.join(timeout=5)
+            if _thread_to_join.is_alive():
                 log.warning("Discord background thread did not exit within 5s")
         log.info("Discord channel disconnected")
 

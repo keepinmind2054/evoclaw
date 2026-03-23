@@ -48,6 +48,13 @@ def _env_int(key: str, default: int, minimum: int | None = None) -> int:
     return val
 
 
+# p21c: ANTHROPIC_API_KEY alias — promote to CLAUDE_API_KEY at the process level
+# so that users who follow the README_en.md Quick Start (which showed
+# ANTHROPIC_API_KEY) get Claude rather than silently falling back to Gemini.
+# This runs once at import time and is transparent to all downstream consumers.
+if os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("CLAUDE_API_KEY"):
+    os.environ["CLAUDE_API_KEY"] = os.environ["ANTHROPIC_API_KEY"]
+
 # Assistant
 ASSISTANT_NAME = os.environ.get("ASSISTANT_NAME", "Eve")
 TRIGGER_PATTERN = re.compile(rf"^@{re.escape(ASSISTANT_NAME)}\b", re.IGNORECASE)

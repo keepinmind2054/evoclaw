@@ -198,13 +198,19 @@ def _read_secrets() -> dict:
     are intentionally excluded to limit blast radius if a container is
     compromised (Fix #187).
     """
-    return read_env_file([
+    secrets = read_env_file([
         "GOOGLE_API_KEY", "GEMINI_MODEL",
         "NIM_API_KEY", "NIM_MODEL", "NIM_BASE_URL",
         "OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL",
-        "CLAUDE_API_KEY", "CLAUDE_MODEL",
+        "CLAUDE_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_MODEL",
         "ASSISTANT_NAME",
     ])
+    # p21c: ANTHROPIC_API_KEY alias — users who follow the README_en.md example
+    # (which referenced ANTHROPIC_API_KEY) silently fell back to Gemini.
+    # If CLAUDE_API_KEY is absent but ANTHROPIC_API_KEY is set, promote the alias.
+    if not secrets.get("CLAUDE_API_KEY") and secrets.get("ANTHROPIC_API_KEY"):
+        secrets["CLAUDE_API_KEY"] = secrets["ANTHROPIC_API_KEY"]
+    return secrets
 
 def _validate_secrets(secrets: dict) -> bool:
     """Validate that at least one LLM API key is present; warn on startup for missing keys.
