@@ -19,7 +19,13 @@ _group_fail_counts: dict[str, int] = {}
 _group_fail_timestamps: dict[str, float] = {}
 _group_fail_lock: asyncio.Lock | None = None  # initialized in main() after event loop starts
 _GROUP_MAX_FAILS = 5
-_GROUP_FAIL_COOLDOWN = 60.0  # seconds
+_GROUP_FAIL_COOLDOWN_BASE = 60.0   # seconds
+_GROUP_FAIL_COOLDOWN_MAX = 600.0   # 10 minutes cap
+
+
+def _get_fail_cooldown(fail_count: int) -> float:
+    """Exponential backoff: 60 → 120 → 300 → 600s, capped at 10 min."""
+    return min(_GROUP_FAIL_COOLDOWN_BASE * (2 ** max(0, fail_count - 1)), _GROUP_FAIL_COOLDOWN_MAX)
 
 # ── Per-group error notification rate limiter ──────────────────────────────────
 # Prevents flooding the user with repeated error messages during a failure storm.
@@ -58,6 +64,7 @@ from .ipc_watcher import start_ipc_watcher
 from .task_scheduler import start_scheduler_loop
 from .router import register_channel, route_outbound, format_messages, find_channel
 from .evolution import check_message as immune_check, evolution_loop
+from .evolution import record_run as _record_run
 from .health_monitor import health_monitor_loop
 from .memory import append_warm_log
 
@@ -670,10 +677,11 @@ async def _process_group_messages(group: dict, messages: list[dict],
             fail_count = _group_fail_counts.get(jid, 0)
             last_fail = _group_fail_timestamps.get(jid, 0.0)
             if fail_count >= _GROUP_MAX_FAILS:
-                if time.time() - last_fail < _GROUP_FAIL_COOLDOWN:
+                _cooldown = _get_fail_cooldown(_group_fail_counts.get(jid, 1))
+                if time.time() - last_fail < _cooldown:
                     log.warning(
                         "Group %s has failed %d times consecutively, cooling down for %ds",
-                        jid, fail_count, int(_GROUP_FAIL_COOLDOWN - (time.time() - last_fail))
+                        jid, fail_count, int(_cooldown - (time.time() - last_fail))
                     )
                     return
                 else:
@@ -1141,7 +1149,15 @@ async def main() -> None:
             @_ws_bridge.on_fitness_update
             async def _on_fitness(agent_id, score, metadata):
                 # Forward fitness to evolution engine
-                pass  # TODO: wire to evolution/fitness.py
+                try:
+                    run_id = metadata.get("run_id") if metadata else None
+                    if run_id is None:
+                        run_id = str(uuid.uuid4())
+                    response_ms = int(metadata.get("response_ms", 0)) if metadata else 0
+                    success = score >= 0.5
+                    _record_run(agent_id, run_id, response_ms, retry_count=0, success=success)
+                except Exception as _fit_exc:
+                    log.debug("_on_fitness: record_run failed (non-fatal): %s", _fit_exc)
 
             log.info("[Phase1] MemoryBus | WSBridge (port %s) | AgentIdentityStore initialized", _ws_bridge.port)
         except Exception as _e:
