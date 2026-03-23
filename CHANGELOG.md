@@ -1,3 +1,51 @@
+## [1.24.0] — 2026-03-23
+
+### Phase 17 — webportal, dependency security, asyncio races, code quality (PRs #379–382)
+
+#### PR #379 — fix(p17b): Dependency security and container environment audit (8 fixes)
+- **HIGH** `aiohttp` CVE-2024-52304 (HTTP request smuggling) + CVE-2024-23334 (dir traversal) — bumped floor to `>=3.10.11` in `host/requirements.txt`
+- **HIGH** `httpx` missing from `container/agent-runner/requirements.txt` — OpenAI/Qwen API calls had no timeout, could hang indefinitely; added `httpx>=0.27.0`
+- **MEDIUM** `fitness_reporter.py` not COPY'd into Docker image — Phase 1 WSBridge telemetry silently never worked; added COPY to Dockerfile
+- **MEDIUM** `soul.md` not COPY'd into Docker image — anti-hallucination rules never loaded in production, CRITICAL error logged on every container start; added COPY to Dockerfile
+- **MEDIUM** Dockerfile infra layer: Pillow CVE-2023-44271/CVE-2024-28219, aiohttp CVE, reportlab 3.x, httpx unpinned — added version floors with CVE comments
+- **MEDIUM** HEALTHCHECK `python3 -c "import sys; sys.exit(0)"` trivially passes even with broken image — replaced with import check for `anthropic`, `openai`, `google.genai`
+- **LOW** `aiofiles` in `host/requirements.txt` but never imported — commented out
+- **LOW** `setup.sh` never built or verified Docker image — added `build_docker_image()` with `docker image inspect` verification
+
+#### PR #380 — fix(p17a): webportal.py full audit (9 fixes) + run.py --version flag (first ever audit)
+- **HIGH** Timing side-channel in HTTP Basic Auth and CSRF comparison — replaced `==` with `hmac.compare_digest()` (constant-time)
+- **HIGH** No security headers (CSP, X-Frame-Options, X-Content-Type-Options) on any response — added `_SECURITY_HEADERS` applied to all HTML and JSON responses
+- **MEDIUM** `float(since)` in `/api/poll` unguarded — crafted `?since=abc` caused unhandled 500; wrapped in try/except, clamped to 0.0
+- **MEDIUM** Negative `Content-Length` bypassed 64 KB size limit — added explicit `< 0` rejection before upper-bound check
+- **MEDIUM** No startup warning when web portal runs without `DASHBOARD_PASSWORD` — added `log.warning()` matching dashboard pattern
+- **MEDIUM** `start_webportal()` had no `stop_event` parameter — SIGTERM could not close the TCP socket; added watcher thread mirroring `start_dashboard()`, updated `host/main.py` to pass `_stop_event`
+- **MEDIUM** JID not validated before DB write — added `_JID_RE` validation in `_api_send()`
+- **MEDIUM** `_api_send()` 500 responses leaked raw exception details to browser — now logs server-side, returns generic `{"error": "internal server error"}`
+- **LOW** 404 responses in `do_GET`/`do_POST` missing `Content-Length: 0` before `end_headers()` — fixed both paths
+- **LOW** `run.py` had no `--version` flag — added `_parse_args()` using `argparse`, reads from `importlib.metadata` with `pyproject.toml` fallback
+
+#### PR #381 — fix(p17c): asyncio race conditions deep dive (13 fixes)
+- **CRITICAL** `discord_channel.py`: `on_message` callback `await`ed on Discord's background event loop instead of the main application loop — all locks, GroupQueue serialization, and asyncio primitives were on the wrong loop; fixed with `asyncio.run_coroutine_threadsafe(..., _main_loop)`
+- **HIGH** `ipc_watcher.py`: `asyncio.Lock()` created at module import time (not inside a running loop) — `RuntimeError` on Python 3.12; replaced with lazy accessor functions `_get_skills_lock()` / `_get_dev_task_lock()`
+- **HIGH** `ws_bridge.py`: `_connections` dict read/written from concurrent coroutines without a lock — connection-cap check was not atomic with registration; added `_connections_lock` guarding all access
+- **MEDIUM** `ipc_watcher.py`: 3× `asyncio.get_event_loop()` replaced with `asyncio.get_running_loop()`
+- **MEDIUM** `ipc_watcher.py`: 9× `asyncio.ensure_future()` deprecated — replaced with `asyncio.create_task()`
+- **MEDIUM** `leader_election.py`: 2× `asyncio.get_event_loop().run_in_executor()` → `asyncio.get_running_loop().run_in_executor()`
+- **MEDIUM** `discord_channel.py`: `asyncio.get_event_loop()` in `_run_in_discord_loop` → `asyncio.get_running_loop()`
+- **MEDIUM** `sdk_api.py`: `threading.Lock` acquired inside async context (`_handle_system_status`) — blocked event loop thread; moved DB read to `run_in_executor()`
+- **MEDIUM** `main.py`: `_error_notify_times.pop()` in stale-JID pruning and `reset_group` paths without `_error_notify_lock` — race with `on_error` rate-limiter; added lock acquisition at both sites
+- **MEDIUM** `ipc_watcher.py`: blocking `open()` for subprocess stdout/stderr on event loop thread — moved to `run_in_executor()`
+- **MEDIUM** `container_runner.py`: blocking MEMORY.md `open()` + `write()` in async context — moved to `run_in_executor()`
+- **LOW** `sdk_api.py`: raw exception message sent to WebSocket clients on identity error — replaced with generic message + server-side logging
+- **LOW** `task_scheduler.py`: `asyncio.create_task()` without stored reference — GC could collect before completion; assigned with `add_done_callback` for exception logging
+
+#### PR #382 — refactor(p17d): Code quality simplification pass (5 improvements)
+- **main.py**: Removed duplicate `import collections`; extended `from collections import OrderedDict, deque`
+- **main.py**: Extracted `_with_fail_lock(fn)` helper — eliminated 4+ duplicated `if _group_fail_lock is not None: async with _group_fail_lock` guard patterns; all dict-mutation sites now use the helper
+- **main.py**: Converted 13 f-string log calls to `%`-style for consistency
+- **container_runner.py**: Converted 8 f-string log calls to `%`-style
+- **agent.py**: Extracted `_atomic_ipc_write(fname, data)` helper — eliminated 10 identical 3-line atomic-rename patterns (tmp write + rename) across all IPC tool functions
+
 ## [1.23.0] — 2026-03-23
 
 ### Fixed (Phase 16: Final Audit & UX — 32 fixes)
