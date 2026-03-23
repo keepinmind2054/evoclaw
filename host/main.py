@@ -1212,7 +1212,9 @@ async def main() -> None:
     # 啟動 Web dashboard（背景 daemon thread，port DASHBOARD_PORT）
     start_dashboard(_stop_event)
     from .webportal import start_webportal, deliver_reply as _portal_deliver
-    start_webportal()
+    # BUG-WP-06 FIX: pass _stop_event so the webportal server shuts down
+    # gracefully on SIGTERM/Ctrl-C, mirroring start_dashboard().
+    start_webportal(stop_event=_stop_event)
     _cleanup_orphan_tasks()  # ← add this line
 
     # 從設定檔載入允許傳訊的發送者白名單
