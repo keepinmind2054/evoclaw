@@ -4,7 +4,6 @@ EvoClaw Host — Main Entry Point
 Orchestrates message polling, container execution, IPC, and scheduling.
 """
 import asyncio
-import collections
 import contextlib
 import hashlib
 import logging
@@ -12,7 +11,7 @@ import os
 import signal
 import time
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 from pathlib import Path
 
 # ── Per-group consecutive failure tracking (prevents infinite retry loops) ────
@@ -109,6 +108,26 @@ def _task_done_callback_main(task: "asyncio.Task") -> None:
     exc = task.exception()
     if exc is not None:
         log.error("Unhandled exception in background task %s: %s", task.get_name(), exc, exc_info=exc)
+
+
+async def _with_fail_lock(fn) -> None:
+    """Execute async callable *fn* inside _group_fail_lock.
+
+    The lock is None during the brief startup window before main() initialises
+    it.  Sites that mutate _group_fail_counts/_group_fail_timestamps call this
+    helper to avoid duplicating the None-guard boilerplate.  When the lock is
+    not yet available, *fn* is called without the lock — the same behaviour the
+    original per-site else branches provided.
+
+    Note: the consecutive-failure gate in _process_group_messages is kept inline
+    because it may issue an early return from the enclosing coroutine, which
+    cannot be propagated out of a nested async callback.
+    """
+    if _group_fail_lock is not None:
+        async with _group_fail_lock:
+            await fn()
+    else:
+        await fn()
 
 
 async def _discord_notify(content: str) -> None:
@@ -303,7 +322,7 @@ _DEDUP_MAX = 1000  # maximum entries before oldest is evicted
 # being re-processed (e.g. a user legitimately resending the same text hours
 # later, or after the DB was cleared and the user retries the same prompt).
 _DEDUP_TTL_SECS = 300.0  # 5 minutes — safely covers all webhook retry windows
-_seen_msg_fingerprints: collections.OrderedDict = collections.OrderedDict()
+_seen_msg_fingerprints: OrderedDict = OrderedDict()
 _dedup_lock: asyncio.Lock | None = None  # initialized in main() after event loop starts
 
 
@@ -374,10 +393,10 @@ def _cleanup_orphan_tasks() -> None:
         or t.get("chat_jid") not in registered_jids
     ]
     for t in bad:
-        log.warning(f"Removing orphan task {t['id']}: chat_jid={t.get('chat_jid')!r}")
+        log.warning("Removing orphan task %s: chat_jid=%r", t['id'], t.get('chat_jid'))
         db.delete_task(t["id"])
     if bad:
-        log.info(f"Cleaned up {len(bad)} orphan task(s)")
+        log.info("Cleaned up %d orphan task(s)", len(bad))
 
 def _get_groups() -> list[dict]:
     """回傳目前登記的群組清單，供 IPC watcher 等元件查詢。"""
@@ -481,7 +500,7 @@ async def _on_message(jid: str, sender: str, sender_name: str, content: str,
     真正的處理由 _message_loop 透過 GroupQueue 排程。
     """
     if not is_sender_allowed(sender, _sender_allowlist):
-        log.debug(f"Sender {sender} blocked by allowlist")
+        log.debug("Sender %s blocked by allowlist", sender)
         return
 
     # RBAC enforcement: check that the sender has TASK_SUBMIT permission before
@@ -545,7 +564,7 @@ async def _on_message(jid: str, sender: str, sender_name: str, content: str,
     # 在儲存到 DB 之前攔截，惡意訊息完全不進入處理流程
     safe, threat_type = immune_check(content, sender)
     if not safe:
-        log.warning(f"Immune system blocked message from {sender}: {threat_type}")
+        log.warning("Immune system blocked message from %s: %s", sender, threat_type)
         # Fix p11d: inform the user so they don't silently wonder why they got no reply.
         # Use a brief, non-revealing message to avoid giving attackers feedback about
         # which specific pattern triggered the block.
@@ -643,8 +662,9 @@ async def _process_group_messages(group: dict, messages: list[dict],
         log.debug("Phase 1: identity tracking failed (non-fatal): %s", _id_exc)
 
     # ── Consecutive failure guard: prevent infinite retry loops ───────────────
-    # Guard: skip if _group_fail_lock not yet initialized (brief startup window).
-    # "async with None" raises TypeError, so we guard here.
+    # Note: cannot use _with_fail_lock() helper here because this site may issue
+    # an early `return` from the enclosing coroutine (circuit-trip case).
+    # Simple dict mutations elsewhere use _with_fail_lock() instead.
     if _group_fail_lock is not None:
         async with _group_fail_lock:
             fail_count = _group_fail_counts.get(jid, 0)
@@ -657,14 +677,13 @@ async def _process_group_messages(group: dict, messages: list[dict],
                     )
                     return
                 else:
-                    # Cooldown expired — decay counter and allow retry
-                    # Instead of resetting to 0, reduce by 2 so repeated failures
-                    # accumulate longer cooldowns
+                    # Cooldown expired — decay counter and allow retry.
+                    # Decrement by 2 rather than resetting to 0 so repeated failures
+                    # accumulate longer cooldowns.
                     _group_fail_counts[jid] = max(0, _group_fail_counts.get(jid, 0) - 2)
                     _group_fail_timestamps.pop(jid, None)
                     log.info("group %s cooldown expired; fail_count decayed to %d", jid, _group_fail_counts[jid])
-    else:
-        log.warning("_group_fail_lock not initialized — skipping consecutive failure guard")
+    # else: lock not yet initialised (brief startup window) — skip guard rather than crash
 
     requires_trigger = bool(group.get("requires_trigger", True))
     is_main = bool(group.get("is_main"))
@@ -799,16 +818,12 @@ async def _process_group_messages(group: dict, messages: list[dict],
     async def _on_success_tracked():
         nonlocal _run_succeeded
         _run_succeeded = True
-        # Guard: _group_fail_lock is None during brief startup window before main()
-        # initialises it; skip rather than raise TypeError on 'async with None'.
-        if _group_fail_lock is not None:
-            async with _group_fail_lock:
-                _group_fail_counts.pop(jid, None)
-                _group_fail_timestamps.pop(jid, None)
-        else:
-            log.warning("_on_success_tracked: _group_fail_lock not initialised — clearing counters directly")
+
+        async def _clear_fail_counters():
             _group_fail_counts.pop(jid, None)
             _group_fail_timestamps.pop(jid, None)
+
+        await _with_fail_lock(_clear_fail_counters)
         if on_success:
             await on_success()
 
@@ -870,15 +885,11 @@ async def _process_group_messages(group: dict, messages: list[dict],
                 jid, _err_detail,
                 extra={"run_id": run_id, "jid": jid, "folder": folder},
             )
-            # p16a-fix: guard against _group_fail_lock being None (startup window or tests).
-            # Matches the same guard pattern used at lines 545 and 696.
-            if _group_fail_lock is not None:
-                async with _group_fail_lock:
-                    _group_fail_counts[jid] = _group_fail_counts.get(jid, 0) + 1
-                    _group_fail_timestamps[jid] = time.time()
-            else:
+            async def _inc_fail_count_err():
                 _group_fail_counts[jid] = _group_fail_counts.get(jid, 0) + 1
                 _group_fail_timestamps[jid] = time.time()
+
+            await _with_fail_lock(_inc_fail_count_err)
             # Notify user so they know something went wrong instead of seeing silence.
             # Show a brief, user-friendly hint based on the error category so the user
             # understands what happened and what to do next (P10D improvement).
@@ -901,14 +912,11 @@ async def _process_group_messages(group: dict, messages: list[dict],
             int(_backstop_timeout), jid,
             extra={"run_id": run_id, "jid": jid, "folder": folder},
         )
-        # p16a-fix: guard against _group_fail_lock being None (startup window or tests).
-        if _group_fail_lock is not None:
-            async with _group_fail_lock:
-                _group_fail_counts[jid] = _group_fail_counts.get(jid, 0) + 1
-                _group_fail_timestamps[jid] = time.time()
-        else:
+        async def _inc_fail_count_timeout():
             _group_fail_counts[jid] = _group_fail_counts.get(jid, 0) + 1
             _group_fail_timestamps[jid] = time.time()
+
+        await _with_fail_lock(_inc_fail_count_timeout)
         # DO NOT call on_success() — cursor stays behind so message is retried
         # Notify user with the actual timeout limit so they understand the delay (P10D improvement).
         _timeout_mins = int(config.CONTAINER_TIMEOUT) // 60
@@ -985,14 +993,15 @@ async def _message_loop() -> None:
                         # omitted from this cleanup, causing a slow memory leak for
                         # frequently-deregistered groups over long uptimes.
                         _error_notify_times.pop(jid, None)
-                        async with _group_fail_lock:
-                            _group_fail_counts.pop(jid, None)
-                            _group_fail_timestamps.pop(jid, None)
+                        async def _prune_fail_state(j=jid):
+                            _group_fail_counts.pop(j, None)
+                            _group_fail_timestamps.pop(j, None)
+                        await _with_fail_lock(_prune_fail_state)
                     if stale_jids:
                         log.info("Pruned tracking state for %d deregistered group(s)", len(stale_jids))
-                    log.info(f"Groups reloaded: {len(_registered_groups)} group(s)")
+                    log.info("Groups reloaded: %d group(s)", len(_registered_groups))
                 except Exception as e:
-                    log.error(f"Failed to reload groups: {e}")
+                    log.error("Failed to reload groups: %s", e)
 
             # ── reset_group flag: clear fail counters for a specific group ───
             reset_flag = config.DATA_DIR / "reset_group.flag"
@@ -1003,9 +1012,10 @@ async def _message_loop() -> None:
                     reset_flag.unlink(missing_ok=True)
                     _target_jid = _rflag_data.get("jid", "")
                     if _target_jid:
-                        async with _group_fail_lock:
-                            _group_fail_counts.pop(_target_jid, None)
-                            _group_fail_timestamps.pop(_target_jid, None)
+                        async def _reset_fail_state(tj=_target_jid):
+                            _group_fail_counts.pop(tj, None)
+                            _group_fail_timestamps.pop(tj, None)
+                        await _with_fail_lock(_reset_fail_state)
                         _error_notify_times.pop(_target_jid, None)
                         log.info("reset_group: cleared fail counters for jid=%s", _target_jid)
                 except Exception as _rfe:
@@ -1049,7 +1059,7 @@ async def _message_loop() -> None:
                     # GroupQueue ensures only one container runs per group
                     _group_queue.enqueue_message_check(jid)
         except Exception as e:
-            log.error(f"Message loop error: {e}")
+            log.error("Message loop error: %s", e)
         try:
             await asyncio.wait_for(_stop_event.wait(), timeout=config.POLL_INTERVAL)
         except asyncio.TimeoutError:
@@ -1222,7 +1232,7 @@ async def main() -> None:
 
     # 從 DB 載入已登記的群組（包含 JID、folder、trigger 等設定）
     _registered_groups = db.get_all_registered_groups()
-    log.info(f"Loaded {len(_registered_groups)} registered group(s)")
+    log.info("Loaded %d registered group(s)", len(_registered_groups))
 
     # ── Monitor group auto-registration ────────────────────────────────────────
     # If MONITOR_JID is set, ensure it's registered in DB so the router can
@@ -1433,7 +1443,7 @@ async def main() -> None:
         module_path = _channel_module_map.get(channel_name)
         class_name = _channel_class_map.get(channel_name)
         if not module_path or not class_name:
-            log.warning(f"Unknown channel '{channel_name}' in ENABLED_CHANNELS — skipping")
+            log.warning("Unknown channel %r in ENABLED_CHANNELS — skipping", channel_name)
             continue
         try:
             import importlib
@@ -1452,9 +1462,9 @@ async def main() -> None:
             await ch.connect()
             register_channel(ch)
             _loaded_channels.append(ch)
-            log.info(f"Channel '{channel_name}' loaded and connected")
+            log.info("Channel %r loaded and connected", channel_name)
         except Exception as e:
-            log.error(f"Failed to load channel '{channel_name}': {e}")
+            log.error("Failed to load channel %r: %s", channel_name, e)
 
     # ── p12b: Startup validation summary ─────────────────────────────────────
     # Emit a clear, scannable status block so operators immediately know whether
@@ -1506,7 +1516,7 @@ async def main() -> None:
             import os as _os
             _os._exit(1)
 
-        log.info(f"Received {sig}, shutting down... (press Ctrl+C again to force exit)")
+        log.info("Received %s, shutting down... (press Ctrl+C again to force exit)", sig)
         _running = False
         _group_queue.shutdown_sync()  # signal: no new tasks accepted
         if _stop_event is not None:
