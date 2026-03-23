@@ -1,3 +1,48 @@
+## [1.25.0] — 2026-03-23
+
+### Phase 18 — RBAC, evolution, SDK, agent tools security (PRs #383–386)
+
+#### PR #383 — fix(p18b): Evolution engine, fitness system, crossbot protocol audit (7 fixes)
+- **CRITICAL** `CrossBotProtocol.handle()` never called `msg.verify()` — HMAC authentication was completely dead code; any process could forge `memory_share`/`task_delegate`/`hello`/`ping` messages
+- **HIGH** `update_last_seen()` called before HMAC verification — attacker with known bot_id could prevent stale-bot eviction
+- **HIGH** `fitness_reporter.py` duplicate heartbeat tasks after reconnect — second loop spawned without cancelling first
+- **MEDIUM** `evolve_genome_from_fitness()` accepts unclamped fitness/avg_ms — corrupted DB row satisfies all branches simultaneously
+- **MEDIUM** `write_memory()` silently drops memory writes when disconnected — no reconnect, no fallback, no log
+- **MEDIUM** `signal_complete()` silently drops task-completion events when disconnected
+- **LOW** `_handshake_timestamps` keys never evicted — unbounded memory leak per unique sender
+
+#### PR #384 — fix(p18d): Agent file/subprocess tools security and reliability audit (14 fixes)
+- **HIGH** `tool_write`/`tool_edit` symlink parent-dir escape — `_check_path_allowed()` checked path before `mkdir`, allowing symlinks to `/etc/cron.d/`
+- **HIGH** `tool_grep` no sandbox path check — `Grep(path="/etc")` read arbitrary system files
+- **HIGH** `tool_glob` no sandbox path check — `Glob(path="/")` enumerated entire container filesystem
+- **HIGH** `tool_web_fetch` DNS rebinding TOCTOU — check-time IP vs connect-time IP differed; monkey-patched `socket.create_connection` to re-validate at connect time
+- **HIGH** `tool_send_file` no path validation — `SendFile(file_path="/etc/passwd")` sent system files to chat
+- **MEDIUM** Predictable tmp file names — `.tmp` suffix collision; replaced with `.<name>.<pid>.<uuid>.tmp`
+- **MEDIUM** `tool_run_agent` IPC filename no random suffix — concurrent calls in same millisecond silently overwrote each other
+- **MEDIUM** `_execute_tool_inner` bare `args["key"]` access — `KeyError` gave LLM unrecoverable opaque error; added type guards
+- **MEDIUM** `tool_bash` post-kill `communicate()` without timeout — D-state process hung agent loop permanently
+- **MEDIUM** `tool_read` CJK UTF-8 false-positive binary detection — Chinese/Japanese/Korean files rejected; replaced fraction heuristic with strict `decode("utf-8")` attempt
+- **LOW** `tool_bash` `chown` blocklist too broad — blocked legitimate workspace operations
+- **LOW** `tool_web_fetch` non-string `url` raised `TypeError` instead of clean error
+
+#### PR #385 — fix(p18c): SDK API, memory subsystem, session management audit (5 fixes)
+- **HIGH** SDK API bot registry handlers leaked raw exception strings (SQLite paths, schema details) to WebSocket clients
+- **MEDIUM** `memory_write` `scope` field not validated — invalid scopes silently written, permanently invisible to queries
+- **MEDIUM** SDK WebSocket no per-connection rate limit — `memory_write` flood could saturate SQLite write path; added 60 msg/10s window
+- **MEDIUM** `bot_handshakes` table never purged — completed/expired rows accumulated unboundedly; `_pending_handshakes` dict keys never deleted
+- **MEDIUM** `agent_list` no pagination cap — large deployment could produce WebSocket frame exceeding 1 MB limit; added 500-entry cap with `total`/`truncated` fields
+
+#### PR #386 — fix(p18a): RBAC, group queue, allowlist, config, env audit (9 fixes)
+- **CRITICAL** `group_queue.py` retry deadlock — `_retry()` called `enqueue_message_check()` which immediately exited due to `retry_count > 0` guard; messages permanently dropped after first failure; retry mechanism was completely broken
+- **HIGH** `allowlist.py` deny-all sentinel bypassable with empty/whitespace `sender_id` — `""` strips to `""`, found in `{""}` sentinel, granted access when should deny all
+- **MEDIUM** `allowlist.py` `AttributeError` on `None` sender_id — `.strip()` on None crashed instead of safely denying
+- **MEDIUM** `rbac/roles.py` `ValueError` on unknown role from DB — corrupted/migrated DB crashed permission check; now skips with warning
+- **MEDIUM** `config.py` `MAX_CONCURRENT_CONTAINERS=0` deadlocked job queue — all messages queued forever; enforced `minimum=1`
+- **MEDIUM** `config.py` poll interval 0 ms created CPU-burning tight loop; enforced `minimum=100ms`
+- **LOW** `rbac/roles.py` `RBACStore.close()` raced with in-flight queries — connection closed while query in progress; now acquires `_lock` first
+- **LOW** `env.py` inline comments in unquoted `.env` values included in parsed value — `NAME=Eve # assistant` set NAME to `"Eve # assistant"`
+- **MEDIUM** `group_queue.py` circuit breaker bypass in `_drain_waiting()` — failed groups re-dispatched immediately, skipping backoff delay
+
 ## [1.24.0] — 2026-03-23
 
 ### Phase 17 — webportal, dependency security, asyncio races, code quality (PRs #379–382)
