@@ -69,7 +69,22 @@ class FitnessReporter:
         """
         Connect to Gateway WebSocket bridge.
         Returns True if connected, False if unavailable (fallback to file IPC).
+
+        BUG-FIX(p18b-05): cancel any existing heartbeat task before creating a new
+        one.  Previously, calling connect() from _try_reconnect() (which is itself
+        called from inside _heartbeat_loop()) would spawn a second heartbeat task
+        while the original loop was still running, resulting in two concurrent tasks
+        both sending heartbeats and both attempting further reconnects on failure.
         """
+        # Cancel any pre-existing heartbeat task before (re-)connecting so we
+        # never end up with more than one heartbeat loop running at a time.
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._heartbeat_task = None
         try:
             import websockets  # type: ignore
             self._ws = await websockets.connect(self._url, open_timeout=3)
@@ -174,23 +189,41 @@ class FitnessReporter:
     ):
         """
         Write a memory to the Gateway's memory store.
-        
+
         Args:
             content:    Text to remember
             scope:      "private" | "shared" | "project"
             project:    Project name (for "project" scope)
             importance: 0.0-1.0
+
+        BUG-FIX(p18b-07): previously returned immediately (silent no-op) when
+        disconnected, causing memory writes to be lost without any warning.
+        We now attempt a reconnect (consistent with report_fitness behaviour)
+        and fall back to a local JSONL file so data is never silently dropped.
         """
-        if not self._connected:
-            return
-        await self._send({
+        # Clamp importance to valid range to guard against bad callers
+        try:
+            importance = max(0.0, min(1.0, float(importance)))
+        except (TypeError, ValueError):
+            importance = 0.5
+
+        payload = {
             "type": "memory_write",
             "agent_id": self.agent_id,
             "content": content,
             "scope": scope,
             "project": project,
             "importance": importance,
-        })
+        }
+
+        if not self._connected:
+            await self._try_reconnect()
+
+        if self._connected:
+            await self._send(payload)
+        else:
+            # Fallback: persist to local JSONL so the host file-IPC reader can pick it up
+            self._fallback_fitness_write(payload)
 
     async def patch_hot_memory(self, patch: str):
         """
@@ -208,16 +241,30 @@ class FitnessReporter:
         })
 
     async def signal_complete(self, task_id: str, result: str = ""):
-        """Signal that a task has been completed."""
-        if not self._connected:
-            return
-        await self._send({
+        """Signal that a task has been completed.
+
+        BUG-FIX(p18b-08): previously silently dropped task-completion events when
+        disconnected.  We now attempt a reconnect and fall back to the local JSONL
+        file so that no completion event is lost without a log entry.
+        """
+        payload = {
             "type": "task_complete",
             "agent_id": self.agent_id,
             "task_id": task_id,
             "result": result,
             "timestamp": time.time(),
-        })
+        }
+
+        if not self._connected:
+            await self._try_reconnect()
+
+        if self._connected:
+            await self._send(payload)
+        else:
+            logger.warning(
+                "FitnessReporter: signal_complete — WebSocket unavailable, persisting to fallback file"
+            )
+            self._fallback_fitness_write(payload)
 
     async def _heartbeat_loop(self):
         """Send periodic heartbeats to maintain connection.

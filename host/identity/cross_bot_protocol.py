@@ -159,6 +159,20 @@ class CrossBotProtocol:
         if msg.type not in _ALLOWED_MSG_TYPES:
             logger.warning("Rejected unknown message type: %s", msg.type)
             return None
+        # BUG-FIX(p18b-03): verify HMAC signature BEFORE touching registry or
+        # dispatching to handlers.  The verify() method existed but was never called
+        # here, making HMAC signing effectively dead code — any unsigned or forged
+        # message was accepted as long as it parsed correctly.
+        if self.secret:
+            if not msg.verify(self.secret):
+                logger.warning(
+                    "Rejected message with invalid/missing signature: type=%s from=%s",
+                    msg.type, msg.from_bot_id,
+                )
+                return None
+        # BUG-FIX(p18b-01): only update last_seen AFTER passing signature verification
+        # so that a forged message with a spoofed from_bot_id cannot reset the
+        # last_seen timestamp and prevent the stale-bot eviction in purge_stale_bots().
         if self.registry:
             self.registry.update_last_seen(msg.from_bot_id)
         handler = self._handlers.get(msg.type)
