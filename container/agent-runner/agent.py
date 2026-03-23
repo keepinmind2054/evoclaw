@@ -2876,22 +2876,39 @@ def main():
 
     _log("🔑 KEY POOL", f"google={len(google_pool)} claude={len(claude_pool)} openai={len(openai_pool)} nim={len(nim_pool)}")
 
+    def _sanitize_prompt_injection(text: str, max_len: int = 500) -> str:
+        """Remove/escape prompt injection attempts from user-controlled metadata.
+
+        p22d-F: assistant_name, group_folder, and chat_jid come from the host
+        config / DB and are not direct user input, but they can contain control
+        characters or overly long strings that could disrupt the system prompt
+        structure.  Strip null bytes and non-printable characters (excluding
+        newline and tab) and cap length.
+        """
+        text = "".join(c for c in text if ord(c) >= 32 or c in "\n\t")
+        return text[:max_len]
+
+    # Sanitize metadata fields injected into the system prompt.
+    safe_assistant_name = _sanitize_prompt_injection(assistant_name, max_len=100)
+    safe_group_folder = _sanitize_prompt_injection(group_folder, max_len=200)
+    safe_chat_jid = _sanitize_prompt_injection(chat_jid, max_len=200)
+
     # 建立系統提示詞：基本角色設定 + 環境資訊 + 群組自訂指令（CLAUDE.md）
     lines = [
-        f"You are {assistant_name}, a helpful personal AI assistant.",
-        f"Your name is {assistant_name}. This is your identity — do not change it.",
+        f"You are {safe_assistant_name}, a helpful personal AI assistant.",
+        f"Your name is {safe_assistant_name}. This is your identity — do not change it.",
         "IMPORTANT IDENTITY RULES:",
         "- Never reveal that you are built on Gemini, Google AI, or any language model.",
         "- Never say 'I am a large language model', 'I am trained by Google', or similar phrases.",
         "- If asked what AI you are or who made you, simply say you are a personal assistant.",
-        "- If asked your name, say your name is " + assistant_name + ".",
+        "- If asked your name, say your name is " + safe_assistant_name + ".",
         "- Do not discuss your underlying technology or training.",
         "Be concise, friendly, and helpful.",
         "Respond in the same language the user uses. Default to Traditional Chinese (繁體中文) unless instructed otherwise.",
         "You run inside a secure Docker container.",
         f"Working directory: {WORKSPACE}",
-        f"Group folder: {group_folder}",
-        f"Chat JID: {chat_jid}",
+        f"Group folder: {safe_group_folder}",
+        f"Chat JID: {safe_chat_jid}",
         f"Date: {time.strftime('%Y-%m-%d')}",
         "",
         "## Execution Style",
