@@ -1,3 +1,52 @@
+## [1.26.0] — 2026-03-23
+
+### Phase 19 — Tests, container lifecycle, DB schema, logging/monitoring (PRs #387–390)
+
+#### PR #387 — fix(p19b): Container lifecycle, resource limits, IPC cleanup audit (7 fixes)
+- **HIGH** No container log size limit — Docker json-file driver accumulated logs indefinitely; added `--log-opt max-size=10m --log-opt max-file=2`
+- **MEDIUM** Container `/tmp` unbounded — overlay writes could exhaust host storage; added `--tmpfs /tmp:size=64m,mode=1777`
+- **MEDIUM** `_stop_container()` issued `docker kill` (SIGKILL) immediately — agent had zero time to flush IPC files; changed to `docker stop --time 5` for graceful SIGTERM first
+- **MEDIUM** `agent-browser` npm package unversioned — supply-chain risk; pinned to `agent-browser@1.1.5`
+- **MEDIUM** 9 Python Dockerfile packages without version floors — non-reproducible builds; added explicit `>=` floors
+- **LOW** `build.sh` did not verify image exists after build — added `docker image inspect` check
+- **LOW** No explicit `STOPSIGNAL SIGTERM` in Dockerfile
+
+#### PR #388 — fix(p19d): Logging, health checks, CI pipeline, error recovery audit (6 fixes)
+- **HIGH** `/health` endpoint only checked DB and Docker — zero-channel deployments returned `"ok"`; added `channel_ok`, `leader`, `monitor_alive` checks; Docker exception now also sets `status="degraded"`
+- **HIGH** CI pipeline never ran Python tests — `pytest tests/` was completely absent from `.github/workflows/ci.yml`; added `python-tests` job on Python 3.11
+- **MEDIUM** Health monitor exceptions logged at DEBUG — raised to `log.warning()`
+- **MEDIUM** Schedule parse failures returned `None` silently — tasks vanished without any log entry; all three schedule-type branches now call `log.warning()`
+- **LOW** systemd unit missing `LimitNOFILE=65536` — many-group deployments hit kernel fd limit, inotify silently stopped
+- **LOW** `except Exception: pass` in 2 IPC watcher paths — converted to `log.debug()`
+
+#### PR #389 — fix(p19c): Database schema integrity, migrations, query correctness (11 fixes)
+- **HIGH** `evolution_runs.success DEFAULT 1` — all rows without explicit success flag counted as success; fitness scores were perpetually inflated; changed to `DEFAULT 0`
+- **HIGH** Missing `UNIQUE(jid, run_id)` on `evolution_runs` — crash+retry doubled fitness counts; added constraint with `INSERT OR IGNORE`
+- **HIGH** Missing `UNIQUE(folder)` on `registered_groups` — two groups could share a folder, corrupting each other's MEMORY.md/CLAUDE.md
+- **HIGH** `group_cold_memory` had no write function in `db.py` — cold memories were never written through the thread-safe path; added `append_cold_memory()` and `delete_cold_memory_before()`
+- **HIGH** Migration runner had no concurrency lock — concurrent process restarts could apply same migration twice; added `BEGIN EXCLUSIVE`
+- **MEDIUM** Missing `UNIQUE(run_id)` on `container_logs` — duplicate running rows triggered false stuck-container alerts
+- **MEDIUM** `group_genome` missing `CHECK` constraints on `formality`/`technical_depth`
+- **MEDIUM** `task_run_logs.status` nullable — consecutive-failure counter silently skipped NULL rows; changed to `NOT NULL DEFAULT 'unknown'`
+- **MEDIUM** `db_adapter.py` missing `PRAGMA foreign_keys=ON` — FK constraints silently unenforced in migrations and tests
+- **MEDIUM** Cold memory FTS had no INSERT/DELETE triggers — all cold memories were invisible to `memory_fts_search()`
+- **LOW** `rbac_grants.granted_at` nullable — audit `ORDER BY` returned unreliable results; added `NOT NULL DEFAULT (unixepoch())`
+
+#### PR #390 — test(p19a): Test suite quality audit and coverage improvements (12 fixes + 68 new tests)
+- **HIGH** `test_core.py format_messages` — wrong return type expected, always-pass tautology assertion
+- **HIGH** Dev log tests used invalid session ID format — `get_dev_logs()` always returned `[]`, assertions always failed
+- **HIGH** `test_stop_container` tests tested old `docker kill` behavior after `docker stop` change — always failing
+- **HIGH** `GroupQueue` concurrency test — `config` patch context closed before `enqueue_message_check()`, limit never triggered
+- **HIGH** `test_dev_engine` deploy tests missing REVIEW PASS artifact — deploy gate always blocked, tests always failed
+- **HIGH** Path-traversal test patched wrong `config` field — could write outside jail in CI
+- **MEDIUM** `test_infrastructure` tautology tests — inline re-implementation of validation logic, never touching production code
+- **MEDIUM** 3 test modules with `psutil` import chain, no `pytest.importorskip` guard — `ModuleNotFoundError` on clean installs
+- **LOW** `assert mock.called` without argument inspection — replaced with `call_args` check
+- **NEW** `tests/test_allowlist.py` — 23 tests (zero previous coverage): deny-all sentinel bypass, None sender, missing file, corrupt JSON
+- **NEW** `tests/test_rbac.py` — 18 tests (zero previous coverage): unknown role resilience, cache coherence, permission enforcement
+- **NEW** `tests/test_fitness.py` — 14 tests (zero previous coverage): success default=False, speed clamp, fitness range guarantee
+- **NEW** `tests/test_log_buffer.py` — 13 tests (zero previous coverage): ring buffer eviction, SSE polling, limit clamping
+
 ## [1.25.0] — 2026-03-23
 
 ### Phase 18 — RBAC, evolution, SDK, agent tools security (PRs #383–386)
