@@ -83,18 +83,23 @@ RUN npm install -g agent-browser
 # ── Python: pre-install infrastructure packages ───────────────────────────────
 # Separated from requirements.txt so project deps stay lean and focused.
 # Infrastructure packages rarely change; this layer is cached between builds.
+# p17b: Pin versions for reproducibility and to lock out known CVEs.
+#   - httpx: pinned to >=0.27.0 (stable async HTTP, used by OpenAI SDK timeout config)
+#   - Pillow: pinned to >=10.3.0 (CVE-2023-44271 / CVE-2024-28219 fixed in 10.x)
+#   - aiohttp: pinned to >=3.10.11 (CVE-2024-52304 HTTP smuggling fixed in 3.10.11)
+#   - reportlab: pinned to >=4.1.0 (stable; avoid unmaintained 3.x line)
 RUN pip3 install --no-cache-dir --break-system-packages \
     # Document generation (Issue #77)
     python-pptx==1.0.2 \
-    reportlab \
+    "reportlab>=4.1.0" \
     openpyxl \
     python-docx \
     # Web scraping (Issue #78)
-    httpx \
+    "httpx>=0.27.0" \
     beautifulsoup4 \
     lxml \
-    # Image processing (Issue #79)
-    Pillow \
+    # Image processing (Issue #79) — CVE-2023-44271 / CVE-2024-28219 fixed in Pillow 10.x
+    "Pillow>=10.3.0" \
     # Optional heavy data science dependencies (can be removed if not using Excel/chart tools)
     # Data analysis (Issue #80)
     pandas \
@@ -103,7 +108,8 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     # Utilities
     python-dateutil \
     pytz \
-    aiohttp
+    # p17b: aiohttp pinned floor — CVE-2024-52304 (HTTP request smuggling) fixed in 3.10.11
+    "aiohttp>=3.10.11"
 
 # ── Python: install agent-specific requirements ───────────────────────────────
 WORKDIR /app
@@ -114,6 +120,11 @@ RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 
 # ── Copy agent source ─────────────────────────────────────────────────────────
 COPY agent-runner/agent.py ./
+# p17b: fitness_reporter.py provides Phase 1 WSBridge telemetry; imported by agent.py.
+#       soul.md contains core anti-hallucination rules; read at startup by agent.py.
+#       Both were previously missing from the image, causing silent feature degradation.
+COPY agent-runner/fitness_reporter.py ./
+COPY agent-runner/soul.md ./
 
 # ── Create workspace directories ──────────────────────────────────────────────
 RUN mkdir -p /workspace/group /workspace/global /workspace/extra \
@@ -135,11 +146,12 @@ ENV PYTHONUNBUFFERED=1
 ENV LANG=C.UTF-8
 ENV NODE_ENV=production
 
-# ── Health check (p13d) ───────────────────────────────────────────────────────
-# Verify that the Python agent entrypoint is importable.  Docker (and any
-# orchestrator) can use this to detect a broken image layer before a real
-# run is attempted.
+# ── Health check (p17b) ───────────────────────────────────────────────────────
+# Verify that the agent module and its critical dependencies are importable.
+# Previously this only checked python3 exits 0, which passes even with a
+# broken install.  Now it imports the key third-party packages so a broken
+# layer is caught before a real run is attempted.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python3 -c "import sys; sys.exit(0)"
+    CMD python3 -c "import json, pathlib, anthropic, openai; import google.genai; print('ok')"
 
 ENTRYPOINT ["/app/entrypoint.sh"]

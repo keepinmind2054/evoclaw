@@ -1,8 +1,8 @@
 python-telegram-bot>=21.0
 croniter>=3.0.0
 pyyaml>=6.0
-aiohttp>=3.9.0
-aiofiles>=23.0
+aiohttp>=3.10.11  # CVE-2024-52304 (HTTP request smuggling) fixed in 3.10.11; CVE-2024-23334 (dir traversal) fixed in 3.9.2
+# aiofiles: removed — not imported anywhere in host/; re-add if host code uses aiofiles in future
 psutil>=5.9.0
 
 # Slack
