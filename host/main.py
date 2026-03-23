@@ -43,6 +43,13 @@ _error_notify_lock: asyncio.Lock | None = None  # initialised in main()
 # The monitor group is auto-registered at startup so EvoClaw can route to it.
 _MONITOR_JID: str = ""  # populated in main() from env
 
+# ── Health monitor alert queue (p22c) ─────────────────────────────────────────
+# asyncio.Queue used as a message bus between health_monitor.py and main.py.
+# health_monitor pushes (issue_key, message) tuples; _message_loop drains them
+# and delivers via route_outbound.  Initialised to a real Queue in main() after
+# the event loop starts; the sentinel None is replaced at that point.
+_health_alert_queue: "asyncio.Queue[tuple[str, str]] | None" = None
+
 # ── Heartbeat ─────────────────────────────────────────────────────────────────
 # Periodic "I'm alive" ping to MONITOR_JID. If the pings stop, EvoClaw is down.
 # Interval is configurable via HEARTBEAT_INTERVAL env var (default 30 min).
@@ -65,7 +72,7 @@ from .task_scheduler import start_scheduler_loop
 from .router import register_channel, route_outbound, format_messages, find_channel
 from .evolution import check_message as immune_check, evolution_loop
 from .evolution import record_run as _record_run
-from .health_monitor import health_monitor_loop
+from .health_monitor import health_monitor_loop, set_alert_queue as _set_hm_alert_queue
 from .memory import append_warm_log
 
 # Phase 1 (UnifiedClaw): Universal Memory Bus + WSBridge + Agent Identity (guarded)
@@ -1063,6 +1070,23 @@ async def _message_loop() -> None:
                     _stop_event.set()
                 break
 
+            # ── p22c: Drain health monitor alert queue ───────────────────────
+            # health_monitor.py pushes (issue_key, message) tuples onto
+            # _health_alert_queue; we deliver them here via route_outbound so
+            # that health_monitor has no direct dependency on router or main.
+            if _health_alert_queue is not None:
+                while not _health_alert_queue.empty():
+                    try:
+                        _alert_key, _alert_msg = _health_alert_queue.get_nowait()
+                        if _MONITOR_JID:
+                            asyncio.create_task(route_outbound(_MONITOR_JID, _alert_msg))
+                        else:
+                            log.debug("Health alert dropped (MONITOR_JID not set): %s", _alert_key)
+                    except asyncio.QueueEmpty:
+                        break
+                    except Exception as _ha_exc:
+                        log.warning("Failed to deliver health alert: %s", _ha_exc)
+
             # ── Heartbeat: periodic ping to monitor group ────────────────────
             global _last_heartbeat
             if _MONITOR_JID and (time.time() - _last_heartbeat) >= _HEARTBEAT_INTERVAL:
@@ -1098,12 +1122,46 @@ async def _message_loop() -> None:
 
 
 async def _orphan_cleanup_loop(stop_event: asyncio.Event) -> None:
-    """Periodically clean up orphaned Docker containers every 5 minutes."""
+    """Periodically clean up orphaned Docker containers every 5 minutes.
+
+    p22c: Also prunes IPC result files older than 24 hours once per hour to
+    prevent indefinite accumulation of result files from long-running deployments.
+    The startup cleanup (main()) only removes files older than 5 minutes from
+    the previous run; this loop catches files that slip through (e.g. the host
+    processes a result but the container writes another before the TTL expires).
+    """
+    _last_ipc_prune: float = 0.0
+    _IPC_PRUNE_INTERVAL = 3600.0   # prune every hour
+    _IPC_PRUNE_MAX_AGE = 86400.0   # remove files older than 24 hours
+
     while not stop_event.is_set():
         try:
             await cleanup_orphans()
         except Exception as exc:
             log.warning("orphan cleanup error: %s", exc)
+
+        # p22c: Periodic IPC result file pruning (hourly, 24h cutoff)
+        if time.time() - _last_ipc_prune >= _IPC_PRUNE_INTERVAL:
+            _last_ipc_prune = time.time()
+            try:
+                import glob as _glob
+                _ipc_base = config.DATA_DIR / "ipc"
+                _cutoff = time.time() - _IPC_PRUNE_MAX_AGE
+                _pruned = 0
+                if _ipc_base.exists():
+                    for _rdir in _ipc_base.glob("*/results"):
+                        for _f in _rdir.glob("*.json"):
+                            try:
+                                if _f.stat().st_mtime < _cutoff:
+                                    _f.unlink()
+                                    _pruned += 1
+                            except Exception:
+                                pass
+                if _pruned:
+                    log.info("IPC result pruning: removed %d file(s) older than 24h", _pruned)
+            except Exception as _prune_exc:
+                log.warning("IPC result pruning failed (non-fatal): %s", _prune_exc)
+
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=300.0)
         except asyncio.TimeoutError:
@@ -1226,6 +1284,14 @@ async def main() -> None:
     _error_notify_lock = asyncio.Lock()  # p15b-fix: serialise rate-limit checks
     _startup_time = time.time()
     _last_heartbeat = _startup_time  # Don't fire heartbeat immediately; wait one full interval
+
+    # p22c: Set up asyncio Queue as message bus for health monitor alerts.
+    # health_monitor.py pushes (issue_key, message) tuples here; the main
+    # polling loop drains the queue and delivers via route_outbound.
+    # maxsize=50 caps memory usage; excess alerts are silently dropped.
+    global _health_alert_queue
+    _health_alert_queue = asyncio.Queue(maxsize=50)
+    _set_hm_alert_queue(_health_alert_queue)
 
     # Heartbeat interval: configurable via env (default 30 min)
     try:

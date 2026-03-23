@@ -1,6 +1,8 @@
 """Telegram channel implementation using python-telegram-bot"""
+import asyncio
 import logging
 import os
+import time
 from typing import Callable, Awaitable, Optional
 from telegram import Update, Bot
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
@@ -8,6 +10,14 @@ from .. import config
 from ..env import read_env_file
 
 log = logging.getLogger(__name__)
+
+# p22c: Silence watchdog threshold.  If no update (message, command, or
+# non-text event) is received for this many seconds, the watchdog will log a
+# warning and attempt to reconnect.  Distinct from the startup retry logic —
+# this catches cases where polling is running but Telegram stops delivering
+# updates (e.g. a silent TCP connection hang).
+_POLL_SILENCE_THRESHOLD_S = 300  # 5 minutes
+
 
 class TelegramChannel:
     name = "telegram"
@@ -18,6 +28,9 @@ class TelegramChannel:
         self._registered_groups = registered_groups
         self._on_setup_command = on_setup_command
         self._app: Optional[Application] = None
+        # p22c: staleness watchdog state
+        self._last_poll_activity: float = time.time()
+        self._watchdog_task: Optional[asyncio.Task] = None
         env = read_env_file(["TELEGRAM_BOT_TOKEN", "TELEGRAM_UPLOAD_TIMEOUT", "TELEGRAM_PROXY"])
         token = env.get("TELEGRAM_BOT_TOKEN", "")
         self._token = token
@@ -71,6 +84,8 @@ class TelegramChannel:
                 async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     if not update.message or not update.message.text:
                         return
+                    # p22c: record activity so the staleness watchdog knows polling is alive.
+                    self._last_poll_activity = time.time()
                     jid = self._jid(update.effective_chat.id)
                     sender = str(update.effective_user.id) if update.effective_user else "unknown"
                     sender_name = update.effective_user.full_name if update.effective_user else "Unknown"
@@ -140,6 +155,8 @@ class TelegramChannel:
                     """Notify users who send non-text messages (Issue #70)."""
                     if not update.effective_chat:
                         return
+                    # p22c: non-text updates also count as poll activity.
+                    self._last_poll_activity = time.time()
                     chat_id = update.effective_chat.id
                     try:
                         await self._app.bot.send_message(
@@ -164,6 +181,12 @@ class TelegramChannel:
                 # restart, maintenance). Without this, every restart re-processes
                 # all queued messages from Telegram's server-side buffer.
                 await self._app.updater.start_polling(drop_pending_updates=True)
+                # p22c: Reset activity timestamp and start staleness watchdog.
+                self._last_poll_activity = time.time()
+                if self._watchdog_task is None or self._watchdog_task.done():
+                    self._watchdog_task = asyncio.create_task(
+                        self._poll_watchdog(), name="telegram-poll-watchdog"
+                    )
                 log.info("Telegram channel connected (pending updates dropped)")
                 return  # success
             except Exception as e:
@@ -194,6 +217,44 @@ class TelegramChannel:
                         f"Telegram connect failed after {MAX_RETRIES} attempts: {type(e).__name__}: {e}"
                     )
                     raise
+
+    async def _poll_watchdog(self) -> None:
+        """p22c: Staleness watchdog for the Telegram long-poll connection.
+
+        Runs as a background task alongside the python-telegram-bot updater.
+        Every 60 seconds it checks whether any update has been received within
+        the last _POLL_SILENCE_THRESHOLD_S seconds.  If not, it logs a warning
+        and attempts to reconnect by calling disconnect() then connect().
+
+        This is separate from the startup retry logic — it catches silent TCP
+        hangs where the updater loop is running but Telegram has stopped
+        delivering updates.  In a healthy group, messages arrive regularly; in
+        quiet groups the watchdog is a safety net that only fires after 5 full
+        minutes of silence.
+        """
+        log.debug("Telegram poll watchdog started (threshold=%ds)", _POLL_SILENCE_THRESHOLD_S)
+        while self._app is not None and self._app.running:
+            await asyncio.sleep(60)
+            if self._app is None or not self._app.running:
+                break
+            silence = time.time() - self._last_poll_activity
+            if silence > _POLL_SILENCE_THRESHOLD_S:
+                log.warning(
+                    "Telegram: no poll activity for %.0fs (threshold=%ds) — "
+                    "attempting reconnect to recover from silent stale connection",
+                    silence, _POLL_SILENCE_THRESHOLD_S,
+                )
+                try:
+                    await self.disconnect()
+                except Exception as _disc_exc:
+                    log.warning("Telegram watchdog: disconnect failed: %s", _disc_exc)
+                try:
+                    await self.connect()
+                except Exception as _conn_exc:
+                    log.error("Telegram watchdog: reconnect failed: %s", _conn_exc)
+                # connect() starts a new watchdog task; this one exits.
+                return
+        log.debug("Telegram poll watchdog exiting (app stopped)")
 
     async def send_message(self, jid: str, text: str) -> None:
         if not self._app:
@@ -274,6 +335,15 @@ class TelegramChannel:
             log.debug(f"Typing indicator failed: {e}")
 
     async def disconnect(self) -> None:
+        # p22c: cancel the staleness watchdog before tearing down the app so it
+        # doesn't try to reconnect during a deliberate shutdown.
+        if self._watchdog_task is not None and not self._watchdog_task.done():
+            self._watchdog_task.cancel()
+            try:
+                await self._watchdog_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._watchdog_task = None
         if not self._app:
             return
         try:
