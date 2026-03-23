@@ -126,6 +126,40 @@ install_python_deps() {
   fi
 }
 
+# --- Build Docker image (optional, runs only when Docker is available) ---
+
+build_docker_image() {
+  IMAGE_OK="false"
+
+  if [ "$DOCKER_OK" = "false" ]; then
+    log "Skipping Docker image build — Docker not available"
+    return
+  fi
+
+  local build_script="$PROJECT_ROOT/container/build.sh"
+  if [ ! -f "$build_script" ]; then
+    err "container/build.sh not found — cannot build Docker image"
+    log "build.sh missing"
+    return
+  fi
+
+  info "Building EvoClaw agent container image (evoclaw-agent:latest)..."
+  log "Running container/build.sh"
+  if bash "$build_script" >> "$LOG_FILE" 2>&1; then
+    # Verify the image actually exists after the build
+    if docker image inspect evoclaw-agent:latest >/dev/null 2>&1; then
+      IMAGE_OK="true"
+      log "Docker image build succeeded: evoclaw-agent:latest"
+    else
+      err "container/build.sh exited 0 but evoclaw-agent:latest not found in local registry"
+      log "Docker image missing after build"
+    fi
+  else
+    err "Docker image build failed — see $LOG_FILE for details"
+    log "container/build.sh failed"
+  fi
+}
+
 # --- Build tools check (optional, for native extensions) ---
 
 check_build_tools() {
@@ -152,6 +186,7 @@ detect_platform
 check_python
 check_docker
 install_python_deps
+build_docker_image
 check_build_tools
 
 # Determine overall status
@@ -162,6 +197,8 @@ elif [ "$DOCKER_OK" = "false" ]; then
   STATUS="docker_missing"
 elif [ "$DEPS_OK" = "false" ]; then
   STATUS="deps_failed"
+elif [ "$IMAGE_OK" = "false" ]; then
+  STATUS="image_build_failed"
 fi
 
 cat <<EOF
@@ -175,6 +212,7 @@ PYTHON_OK:      $PYTHON_OK
 PYTHON_PATH:    ${PYTHON_PATH_FOUND:-not_found}
 DOCKER_OK:      $DOCKER_OK
 DEPS_OK:        $DEPS_OK
+IMAGE_OK:       ${IMAGE_OK:-false}
 HAS_BUILD_TOOLS:$HAS_BUILD_TOOLS
 STATUS:         $STATUS
 LOG:            logs/setup.log
@@ -191,6 +229,9 @@ if [ "$DOCKER_OK" = "false" ]; then
   exit 2
 fi
 if [ "$DEPS_OK" = "false" ]; then
+  exit 1
+fi
+if [ "${IMAGE_OK:-false}" = "false" ] && [ "$DOCKER_OK" = "true" ]; then
   exit 1
 fi
 
