@@ -24,13 +24,28 @@ MOUNT_ALLOWLIST_FILE = CONFIG_DIR / "mount-allowlist.json"
 SENDER_ALLOWLIST_FILE = CONFIG_DIR / "sender-allowlist.json"
 
 
-def _env_int(key: str, default: int) -> int:
+def _env_int(key: str, default: int, minimum: int | None = None) -> int:
+    """Parse an integer env var, falling back to *default* on bad input.
+
+    BUG-CFG-01 / BUG-CFG-02 FIX: Added optional *minimum* parameter.  When
+    provided, values below the minimum are rejected and the default is used
+    instead.  This prevents zero/negative values for settings like
+    MAX_CONCURRENT_CONTAINERS (which would deadlock the queue) or poll
+    intervals (which would create tight CPU-burning loops).
+    """
     try:
-        return int(os.environ.get(key, default))
+        val = int(os.environ.get(key, default))
     except (ValueError, TypeError):
         import logging
         logging.getLogger(__name__).warning("Invalid value for %s, using default %d", key, default)
         return default
+    if minimum is not None and val < minimum:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Value %d for %s is below minimum %d, using default %d", val, key, minimum, default
+        )
+        return default
+    return val
 
 
 # Assistant
@@ -38,9 +53,11 @@ ASSISTANT_NAME = os.environ.get("ASSISTANT_NAME", "Eve")
 TRIGGER_PATTERN = re.compile(rf"^@{re.escape(ASSISTANT_NAME)}\b", re.IGNORECASE)
 
 # Polling
-POLL_INTERVAL = _env_int("POLL_INTERVAL", 2000) / 1000  # seconds
-SCHEDULER_POLL_INTERVAL = _env_int("SCHEDULER_POLL_INTERVAL", 60000) / 1000
-IPC_POLL_INTERVAL = _env_int("IPC_POLL_INTERVAL", 1000) / 1000
+# BUG-CFG-02 FIX: enforce minimum of 100 ms (0.1 s) for all poll intervals.
+# A value of 0 (or negative) produces a tight busy-loop that pegs the CPU.
+POLL_INTERVAL = _env_int("POLL_INTERVAL", 2000, minimum=100) / 1000  # seconds
+SCHEDULER_POLL_INTERVAL = _env_int("SCHEDULER_POLL_INTERVAL", 60000, minimum=100) / 1000
+IPC_POLL_INTERVAL = _env_int("IPC_POLL_INTERVAL", 1000, minimum=100) / 1000
 
 # Container
 CONTAINER_IMAGE = os.environ.get("CONTAINER_IMAGE", "evoclaw-agent:latest")
@@ -51,7 +68,10 @@ CONTAINER_IMAGE = os.environ.get("CONTAINER_IMAGE", "evoclaw-agent:latest")
 # Override via env: CONTAINER_TIMEOUT=60000  (60 s, useful for fast-response groups)
 CONTAINER_TIMEOUT = _env_int("CONTAINER_TIMEOUT", 30 * 60 * 1000) / 1000
 IDLE_TIMEOUT = _env_int("IDLE_TIMEOUT", 30 * 60 * 1000) / 1000
-MAX_CONCURRENT_CONTAINERS = _env_int("MAX_CONCURRENT_CONTAINERS", 5)
+# BUG-CFG-01 FIX: enforce minimum of 1.  A value of 0 or negative makes the
+# concurrency check (self._active_count >= MAX_CONCURRENT_CONTAINERS) always
+# True so no container ever runs and all work is queued forever.
+MAX_CONCURRENT_CONTAINERS = _env_int("MAX_CONCURRENT_CONTAINERS", 5, minimum=1)
 # Per-container resource limits (Issue #61): prevent runaway agents from OOM-killing the host.
 # Set to empty string "" to disable the limit (e.g. CONTAINER_MEMORY="" CONTAINER_CPUS="").
 CONTAINER_MEMORY = os.environ.get("CONTAINER_MEMORY", "512m")

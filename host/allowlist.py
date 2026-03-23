@@ -80,12 +80,29 @@ def is_sender_allowed(sender_id: str, allowlist: set[str]) -> bool:
     - {""}  sentinel: deny all (allowlist could not be loaded and
       SENDER_ALLOWLIST_ALLOW_ALL_IF_MISSING is false).
 
-    BUG-AL-2 FIX: Normalise sender_id to strip whitespace before lookup to
-    prevent trivial bypasses via e.g. sender_id=" 123456" vs "123456".
+    BUG-AL-02 FIX: Guard against non-string sender_id (e.g. None) which would
+    crash with AttributeError on .strip().  Treat non-strings as denied when
+    the allowlist is active.
+
+    BUG-AL-01 FIX: The deny-all sentinel {""} (a set containing the empty
+    string) was bypassable when sender_id is "" or whitespace-only because
+    "".strip() == "" which matches the sentinel entry.  Fix: reject empty /
+    whitespace-only sender IDs explicitly before the allowlist lookup so they
+    can never match the sentinel entry and be incorrectly permitted.
     """
     if not allowlist:
         return True  # empty set = allow-all mode
-    return sender_id.strip() in allowlist
+    # BUG-AL-02 FIX: reject non-string sender_id safely
+    if not isinstance(sender_id, str):
+        log.warning("is_sender_allowed: non-string sender_id %r — denying", sender_id)
+        return False
+    normalized = sender_id.strip()
+    # BUG-AL-01 FIX: an empty/whitespace-only sender_id must always be denied
+    # when an allowlist is active — it is never a valid real sender identifier
+    # and it coincidentally matches the deny-all sentinel entry "".
+    if not normalized:
+        return False
+    return normalized in allowlist
 
 
 def load_mount_allowlist() -> list[str]:

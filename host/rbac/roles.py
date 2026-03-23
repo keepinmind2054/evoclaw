@@ -175,7 +175,16 @@ class RBACStore:
             rows = self._conn.execute(
                 "SELECT role FROM rbac_grants WHERE subject_id=?", (subject_id,)
             ).fetchall()
-        roles = {Role(r[0]) for r in rows}
+        # BUG-RBAC-01 FIX: Role(r[0]) raises ValueError for unknown role strings
+        # (e.g. from DB corruption or a future schema that added a new role).
+        # Skip unknown values and log a warning rather than crashing the
+        # permission check — fail-safe is to deny the unknown role's permissions.
+        roles = set()
+        for r in rows:
+            try:
+                roles.add(Role(r[0]))
+            except ValueError:
+                logger.warning("RBAC: unknown role value %r for subject %r — skipping", r[0], subject_id)
         self._set_cached_roles(subject_id, roles)
         return roles
 
@@ -228,10 +237,21 @@ class RBACStore:
             rows = self._conn.execute(
                 "SELECT subject_id, role, granted_by, granted_at FROM rbac_grants"
             ).fetchall()
-        return [RBACEntry(r[0], Role(r[1]), r[2], r[3]) for r in rows]
+        # BUG-RBAC-01 FIX: skip rows with unknown role values (same as get_roles fix).
+        entries = []
+        for r in rows:
+            try:
+                entries.append(RBACEntry(r[0], Role(r[1]), r[2], r[3]))
+            except ValueError:
+                logger.warning("RBAC: unknown role value %r for subject %r in list_grants — skipping", r[1], r[0])
+        return entries
 
     def close(self):
-        self._conn.close()
+        # BUG-RBAC-02 FIX: acquire self._lock before closing the connection so
+        # that any in-flight query that already holds the lock can finish before
+        # the connection is torn down, preventing a ProgrammingError race.
+        with self._lock:
+            self._conn.close()
 
 
 def require_permission(rbac: RBACStore, subject_id: str, permission: Permission) -> bool:

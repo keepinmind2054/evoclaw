@@ -330,6 +330,13 @@ class GroupQueue:
         async def _retry():
             await asyncio.sleep(delay)
             if not self._shutting_down:
+                # BUG-GQ-01 FIX: Reset retry_count to 0 before calling
+                # enqueue_message_check.  Without this, the guard
+                # ``if state.retry_count > 0: return`` in enqueue_message_check
+                # fires immediately and prevents the retry from starting a new
+                # container, permanently deadlocking the group's message queue.
+                _s = self._get_group(group_jid)
+                _s.retry_count = 0
                 self.enqueue_message_check(group_jid)
 
         t = asyncio.create_task(_retry(), name=f"retry-{group_jid}")
@@ -407,6 +414,18 @@ class GroupQueue:
                 )
                 t.add_done_callback(_task_done_callback)
             elif state.pending_messages:
+                # BUG-GQ-02 FIX: honour the exponential-backoff circuit breaker.
+                # _drain_group already checks retry_count before dispatching
+                # pending_messages; _drain_waiting must do the same.  Without
+                # this guard a group that failed and is waiting for its backoff
+                # delay can slip out of _waiting_groups and get a new container
+                # immediately, bypassing the circuit breaker entirely.
+                if state.retry_count > 0:
+                    log.debug(
+                        "[%s] Retry pending in drain_waiting — deferring message processing",
+                        next_jid,
+                    )
+                    continue
                 # Fix: _run_for_group clears pending_messages at the start of its
                 # execution, but between here and there another call could observe
                 # pending_messages=True and enqueue a duplicate run.  Clear it now
