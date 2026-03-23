@@ -267,6 +267,42 @@ class BotRegistry:
             logger.info("BotRegistry: purged %d stale (untrusted) bot(s)", removed)
         return removed
 
+    def purge_stale_handshakes(self, max_age_secs: float = _NONCE_TTL_SECS * 2) -> int:
+        """Remove old handshake rows from the bot_handshakes table and evict
+        corresponding entries from the in-memory _pending_handshakes dict.
+
+        BUG-18C-04 (MEDIUM): The bot_handshakes table is written on every
+        initiate_handshake() call but rows are never deleted — they accumulate
+        indefinitely even for completed, expired, or abandoned handshakes.
+        Concurrently, the in-memory _pending_handshakes dict prunes its *value
+        lists* (timestamps) on each initiate call, but it never removes *keys*
+        (target_id entries).  Over time, every unique target_id seen since
+        process start lingers in that dict, causing a slow memory leak.
+
+        This method should be called periodically (e.g. once per hour).
+        Returns the number of DB rows deleted.
+        """
+        cutoff = time.time() - max_age_secs
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM bot_handshakes WHERE initiated_at < ? AND status IN ('completed','expired')",
+                (cutoff,),
+            )
+            self._conn.commit()
+            # Evict keys with empty timestamp lists from _pending_handshakes to
+            # prevent the dict from accumulating one key per unique target_id
+            # seen since process start.
+            stale_keys = [
+                k for k, v in list(self._pending_handshakes.items())
+                if not v
+            ]
+            for k in stale_keys:
+                del self._pending_handshakes[k]
+        removed = cur.rowcount
+        if removed:
+            logger.info("BotRegistry: purged %d stale handshake row(s)", removed)
+        return removed
+
     def _row_to_identity(self, row) -> BotIdentity:
         d = dict(zip(self._BOT_COLS, row))
         d["capabilities"] = json.loads(d.get("capabilities") or "[]")
