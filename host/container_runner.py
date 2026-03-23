@@ -563,7 +563,7 @@ async def run_container_agent(
         config.CONTAINER_IMAGE,
     ]
 
-    log.info(f"Starting container {container_name} for group {folder} (run_id={run_id})")
+    log.info("Starting container %s for group %s (run_id=%s)", container_name, folder, run_id)
     _started_at = time.monotonic()
     db.log_container_start(run_id, jid, folder, container_name, time.time())
 
@@ -593,7 +593,7 @@ async def run_container_agent(
                 )
                 return r.stdout, r.stderr
 
-            log.debug(f"[DEBUG] Running docker in thread (Windows mode)...")
+            log.debug("[DEBUG] Running docker in thread (Windows mode)...")
             try:
                 stdout_data, stderr_data = await asyncio.to_thread(_sync_docker_run)
             except _subprocess.TimeoutExpired:
@@ -601,9 +601,9 @@ async def run_container_agent(
                 # so it would fall through to the generic Exception handler and produce
                 # a confusing error message.  Re-raise as asyncio.TimeoutError so the
                 # timeout handler below fires with the correct Chinese message.
-                log.error(f"Container {folder} timed out after {config.CONTAINER_TIMEOUT}s (Windows)")
+                log.error("Container %s timed out after %ds (Windows)", folder, config.CONTAINER_TIMEOUT)
                 raise asyncio.TimeoutError()
-            log.debug(f"[DEBUG] Docker thread returned. stdout={len(stdout_data)}b stderr={len(stderr_data)}b")
+            log.debug("[DEBUG] Docker thread returned. stdout=%db stderr=%db", len(stdout_data), len(stderr_data))
         else:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -690,9 +690,9 @@ async def run_container_agent(
         stdout = stdout_data.decode(errors="replace")
         stderr = stderr_data.decode(errors="replace")
 
-        log.debug(f"[DEBUG] Container stdout preview: {stdout[:200]!r}")
+        log.debug("[DEBUG] Container stdout preview: %r", stdout[:200])
         if stderr:
-            log.debug(f"[DEBUG] Container stderr: {_redact_secrets(stderr[:500])}")
+            log.debug("[DEBUG] Container stderr: %s", _redact_secrets(stderr[:500]))
 
         # 從 stdout 中尋找輸出標記，截取 JSON 結果
         # agent 可能在標記前後有其他 debug 輸出，只取標記之間的部分。
@@ -932,7 +932,7 @@ async def run_container_agent(
 
     except asyncio.TimeoutError:
         # 超時：強制停止 container，避免佔用資源；不呼叫 on_success
-        log.error(f"Container {folder} timed out after {config.CONTAINER_TIMEOUT}s")
+        log.error("Container %s timed out after %ds", folder, config.CONTAINER_TIMEOUT)
         await _stop_container(container_name)
         # 記錄超時失敗數據（適應度扣分）
         _timeout_ms = int(config.CONTAINER_TIMEOUT * 1000)
@@ -964,7 +964,7 @@ async def run_container_agent(
             pass
         raise  # Must re-raise CancelledError
     except Exception as e:
-        log.error(f"Container {folder} error: {e}")
+        log.error("Container %s error: %s", folder, e)
         response_ms = int((time.time() - t0) * 1000)
         # 記錄異常失敗數據
         record_run(jid, run_id, response_ms, retry_count=0, success=False)
@@ -1067,4 +1067,4 @@ async def cleanup_orphans() -> None:
     except asyncio.TimeoutError:
         log.warning("cleanup_orphans timed out — Docker may be slow; orphans may remain")
     except Exception as e:
-        log.warning(f"Orphan cleanup failed: {e}")
+        log.warning("Orphan cleanup failed: %s", e)

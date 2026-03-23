@@ -89,6 +89,21 @@ def _log(tag: str, msg: str = "") -> None:
     print(f"[{ts}] {tag} {msg}", file=sys.stderr, flush=True)
 
 
+def _atomic_ipc_write(fname: Path, data: str) -> None:
+    """Atomically write *data* to *fname* via a .tmp sibling file.
+
+    All IPC tool functions produce JSON files consumed by the host's
+    ipc_watcher.  If the file is written non-atomically (direct write_text)
+    the host may read a partial JSON when the inotify CREATE event fires
+    before the write completes.  This helper centralises the
+    ``tmp = fname.with_suffix('.tmp'); tmp.write_text(...); tmp.rename(fname)``
+    pattern that previously appeared 10+ times across tool implementations.
+    """
+    tmp = fname.with_suffix(".tmp")
+    tmp.write_text(data, encoding="utf-8")
+    tmp.rename(fname)  # POSIX rename() is atomic
+
+
 class _KeyPool:
     """Round-robin key rotation pool with per-key failure tracking."""
 
@@ -484,10 +499,7 @@ def tool_send_message(chat_jid: str, text: str, sender: str = None) -> str:
         payload = {"type": "message", "chatJid": chat_jid, "text": text}
         if sender:
             payload["sender"] = sender  # 可選的發送者名稱（顯示為不同的 bot 身份）
-        # Atomic write: write to .tmp then rename to avoid host reading partial JSON
-        tmp = fname.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        tmp.rename(fname)  # POSIX rename() is atomic
+        _atomic_ipc_write(fname, json.dumps(payload))
         _log("📨 IPC", f"type=message → {fname.name}")
         return "Message sent"
     except Exception as e:
@@ -516,10 +528,7 @@ def tool_schedule_task(prompt: str, schedule_type: str, schedule_value: str, con
             "context_mode": context_mode,      # "group" 或 "isolated"
             "chatJid": chat_jid,              # 群組 JID，讓 ipc_watcher 存入 DB 供排程器路由使用
         })
-        # Atomic write: write to .tmp then rename
-        tmp = fname.with_suffix(".tmp")
-        tmp.write_text(payload, encoding="utf-8")
-        tmp.rename(fname)
+        _atomic_ipc_write(fname, payload)
         _log("📨 IPC", f"type=schedule_task → {fname.name}")
         return "Task scheduled"
     except Exception as e:
@@ -551,10 +560,7 @@ def tool_cancel_task(task_id: str) -> str:
         # to prevent filename collision when two cancel calls land in the same millisecond.
         _uid = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
         fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-{_uid}-cancel.json"
-        payload = json.dumps({"type": "cancel_task", "task_id": task_id})
-        tmp = fname.with_suffix(".tmp")
-        tmp.write_text(payload, encoding="utf-8")
-        tmp.rename(fname)  # POSIX rename() is atomic
+        _atomic_ipc_write(fname, json.dumps({"type": "cancel_task", "task_id": task_id}))
         return f"Task {task_id} cancellation request sent."
     except Exception as e:
         return f"Error: {e}"
@@ -571,10 +577,7 @@ def tool_pause_task(task_id: str) -> str:
         # P16B-FIX-2: add random uid suffix to prevent filename collision.
         _uid = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
         fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-{_uid}-pause.json"
-        payload = json.dumps({"type": "pause_task", "task_id": task_id})
-        tmp = fname.with_suffix(".tmp")
-        tmp.write_text(payload, encoding="utf-8")
-        tmp.rename(fname)  # POSIX rename() is atomic
+        _atomic_ipc_write(fname, json.dumps({"type": "pause_task", "task_id": task_id}))
         return f"Task {task_id} pause request sent."
     except Exception as e:
         return f"Error: {e}"
@@ -591,10 +594,7 @@ def tool_resume_task(task_id: str) -> str:
         # P16B-FIX-2: add random uid suffix to prevent filename collision.
         _uid = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
         fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-{_uid}-resume.json"
-        payload = json.dumps({"type": "resume_task", "task_id": task_id})
-        tmp = fname.with_suffix(".tmp")
-        tmp.write_text(payload, encoding="utf-8")
-        tmp.rename(fname)  # POSIX rename() is atomic
+        _atomic_ipc_write(fname, json.dumps({"type": "resume_task", "task_id": task_id}))
         return f"Task {task_id} resume request sent."
     except Exception as e:
         return f"Error: {e}"
@@ -614,17 +614,12 @@ def tool_run_agent(prompt: str, context_mode: str = "isolated") -> str:
         Path(IPC_RESULTS_DIR).mkdir(parents=True, exist_ok=True)
 
         fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-spawn.json"
-        # p15b-fix: atomic write (tmp+rename) so the host never reads a partial JSON
-        # when the inotify CREATE event fires before the write completes.
-        _spawn_payload = json.dumps({
+        _atomic_ipc_write(fname, json.dumps({
             "type": "spawn_agent",
             "requestId": request_id,
             "prompt": prompt,
             "context_mode": context_mode,
-        })
-        _spawn_tmp = fname.with_suffix(".tmp")
-        _spawn_tmp.write_text(_spawn_payload, encoding="utf-8")
-        _spawn_tmp.rename(fname)
+        }))
 
         # Poll for result (up to 300 seconds)
         output_path = Path(IPC_RESULTS_DIR) / f"{request_id}.json"
@@ -669,10 +664,7 @@ def tool_send_file(chat_jid: str = "", file_path: str = "", caption: str = "") -
     }
     Path(IPC_MESSAGES_DIR).mkdir(parents=True, exist_ok=True)
     msg_file = Path(IPC_MESSAGES_DIR) / f"file_{int(time.time()*1000)}_{os.getpid()}.json"
-    # Atomic write: write to .tmp then rename to avoid host reading partial JSON
-    tmp_msg = msg_file.with_suffix(".tmp")
-    tmp_msg.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    tmp_msg.rename(msg_file)  # POSIX rename() is atomic
+    _atomic_ipc_write(msg_file, json.dumps(payload, ensure_ascii=False))
     _log("📎 FILE", f"path={file_path} exists={os.path.exists(file_path)}")
     _log("📨 IPC", f"type=send_file → {msg_file.name}")
     return f"✅ File queued: {os.path.basename(file_path)}"
@@ -690,15 +682,11 @@ def tool_start_remote_control(chat_jid: str = "", sender: str = "") -> str:
         Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
         uid = str(uuid.uuid4())[:8]
         fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-remote-control-{uid}.json"
-        # p15b-fix: atomic write so inotify never sees a partial file
-        _rc_payload = json.dumps({
+        _atomic_ipc_write(fname, json.dumps({
             "type": "start_remote_control",
             "jid": effective_jid,
             "sender": sender,
-        })
-        _rc_tmp = fname.with_suffix(".tmp")
-        _rc_tmp.write_text(_rc_payload, encoding="utf-8")
-        _rc_tmp.rename(fname)
+        }))
         _log("📨 IPC", f"type=start_remote_control jid={effective_jid} → {fname.name}")
         return "Remote control session requested — URL will be sent to this chat shortly (up to 30s)."
     except Exception as exc:
@@ -714,14 +702,10 @@ def tool_self_update(chat_jid: str = "") -> str:
         Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
         uid = str(uuid.uuid4())[:8]
         fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-self-update-{uid}.json"
-        # p15b-fix: atomic write so inotify never sees a partial file
-        _su_payload = json.dumps({
+        _atomic_ipc_write(fname, json.dumps({
             "type": "self_update",
             "jid": effective_jid,
-        })
-        _su_tmp = fname.with_suffix(".tmp")
-        _su_tmp.write_text(_su_payload, encoding="utf-8")
-        _su_tmp.rename(fname)
+        }))
         _log("📨 IPC", f"type=self_update jid={effective_jid} → {fname.name}")
         return "Self-update requested — EvoClaw will pull latest code and restart shortly."
     except Exception as exc:
@@ -1666,12 +1650,7 @@ def _execute_tool_inner(name: str, args: dict, chat_jid: str) -> str:
             Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
             uid = str(uuid.uuid4())[:8]
             fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-reset-{uid}.json"
-            # P16B-FIX-1: use atomic write (tmp+rename) consistent with all other IPC writes.
-            # A direct write_text() risks the host's inotify handler reading a partial JSON
-            # if the OS flushes the file mid-write (e.g. on a slow volume mount).
-            _reset_tmp = fname.with_suffix(".tmp")
-            _reset_tmp.write_text(json.dumps({"type": "reset_group", "jid": target_jid}), encoding="utf-8")
-            _reset_tmp.rename(fname)  # POSIX rename() is atomic
+            _atomic_ipc_write(fname, json.dumps({"type": "reset_group", "jid": target_jid}))
             _log("📨 IPC", f"type=reset_group jid={target_jid} → {fname.name}")
             return f"reset_group IPC sent for {target_jid} — fail counters will be cleared on next host poll cycle"
         except Exception as exc:
