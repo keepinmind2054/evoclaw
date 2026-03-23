@@ -734,8 +734,11 @@ def restore_remote_control() -> None:
             log.info("Restored remote-control session pid=%s url=%s", pid, url)
         else:
             _rc_state_file().unlink(missing_ok=True)
-    except Exception:
-        pass
+    except Exception as exc:
+        # BUG-19D-04 (LOW): was bare pass — log at debug so startup state
+        # restore failures are visible without being noisy on fresh installs
+        # (state file simply does not exist yet on first run).
+        log.debug("restore_remote_control: could not restore state: %s", exc)
 
 
 async def _run_start_remote_control(jid: str, sender: str, route_fn: Callable) -> None:
@@ -956,8 +959,10 @@ def _find_parent_container(group_folder: str) -> str | None:
         if candidates:
             # 取最早啟動的（started_at 最小）
             return min(candidates, key=lambda x: x["started_at"])["name"]
-    except Exception:
-        pass
+    except Exception as exc:
+        # BUG-19D-04 (LOW): was bare pass — log at debug so lookup errors
+        # are traceable without being noisy in normal operation.
+        log.debug("_find_parent_container(%r) failed: %s", group_folder, exc)
     return None
 
 
@@ -1132,13 +1137,18 @@ def _compute_next_run(schedule_type: str, schedule_value: str) -> int | None:
             from datetime import datetime
             dt = datetime.fromisoformat(schedule_value)
             return int(dt.timestamp() * 1000)
-        except Exception:
+        except Exception as exc:
+            # BUG-19D-05 (LOW): silent parse failures make it impossible to
+            # diagnose why a scheduled task never fires.  Log at warning so
+            # operators can spot misconfigured schedule_value strings.
+            log.warning("_compute_next_run: invalid 'once' value %r: %s", schedule_value, exc)
             return None
     elif schedule_type == "interval":
         try:
             # schedule_value 單位是毫秒，直接加到現在時間上
             return now_ms + int(schedule_value)
-        except Exception:
+        except Exception as exc:
+            log.warning("_compute_next_run: invalid 'interval' value %r: %s", schedule_value, exc)
             return None
     elif schedule_type == "cron":
         try:
@@ -1146,7 +1156,8 @@ def _compute_next_run(schedule_type: str, schedule_value: str) -> int | None:
             # croniter(cron_expr, start_time) 計算 start_time 之後的下次執行時間
             c = croniter(schedule_value, time.time())
             return int(c.get_next() * 1000)
-        except Exception:
+        except Exception as exc:
+            log.warning("_compute_next_run: invalid 'cron' expression %r: %s", schedule_value, exc)
             return None
     return None
 

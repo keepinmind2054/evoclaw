@@ -179,7 +179,9 @@ def _check_memory_usage() -> None:
                 "memory_usage"
             )
     except Exception as e:
-        log.debug(f"Failed to check memory usage: {e}")
+        # BUG-19D-01 (MEDIUM): was debug — raised to warning so memory check
+        # failures are visible in production logs.
+        log.warning("Failed to check memory usage: %s", e)
 
 
 def _check_database_size() -> None:
@@ -188,7 +190,7 @@ def _check_database_size() -> None:
         db_path = config.STORE_DIR / "messages.db"
         if db_path.exists():
             size_mb = db_path.stat().st_size / 1024 / 1024  # 轉換為 MB
-            
+
             if size_mb >= DB_SIZE_WARNING_MB:
                 _send_warning_sync(
                     "warning",
@@ -196,7 +198,9 @@ def _check_database_size() -> None:
                     "db_size"
                 )
     except Exception as e:
-        log.debug(f"Failed to check database size: {e}")
+        # BUG-19D-01 (MEDIUM): was debug — raised to warning so DB-size check
+        # failures are visible in production logs.
+        log.warning("Failed to check database size: %s", e)
 
 
 async def _check_group_activity() -> None:
@@ -222,7 +226,9 @@ async def _check_group_activity() -> None:
                             f"group_inactive_{jid}"
                         )
     except Exception as e:
-        log.debug(f"Failed to check group activity: {e}")
+        # BUG-19D-01 (MEDIUM): was debug — raised to warning so group-activity
+        # check failures are visible in production logs.
+        log.warning("Failed to check group activity: %s", e)
 
 
 async def _send_warning(level: str, message: str, warning_id: str) -> None:

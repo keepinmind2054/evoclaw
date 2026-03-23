@@ -23,3 +23,20 @@ jobs:
 
       - name: Tests
         run: npx vitest run
+
+  # BUG-19D-06 (HIGH): Python tests were never run in CI.  A logging,
+  # health-check, or error-recovery regression in the host/ package would
+  # only be caught in production.  Add a dedicated Python test job so every
+  # PR is validated against the test suite.
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install Python dependencies
+        run: pip install -r host/requirements.txt pytest pytest-asyncio || true
+      - name: Run Python tests
+        run: python -m pytest tests/ -v --tb=short
