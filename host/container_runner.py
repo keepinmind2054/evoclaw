@@ -556,6 +556,21 @@ async def run_container_agent(
         cmd += ["--memory", config.CONTAINER_MEMORY, "--memory-swap", config.CONTAINER_MEMORY]
     if config.CONTAINER_CPUS:
         cmd += ["--cpus", config.CONTAINER_CPUS]
+    # ── Container log size limit (BUG-19B-01) ─────────────────────────────────
+    # Without --log-opt max-size Docker accumulates container log files on the
+    # host indefinitely.  A long-running or verbose container (especially one
+    # calling tool_write in a loop) can fill the host disk via the Docker
+    # json-file log driver.  Cap at 10 MB per container with a single rotation
+    # file so operators can still read the last chunk of output while disk usage
+    # is bounded.
+    cmd += ["--log-opt", f"max-size={config.CONTAINER_LOG_MAX_SIZE}",
+            "--log-opt", f"max-file={config.CONTAINER_LOG_MAX_FILES}"]
+    # ── Writable /tmp bounded via tmpfs (BUG-19B-02) ──────────────────────────
+    # The container writes /tmp/input.json at startup (entrypoint.sh) and may
+    # accumulate other temporary files during a run.  Without a size cap a
+    # runaway agent can fill the host's overlay storage via the container layer.
+    # Mount a dedicated tmpfs so /tmp is memory-backed and size-limited.
+    cmd += ["--tmpfs", f"/tmp:size={config.CONTAINER_TMPFS_SIZE},mode=1777"]
     if uid is not None and gid is not None:
         cmd += ["--user", f"{uid}:{gid}"]
     cmd += [
@@ -987,26 +1002,39 @@ async def run_container_agent(
             _active_containers.pop(container_name, None)
 
 async def _stop_container(name: str) -> None:
-    """發送 docker kill 指令立即停止指定 container（超時時呼叫）。
-    使用 docker kill（SIGKILL）而非 docker stop --time 10（先 SIGTERM 再等 10s），
-    以確保 shutdown 時不額外阻塞 10 秒。
+    """Stop a container on timeout using a two-phase SIGTERM → SIGKILL sequence.
 
-    Fix: if docker kill fails (e.g. container already exited but --rm hasn't
-    cleaned it up yet, or Docker daemon hiccup), fall back to docker rm -f so
-    the container name is always freed and no orphan resource is left behind.
+    BUG-19B-03 FIX: previously this function issued docker kill (SIGKILL)
+    immediately, giving the agent process no opportunity to flush its output
+    buffers, close open files, or write a partial result to the IPC results
+    directory.  A sudden SIGKILL can corrupt in-progress writes to the shared
+    workspace volume.
+
+    New behaviour:
+      1. docker stop --time <grace> sends SIGTERM and waits up to
+         CONTAINER_STOP_GRACE_SECS for a clean exit.
+      2. If the container has not exited within the grace period Docker sends
+         SIGKILL automatically — no second command is needed.
+      3. If docker stop itself fails (container already gone, daemon hiccup)
+         we fall back to docker rm -f to free the name slot.
+
+    The grace period is intentionally short (default 5 s) so a timed-out
+    container does not delay shutdown by more than 5 extra seconds.
     """
-    _kill_ok = False
+    _stop_grace = str(config.CONTAINER_STOP_GRACE_SECS)
+    _stop_ok = False
     try:
         proc = await asyncio.create_subprocess_exec(
-            "docker", "kill", name,
+            "docker", "stop", "--time", _stop_grace, name,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        await asyncio.wait_for(proc.wait(), timeout=5.0)
-        _kill_ok = (proc.returncode == 0)
+        # Wait slightly longer than the grace period so the SIGKILL has time to fire.
+        await asyncio.wait_for(proc.wait(), timeout=int(_stop_grace) + 3.0)
+        _stop_ok = (proc.returncode == 0)
     except Exception as _ke:
-        log.debug("docker kill %s failed (%s) — attempting docker rm -f fallback", name, _ke)
-    if not _kill_ok:
+        log.debug("docker stop %s failed (%s) — attempting docker rm -f fallback", name, _ke)
+    if not _stop_ok:
         # Fallback: force-remove the container so the name slot and resources are freed.
         try:
             rm_proc = await asyncio.create_subprocess_exec(
