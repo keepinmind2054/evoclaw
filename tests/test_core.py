@@ -249,23 +249,32 @@ class TestRouter:
             router._channels.extend(original)
 
     def test_format_messages_empty(self):
+        # TEST-01 FIX: format_messages(messages, timezone) requires a timezone arg
+        # and returns an XML string, not a list.  Old test called with one arg
+        # and asserted wrong return type — would raise TypeError.
         from host.router import format_messages
-        result = format_messages([])
-        assert isinstance(result, list)
-        assert result == []
+        result = format_messages([], "UTC")
+        assert isinstance(result, str)
+        assert "<messages>" in result
+        assert "</messages>" in result
 
     def test_format_messages_structures_history(self):
+        # TEST-01 FIX: function returns an XML string, not a list of dicts with
+        # "role" keys.  Old assertion `assert "user" in roles or len(result) > 0`
+        # was an always-pass tautology because result is never empty.
+        # Updated to call with correct signature and assert actual XML content.
         from host.router import format_messages
         msgs = [
-            {"sender": "user1", "content": "Hello", "is_from_me": False, "timestamp": 1000},
-            {"sender": "bot",   "content": "Hi!",   "is_from_me": True,  "timestamp": 2000},
+            {"sender": "user1", "sender_name": "Alice", "content": "Hello", "is_from_me": False, "timestamp": 1_000_000},
+            {"sender": "bot",   "sender_name": "Bot",   "content": "Hi!",   "is_from_me": True,  "timestamp": 2_000_000},
         ]
-        result = format_messages(msgs)
-        assert isinstance(result, list)
-        assert len(result) == 2
-        # User message should be "user" role, bot should be "assistant"
-        roles = {m.get("role") for m in result}
-        assert "user" in roles or len(result) > 0  # structure check
+        result = format_messages(msgs, "UTC")
+        assert isinstance(result, str)
+        # XML structure: each message appears as a <message> tag
+        assert result.count("<message ") == 2
+        assert "Alice" in result
+        assert "Hello" in result
+        assert "Hi!" in result
 
     @pytest.mark.asyncio
     async def test_route_outbound_sends_via_channel(self):
@@ -364,8 +373,14 @@ class TestIpcPermissions:
 # ── Health Monitor ────────────────────────────────────────────────────────────
 
 class TestHealthMonitor:
+    # TEST-05 FIX: health_monitor imports psutil at module level; it is not a
+    # dev-dependency so it is absent in CI.  Guard the import with pytest.importorskip
+    # so that missing psutil causes a SKIP (clearly visible) rather than an
+    # obscure ImportError that masks where the problem is.
+
     def test_get_health_status_returns_dict(self, fresh_db):
         """get_health_status() should return a dict with status key."""
+        pytest.importorskip("psutil", reason="psutil not installed — install with: pip install psutil")
         from host.health_monitor import get_health_status
         result = get_health_status()
         assert isinstance(result, dict)
@@ -374,6 +389,7 @@ class TestHealthMonitor:
 
     def test_should_send_warning_first_time(self):
         """Warning should be sent if it's never been sent before."""
+        pytest.importorskip("psutil", reason="psutil not installed")
         from host.health_monitor import _should_send_warning, _last_warnings
         unique_id = f"test_warn_{uuid.uuid4().hex}"
         # Ensure it's not in the dict
@@ -382,6 +398,7 @@ class TestHealthMonitor:
 
     def test_should_not_send_warning_within_cooldown(self):
         """Warning should be suppressed if sent recently."""
+        pytest.importorskip("psutil", reason="psutil not installed")
         from host.health_monitor import _should_send_warning, _last_warnings
         from datetime import datetime
         unique_id = f"test_cooldown_{uuid.uuid4().hex}"
@@ -392,6 +409,7 @@ class TestHealthMonitor:
     @pytest.mark.asyncio
     async def test_health_monitor_loop_stops_on_event(self):
         """health_monitor_loop should exit when stop_event is set."""
+        pytest.importorskip("psutil", reason="psutil not installed")
         from host.health_monitor import health_monitor_loop
         stop = asyncio.Event()
         stop.set()  # Already set — should exit immediately
@@ -409,7 +427,10 @@ class TestDevLogHelpers:
         cfg_module.DATA_DIR = tmp_path
 
         try:
-            sid = "dev_test_123"
+            # TEST-04 FIX: session IDs must match ^dev_[0-9]+_[0-9a-f]{6}$ or
+            # _sanitize_session_id() rejects them.  Old IDs ("dev_test_123")
+            # failed validation causing get_dev_logs to return [] silently.
+            sid = "dev_1700000001_ab12ef"
             _write_dev_log(sid, "Stage started")
             _write_dev_log(sid, "Stage completed")
             lines = get_dev_logs(sid, offset=0)
@@ -426,7 +447,8 @@ class TestDevLogHelpers:
         cfg_module.DATA_DIR = tmp_path
 
         try:
-            sid = "dev_offset_test"
+            # TEST-04 FIX: use a session_id that passes _sanitize_session_id validation.
+            sid = "dev_1700000002_cd34ab"
             for i in range(5):
                 _write_dev_log(sid, f"Line {i}")
             lines = get_dev_logs(sid, offset=3)
