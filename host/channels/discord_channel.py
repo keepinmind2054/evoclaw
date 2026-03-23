@@ -63,6 +63,23 @@ class DiscordChannel:
             self._connected = True
             log.info("Discord channel connected as %s", self._client.user)
 
+        # Capture the main event loop NOW (before the background thread starts)
+        # so the on_message handler can forward callbacks to it.
+        # p17c BUG-FIX (CRITICAL): the Discord client runs its own event loop in
+        # a background thread (self._loop).  When discord.py calls the on_message
+        # handler it runs on self._loop.  If on_message_callback (_on_message in
+        # main.py) is awaited directly on self._loop, every asyncio.create_task()
+        # call inside it schedules work on the Discord loop — not the main
+        # application loop.  GroupQueue tasks, dedup checks, route_outbound, and
+        # all other coroutines in the pipeline then execute on the wrong loop,
+        # breaking per-group serialization and causing RuntimeError when tasks try
+        # to access main-loop-bound asyncio primitives (Locks, Events, etc.).
+        # Fix: capture the main event loop here (connect() is always called from
+        # the main coroutine) and forward the callback to it via
+        # run_coroutine_threadsafe().  The Discord loop only does the lightweight
+        # message parsing; all application logic runs on the correct main loop.
+        _main_loop = asyncio.get_running_loop()
+
         @self._client.event
         async def on_message(message: discord.Message):
             if message.author.bot:
@@ -114,22 +131,27 @@ class DiscordChannel:
             sender = str(message.author.id)
             sender_name = message.author.display_name or message.author.name
 
-            # Fix(p12a): wrap pipeline call in try/except so that any exception
-            # raised inside on_message_callback (RBAC, DB, immune check, dedup)
-            # does not propagate into discord.py's event dispatcher and crash the
-            # on_message event, causing the update to be silently dropped.
+            # p17c BUG-FIX (CRITICAL): forward the callback to the main event
+            # loop via run_coroutine_threadsafe() so all downstream coroutines
+            # (GroupQueue.enqueue_message_check, asyncio.create_task, Locks, etc.)
+            # execute on the main loop where they were created.
+            # We do NOT await the future here because discord.py's on_message
+            # must return promptly; the actual processing is decoupled.
             try:
-                await on_message_callback(
-                    jid=jid,
-                    sender=sender,
-                    sender_name=sender_name,
-                    content=text,
-                    is_group=is_group,
-                    channel="discord",
+                asyncio.run_coroutine_threadsafe(
+                    on_message_callback(
+                        jid=jid,
+                        sender=sender,
+                        sender_name=sender_name,
+                        content=text,
+                        is_group=is_group,
+                        channel="discord",
+                    ),
+                    _main_loop,
                 )
             except Exception as _exc:
                 log.error(
-                    "Discord on_message: unhandled exception in callback for jid=%s: %s",
+                    "Discord on_message: failed to forward callback for jid=%s: %s",
                     jid, _exc, exc_info=True,
                 )
 
@@ -203,7 +225,10 @@ class DiscordChannel:
                 log.error("Discord loop call failed: %s", exc)
                 return None
 
-        return await asyncio.get_event_loop().run_in_executor(None, _get_result)
+        # p17c BUG-FIX (MEDIUM): asyncio.get_event_loop() is deprecated in Python
+        # 3.10+ when called from a coroutine.  Use get_running_loop() which always
+        # returns the loop the current coroutine is executing on.
+        return await asyncio.get_running_loop().run_in_executor(None, _get_result)
 
     async def send_message(self, jid: str, text: str) -> None:
         if not self.is_connected():

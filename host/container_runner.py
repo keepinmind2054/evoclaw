@@ -903,8 +903,14 @@ async def run_container_agent(
                 _date_str = _dt.datetime.now().strftime("%Y-%m-%d")
                 _prompt_preview = (prompt or "")[:80].replace("\n", " ") if prompt else "(no prompt)"
                 _auto_entry = f"\n[{_date_str}] [auto] Task: {_prompt_preview}. Result: success.\n"
-                with open(_host_memory_path, "a", encoding="utf-8") as _mf:
-                    _mf.write(_auto_entry)
+                # p17c BUG-FIX (LOW): open() + write() are blocking syscalls that
+                # can stall the event loop on a slow filesystem (NFS, overlayfs,
+                # disk pressure).  Run in an executor so other coroutines are not
+                # blocked while this small write completes.
+                def _write_mem():
+                    with open(_host_memory_path, "a", encoding="utf-8") as _mf:
+                        _mf.write(_auto_entry)
+                await asyncio.get_running_loop().run_in_executor(None, _write_mem)
                 log.info("host auto-wrote MEMORY.md fallback entry for %s", folder)
             else:
                 log.debug("MEMORY.md already updated by agent for %s", folder)

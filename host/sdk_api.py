@@ -313,18 +313,33 @@ class SdkApi:
                 "count": len(agents),
             }))
         except Exception as e:
-            await self._send_error(websocket, "identity_error", str(e))
+            # p17c BUG-FIX (MEDIUM): do not leak internal error detail to clients.
+            logger.error("SdkApi: agent_list error: %s", e, exc_info=True)
+            await self._send_error(websocket, "identity_error", "Internal error listing agents")
 
     async def _handle_system_status(self, websocket, msg: dict):
         """Return system status."""
         try:
             memory_status = self._memory_bus.status()
             try:
-                with self._identity_store._lock:
-                    agent_count_row = self._identity_store._conn.execute(
-                        "SELECT COUNT(*) FROM agent_identities"
-                    ).fetchone()
-                agent_count = agent_count_row[0] if agent_count_row else 0
+                # p17c BUG-FIX (HIGH): the previous code called
+                # `with self._identity_store._lock:` — a threading.Lock — directly
+                # inside an async function.  threading.Lock.acquire() is a blocking
+                # call: if the lock is contended (e.g. another thread is writing to
+                # the identity store) the entire asyncio event loop thread is blocked
+                # for the duration, stalling every other coroutine.  Fix: run the
+                # DB read in a thread-pool executor so the lock acquisition blocks
+                # only the executor thread, not the event loop.
+                def _count_agents():
+                    with self._identity_store._lock:
+                        row = self._identity_store._conn.execute(
+                            "SELECT COUNT(*) FROM agent_identities"
+                        ).fetchone()
+                    return row[0] if row else 0
+
+                agent_count = await asyncio.get_running_loop().run_in_executor(
+                    None, _count_agents
+                )
             except Exception:
                 agent_count = -1
             await websocket.send(json.dumps({
@@ -338,7 +353,9 @@ class SdkApi:
                 },
             }))
         except Exception as e:
-            await self._send_error(websocket, "status_error", str(e))
+            # p17c BUG-FIX (MEDIUM): do not leak internal error detail.
+            logger.error("SdkApi: system_status error: %s", e, exc_info=True)
+            await self._send_error(websocket, "status_error", "Internal error fetching system status")
 
     # BUG-SDK-05 (HIGH): No size limit on task message content.
     _MAX_TASK_MESSAGE = 32 * 1024  # 32 KB

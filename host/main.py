@@ -992,7 +992,19 @@ async def _message_loop() -> None:
                         # p16a-fix: also prune _error_notify_times which was previously
                         # omitted from this cleanup, causing a slow memory leak for
                         # frequently-deregistered groups over long uptimes.
-                        _error_notify_times.pop(jid, None)
+                        # p17c BUG-FIX (MEDIUM): acquire _error_notify_lock before
+                        # mutating _error_notify_times.  Without the lock, this
+                        # removal races with the on_error rate-limiter in
+                        # _process_group_messages which reads+writes the same dict
+                        # under _error_notify_lock.  The race is benign on CPython
+                        # (GIL-protected dict ops), but it violates the locking
+                        # contract and can produce incorrect rate-limit decisions
+                        # on free-threaded Python (PEP 703).
+                        if _error_notify_lock is not None:
+                            async with _error_notify_lock:
+                                _error_notify_times.pop(jid, None)
+                        else:
+                            _error_notify_times.pop(jid, None)
                         async def _prune_fail_state(j=jid):
                             _group_fail_counts.pop(j, None)
                             _group_fail_timestamps.pop(j, None)
@@ -1016,7 +1028,13 @@ async def _message_loop() -> None:
                             _group_fail_counts.pop(tj, None)
                             _group_fail_timestamps.pop(tj, None)
                         await _with_fail_lock(_reset_fail_state)
-                        _error_notify_times.pop(_target_jid, None)
+                        # p17c BUG-FIX (MEDIUM): acquire _error_notify_lock before
+                        # mutating _error_notify_times (same fix as stale_jids cleanup).
+                        if _error_notify_lock is not None:
+                            async with _error_notify_lock:
+                                _error_notify_times.pop(_target_jid, None)
+                        else:
+                            _error_notify_times.pop(_target_jid, None)
                         log.info("reset_group: cleared fail counters for jid=%s", _target_jid)
                 except Exception as _rfe:
                     log.warning("reset_group flag processing failed: %s", _rfe)

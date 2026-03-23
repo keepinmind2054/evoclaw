@@ -75,11 +75,23 @@ class WSBridge:
         self._memory_bus = memory_bus
         self._port = port or int(os.environ.get("WS_BRIDGE_PORT", self.DEFAULT_PORT))
         self._connections: dict[str, object] = {}  # agent_id to websocket
-        # Lock protecting _connections for thread-safe iteration in stop()
-        # while the asyncio loop is running.
+        # p17c BUG-FIX (HIGH): _connections is mutated concurrently by multiple
+        # _handle_connection coroutines (heartbeat registrations, disconnects) and
+        # also iterated by stop() and send_task().  Without a lock a heartbeat
+        # message and a disconnect can race: the heartbeat sets a key while the
+        # disconnect deletes it, leaving a dangling reference or losing the entry.
+        # asyncio.Lock serialises all _connections mutations so iterations in stop()
+        # and send_task() see a consistent view.
+        self._connections_lock: asyncio.Lock | None = None  # lazily initialised
         self._fitness_callbacks: list = []
         self._task_complete_callbacks: list = []
         self._running = False
+
+    def _get_connections_lock(self) -> asyncio.Lock:
+        """Lazily create the connections lock on the running event loop."""
+        if self._connections_lock is None:
+            self._connections_lock = asyncio.Lock()
+        return self._connections_lock
 
     async def start(self):
         """Start the WebSocket server. Call as asyncio task."""
@@ -105,24 +117,32 @@ class WSBridge:
     async def stop(self):
         """Gracefully stop the bridge."""
         self._running = False
-        for agent_id, ws in list(self._connections.items()):
+        # p17c BUG-FIX: snapshot connections under the lock so we do not race
+        # with concurrent _handle_connection coroutines that add/remove entries.
+        async with self._get_connections_lock():
+            snapshot = list(self._connections.items())
+            self._connections.clear()
+        for agent_id, ws in snapshot:
             try:
                 await ws.close()
             except Exception:
                 pass
-        self._connections.clear()
         logger.info("WSBridge stopped")
 
     async def _handle_connection(self, websocket, path: str = "/"):
         """Handle incoming WebSocket connection from Agent Runtime."""
-        # BUG-WS-01 (HIGH): Enforce connection cap.
-        if len(self._connections) >= self.MAX_CONNECTIONS:
-            await websocket.send(json.dumps({
-                "type": "error",
-                "error": f"too_many_connections (max {self.MAX_CONNECTIONS})"
-            }))
-            await websocket.close()
-            return
+        # p17c BUG-FIX (HIGH): check+reject must be atomic so two connections
+        # arriving simultaneously cannot both pass the cap check before either
+        # registers itself.  Acquire the lock for the cap check.
+        _lock = self._get_connections_lock()
+        async with _lock:
+            if len(self._connections) >= self.MAX_CONNECTIONS:
+                await websocket.send(json.dumps({
+                    "type": "error",
+                    "error": f"too_many_connections (max {self.MAX_CONNECTIONS})"
+                }))
+                await websocket.close()
+                return
 
         agent_id = None
         # BUG-WS-03 (CRITICAL): Authentication was only checked on the FIRST
@@ -165,7 +185,11 @@ class WSBridge:
 
                 if msg_type == "heartbeat":
                     if agent_id:
-                        self._connections[agent_id] = websocket
+                        # p17c BUG-FIX: guard _connections mutation with lock to
+                        # prevent races with concurrent heartbeats, stop(), and
+                        # the finally-block cleanup below.
+                        async with _lock:
+                            self._connections[agent_id] = websocket
                     await self._send(websocket, {"type": "ack", "agent_id": agent_id})
                     logger.debug(f"WSBridge: heartbeat from {agent_id}")
 
@@ -187,9 +211,11 @@ class WSBridge:
         except Exception as e:
             logger.debug(f"WSBridge: connection closed for {agent_id}: {e}")
         finally:
-            if agent_id and agent_id in self._connections:
-                del self._connections[agent_id]
-                logger.debug(f"WSBridge: {agent_id} disconnected")
+            # p17c BUG-FIX: guard removal with lock for the same reason.
+            async with _lock:
+                if agent_id and agent_id in self._connections:
+                    del self._connections[agent_id]
+                    logger.debug(f"WSBridge: {agent_id} disconnected")
 
     async def _handle_fitness_update(self, msg: dict):
         """Agent reports fitness score back to Gateway."""
@@ -258,7 +284,11 @@ class WSBridge:
 
     async def send_task(self, agent_id: str, payload: dict) -> bool:
         """Send task payload to a connected agent. Returns False if not connected."""
-        ws = self._connections.get(agent_id)
+        # p17c BUG-FIX: snapshot the websocket reference under the lock so a
+        # concurrent disconnect cannot delete the entry between the get() and the
+        # send(), leaving us calling send() on a closed/None websocket.
+        async with self._get_connections_lock():
+            ws = self._connections.get(agent_id)
         if not ws:
             return False
         try:
@@ -270,7 +300,9 @@ class WSBridge:
 
     async def send_evolution_hint(self, agent_id: str, genome: dict, adaptive_prompt: str) -> bool:
         """Send evolution hints to a connected agent."""
-        ws = self._connections.get(agent_id)
+        # p17c BUG-FIX: same lock pattern as send_task.
+        async with self._get_connections_lock():
+            ws = self._connections.get(agent_id)
         if not ws:
             return False
         try:
