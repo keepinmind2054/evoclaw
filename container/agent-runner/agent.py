@@ -2652,7 +2652,7 @@ def main():
     nim_pool = _KeyPool(os.environ.get("NIM_API_KEY", ""))
     openai_pool = _KeyPool(os.environ.get("OPENAI_API_KEY", ""))
     google_pool = _KeyPool(os.environ.get("GOOGLE_API_KEY", ""))
-    claude_pool = _KeyPool(os.environ.get("CLAUDE_API_KEY", ""))
+    claude_pool = _KeyPool(os.environ.get("CLAUDE_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", ""))
 
     nim_api_key = nim_pool.current()
     openai_api_key = openai_pool.current()

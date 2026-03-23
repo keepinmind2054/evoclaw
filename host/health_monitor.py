@@ -20,6 +20,12 @@ from typing import Callable, Awaitable
 
 from . import config, db
 
+# ── Active alert state ────────────────────────────────────────────────────────
+# Separate from the WARNING_COOLDOWN log-dedup mechanism: these track when each
+# issue_key was last forwarded to the Telegram MONITOR_JID so we don't flood it.
+_alert_last_sent: dict[str, float] = {}
+_ALERT_COOLDOWN_S = 600  # 10 minutes between same-type alerts to Telegram
+
 log = logging.getLogger(__name__)
 
 # 監控閾值設定
@@ -231,6 +237,34 @@ async def _check_group_activity() -> None:
         log.warning("Failed to check group activity: %s", e)
 
 
+async def _send_health_alert(issue_key: str, message: str) -> None:
+    """Send an alert message to MONITOR_JID if the per-issue cooldown permits.
+
+    Uses a separate 10-minute cooldown (``_ALERT_COOLDOWN_S``) so that the
+    Telegram channel is not flooded when the same issue persists across many
+    60-second health-check cycles.  Falls back gracefully if MONITOR_JID is
+    not configured or if the outbound routing layer is unavailable.
+    """
+    now = time.time()
+    if now - _alert_last_sent.get(issue_key, 0) < _ALERT_COOLDOWN_S:
+        return
+    _alert_last_sent[issue_key] = now
+    try:
+        from . import main as _main_module
+        monitor_jid = getattr(_main_module, "_MONITOR_JID", None)
+        if not monitor_jid:
+            log.warning("MONITOR_JID not set — health alert not sent: %s", message)
+            return
+        from .router import route_outbound
+        await route_outbound(
+            jid=monitor_jid,
+            text=f"[HealthMonitor] {message}",
+        )
+        log.info("Health alert sent to monitor: %s", issue_key)
+    except Exception as e:
+        log.error("Failed to send health alert: %s", e)
+
+
 async def _send_warning(level: str, message: str, warning_id: str) -> None:
     """發送警告（非同步版本）。"""
     if _should_send_warning(warning_id):
@@ -242,7 +276,8 @@ async def _send_warning(level: str, message: str, warning_id: str) -> None:
         else:
             log.info(log_msg)
 
-        # TODO: 可以在這裡加入发送通知到 Telegram/Slack 等
+        # Send active alert to Telegram MONITOR_JID (10-min cooldown per issue)
+        await _send_health_alert(warning_id, f"[{level.upper()}] {message}")
 
         # BUG-HM-04 (MEDIUM): _last_warnings is mutated from both the async
         # loop and the sync helper without any lock.  Use _warnings_lock to
@@ -261,6 +296,16 @@ def _send_warning_sync(level: str, message: str, warning_id: str) -> None:
             log.warning(log_msg)
         else:
             log.info(log_msg)
+
+        # Schedule active alert on the running event loop if one is available.
+        # _send_warning_sync is called from synchronous check helpers that run
+        # inside the async health_monitor_loop, so there should always be a
+        # running loop.  If not (e.g. during unit tests), skip gracefully.
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_send_health_alert(warning_id, f"[{level.upper()}] {message}"))
+        except RuntimeError:
+            pass  # No running event loop — alert skipped
 
         with _warnings_lock:
             _last_warnings[warning_id] = datetime.now()

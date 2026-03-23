@@ -102,6 +102,18 @@ pip install python-telegram-bot aiohttp websockets
 
 ---
 
+### Bot uses Gemini instead of Claude even though I set ANTHROPIC_API_KEY
+
+**Symptom**: Bot responds but uses Gemini (slower, different style). You set `ANTHROPIC_API_KEY` but not `CLAUDE_API_KEY`.
+
+**Cause**: EvoClaw reads `CLAUDE_API_KEY`, not `ANTHROPIC_API_KEY`. The README_en.md description previously referenced the wrong variable name.
+
+**Fix**: Either:
+1. Rename your variable: `CLAUDE_API_KEY=sk-ant-...` in `.env`
+2. Or set both: both `CLAUDE_API_KEY` and `ANTHROPIC_API_KEY` now work (as of v1.27.0)
+
+---
+
 ### No LLM API key / wrong key name
 
 EvoClaw supports these LLM providers and their environment variable names:
