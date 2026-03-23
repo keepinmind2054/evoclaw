@@ -168,6 +168,24 @@ def evolve_genome_from_fitness(jid: str, fitness: float, avg_response_ms: float)
       fitness        — 最近的適應度分數（0.0~1.0）
       avg_response_ms — 最近的平均回應時間（毫秒）
     """
+    # BUG-FIX(p18b-06): clamp fitness and avg_response_ms at the entry point.
+    # compute_fitness() already clamps its output but callers (e.g. tests, future
+    # code paths) might pass out-of-range values.  A fitness > 1.0 would satisfy
+    # both the "> 0.7" (high) AND never the "< 0.4" (low) branches, silently
+    # pushing all three genome axes in the "good" direction regardless of reality.
+    # A negative avg_response_ms is physically meaningless and would trigger the
+    # "< 5000 ms fast" branch unconditionally.
+    try:
+        fitness = max(0.0, min(1.0, float(fitness)))
+    except (TypeError, ValueError):
+        log.warning("evolve_genome_from_fitness: invalid fitness %r for %s — using 0.5", fitness, jid)
+        fitness = 0.5
+    try:
+        avg_response_ms = max(0.0, float(avg_response_ms))
+    except (TypeError, ValueError):
+        log.warning("evolve_genome_from_fitness: invalid avg_response_ms %r for %s — using 0", avg_response_ms, jid)
+        avg_response_ms = 0.0
+
     from host import db
     genome = get_genome(jid)
     generation = genome.get("generation", 0)

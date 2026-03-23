@@ -45,16 +45,28 @@ class CrossbotDiscovery:
         self._handshake_timestamps: dict[str, list[float]] = {}
 
     def _is_rate_limited(self, author_id: str) -> bool:
-        """Return True if author_id has exceeded the handshake rate limit."""
+        """Return True if author_id has exceeded the handshake rate limit.
+
+        BUG-FIX(p18b-04): _handshake_timestamps keys were never evicted once the
+        rate-window expired.  An attacker (or many legitimate bots) sending one
+        message each would accumulate one empty-list entry per unique author_id
+        indefinitely, leaking memory.  We now delete the key entirely when the
+        pruned list is empty, bounding the dict to active-sender entries only.
+        """
         now = time.monotonic()
-        timestamps = self._handshake_timestamps.setdefault(author_id, [])
+        timestamps = self._handshake_timestamps.get(author_id, [])
         # Prune stale timestamps outside the rolling window
-        self._handshake_timestamps[author_id] = [
-            t for t in timestamps if now - t < _HANDSHAKE_RATE_WINDOW
-        ]
-        if len(self._handshake_timestamps[author_id]) >= _HANDSHAKE_RATE_LIMIT:
+        active = [t for t in timestamps if now - t < _HANDSHAKE_RATE_WINDOW]
+        if len(active) >= _HANDSHAKE_RATE_LIMIT:
+            # Don't append — sender is blocked; keep the existing timestamps
+            self._handshake_timestamps[author_id] = active
             return True
-        self._handshake_timestamps[author_id].append(now)
+        active.append(now)
+        if active:
+            self._handshake_timestamps[author_id] = active
+        else:
+            # Evict the key when no active timestamps remain to prevent memory leak
+            self._handshake_timestamps.pop(author_id, None)
         return False
 
     async def _add_trusted(self, author_id: str) -> None:
