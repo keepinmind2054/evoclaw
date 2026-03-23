@@ -683,9 +683,11 @@ def tool_run_agent(prompt: str, context_mode: str = "isolated") -> str:
             "context_mode": context_mode,
         }))
 
-        # Poll for result (up to 300 seconds)
+        # Poll for result — reduced from 300s to 60s to free the parent group
+        # faster (STABILITY_ANALYSIS 5.3).
+        _SUBAGENT_TIMEOUT_S = 60  # was 300
         output_path = Path(IPC_RESULTS_DIR) / f"{request_id}.json"
-        for _ in range(300):
+        for _poll_i in range(_SUBAGENT_TIMEOUT_S):
             if output_path.exists():
                 try:
                     data = json.loads(output_path.read_text(encoding="utf-8"))
@@ -694,8 +696,11 @@ def tool_run_agent(prompt: str, context_mode: str = "isolated") -> str:
                 except Exception as e:
                     return f"Error reading subagent result: {e}"
             time.sleep(1)
+            # Every 10s, log progress so we know the subagent is not hung
+            if _poll_i > 0 and _poll_i % 10 == 0:
+                _log("⏳ SUBAGENT", f"subagent {request_id}: still waiting ({_poll_i}s elapsed)...")
 
-        return "Error: subagent timed out after 300s"
+        return f"Error: subagent timed out after {_SUBAGENT_TIMEOUT_S}s"
     except Exception as e:
         return f"Error spawning subagent: {e}"
 

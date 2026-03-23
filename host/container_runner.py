@@ -46,6 +46,20 @@ def _is_windows() -> bool:
 
 log = logging.getLogger(__name__)
 
+# ── Module-level semaphore for defense-in-depth concurrency limiting ──────────
+# Ensures run_container_agent() itself enforces MAX_CONCURRENT_CONTAINERS even if
+# a future code path bypasses GroupQueue's concurrency check (STABILITY_ANALYSIS 2.4).
+_container_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_container_semaphore() -> asyncio.Semaphore:
+    global _container_semaphore
+    if _container_semaphore is None:
+        from . import config as _cfg
+        _container_semaphore = asyncio.Semaphore(_cfg.MAX_CONCURRENT_CONTAINERS)
+    return _container_semaphore
+
+
 # ── Container image version pin warning ───────────────────────────────────────
 # Log a warning at import time when the image tag uses the mutable ':latest' tag.
 # Operators should pin to a specific version or digest to prevent silent behavioral
@@ -427,6 +441,13 @@ async def run_container_agent(
             f"請等待約 {_wait_secs} 秒後再試，屆時將自動恢復。其他群組不受影響。"
         )
         return {"status": "error", "error": f"Docker circuit breaker open for {folder}"}
+
+    # Defense-in-depth concurrency guard (STABILITY_ANALYSIS 2.4):
+    # Acquire the module-level semaphore so that even if a caller bypasses
+    # GroupQueue's concurrency check, at most MAX_CONCURRENT_CONTAINERS
+    # containers can execute simultaneously across all code paths.
+    # Released unconditionally in the existing finally block below.
+    await _get_container_semaphore().acquire()
     jid = group["jid"]
     # 用時間戳記讓 container 名稱唯一，方便 debug 與孤兒清理
     run_id = str(uuid.uuid4())
@@ -1000,6 +1021,14 @@ async def run_container_agent(
     finally:
         async with _get_active_lock():
             _active_containers.pop(container_name, None)
+        # Release the defense-in-depth semaphore acquired before execution
+        # (STABILITY_ANALYSIS 2.4).  Placed last so active-container cleanup
+        # runs first; wrapped in try/except so a NameError for container_name
+        # above cannot prevent the semaphore from being released.
+        try:
+            _get_container_semaphore().release()
+        except Exception:
+            pass
 
 async def _stop_container(name: str) -> None:
     """Stop a container on timeout using a two-phase SIGTERM → SIGKILL sequence.
