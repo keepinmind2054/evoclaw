@@ -33,6 +33,12 @@ class _SqliteAdapter:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=5000")
+        # BUG-19C-11 FIX: enable foreign key enforcement.
+        # SQLite disables FK constraints by default.  Every new connection must
+        # set this pragma or ON DELETE CASCADE / RESTRICT rules are silently
+        # ignored.  db.py's init_database() already does this; the adapter must
+        # mirror it so all secondary connections enjoy the same integrity.
+        conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
     def execute(self, conn, sql: str, params=()) -> Any:
