@@ -80,6 +80,23 @@ CONTAINER_CPUS = os.environ.get("CONTAINER_CPUS", "1.0")
 # Prevents fork bombs inside an untrusted agent container.
 # Set to -1 to disable (not recommended for production).
 CONTAINER_PIDS_LIMIT: int = _env_int("CONTAINER_PIDS_LIMIT", 256)
+# CONTAINER_LOG_MAX_SIZE / CONTAINER_LOG_MAX_FILES (BUG-19B-01):
+# Caps the Docker json-file log size per container so a chatty or looping agent
+# cannot fill the host disk through the Docker log driver.
+# Format: "<N>m" for megabytes (e.g. "10m").
+CONTAINER_LOG_MAX_SIZE: str = os.environ.get("CONTAINER_LOG_MAX_SIZE", "10m")
+CONTAINER_LOG_MAX_FILES: str = os.environ.get("CONTAINER_LOG_MAX_FILES", "2")
+# CONTAINER_TMPFS_SIZE (BUG-19B-02):
+# Size of the tmpfs mounted at /tmp inside each container.  Bounds the amount
+# of host memory a container may consume via temporary files (including the
+# /tmp/input.json written by entrypoint.sh).  Default: 64m.
+CONTAINER_TMPFS_SIZE: str = os.environ.get("CONTAINER_TMPFS_SIZE", "64m")
+# CONTAINER_STOP_GRACE_SECS (BUG-19B-03):
+# Seconds to wait for SIGTERM to cleanly stop a container before Docker issues
+# SIGKILL.  Gives the agent time to flush open file writes and close IPC files
+# before being force-killed.  Intentionally short (5 s) to avoid delaying
+# overall shutdown.
+CONTAINER_STOP_GRACE_SECS: int = _env_int("CONTAINER_STOP_GRACE_SECS", 5, minimum=1)
 
 # Timezone
 TIMEZONE = os.environ.get("TZ", os.environ.get("TIMEZONE", "UTC"))
