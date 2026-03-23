@@ -424,17 +424,29 @@ class TestDevEngineCancel:
 
 # ── _deploy_files() ────────────────────────────────────────────────────────────
 
+_PASSING_REVIEW = "## Overall Assessment\nPASS — no security issues found.\n"
+
+
 class TestDeployFiles:
     def test_no_file_blocks_returns_message(self, tmp_path, in_memory_db):
-        """If implement artifact has no --- FILE: --- blocks, returns a message."""
+        """If implement artifact has no --- FILE: --- blocks, returns a message.
+
+        TEST-10 FIX: _deploy_files() now gates on the REVIEW artifact containing
+        a PASS verdict (BUG-DE-2 fix).  Tests must set the review artifact or the
+        function returns (False, 'Deploy blocked: REVIEW stage ...') before even
+        checking for file blocks.
+        """
         session = make_session()
+        session.artifacts["review"] = _PASSING_REVIEW
         session.artifacts["implement"] = "def hello(): pass  # no file block"
         ok, msg = _deploy_files(session)
         # Returns True with a 'no blocks' message (not a failure)
         assert "No --- FILE: ---" in msg or "Manual deployment" in msg
 
     def test_writes_file_from_implement_artifact(self, tmp_path, in_memory_db):
+        """TEST-10 FIX: also set review artifact with PASS verdict."""
         session = make_session()
+        session.artifacts["review"] = _PASSING_REVIEW
         session.artifacts["implement"] = (
             "--- FILE: hello.py ---\n"
             "def hello():\n"
@@ -456,21 +468,64 @@ class TestDeployFiles:
         assert ok is True
         assert "hello.py" in msg
 
-    def test_blocks_path_traversal(self, tmp_path, in_memory_db):
-        """Paths like ../../etc/passwd must be blocked."""
+    def test_deploy_blocked_without_passing_review(self, tmp_path, in_memory_db):
+        """_deploy_files must refuse to deploy if REVIEW did not PASS.
+
+        This tests the BUG-DE-2 fix: a deploy without a PASS review must be
+        blocked regardless of the implement artifact content.
+        """
         session = make_session()
+        # No review artifact or FAIL review → must block
+        session.artifacts["review"] = "## Overall Assessment\nFAIL — security issues."
+        session.artifacts["implement"] = (
+            "--- FILE: hello.py ---\n"
+            "def hello(): pass\n"
+            "--- END FILE ---\n"
+        )
+        ok, msg = _deploy_files(session)
+        assert ok is False
+        assert "blocked" in msg.lower() or "review" in msg.lower()
+
+    def test_deploy_blocked_when_review_absent(self, tmp_path, in_memory_db):
+        """_deploy_files must block when no review artifact exists at all."""
+        session = make_session()
+        # review artifact deliberately absent
+        session.artifacts["implement"] = (
+            "--- FILE: hello.py ---\ndef hello(): pass\n--- END FILE ---\n"
+        )
+        ok, msg = _deploy_files(session)
+        assert ok is False
+
+    def test_blocks_path_traversal(self, tmp_path, in_memory_db):
+        """Paths like ../../etc/passwd must be blocked.
+
+        TEST-12 FIX: _write_one_file uses config.BASE_DIR (not DATA_DIR) as the
+        containment boundary.  The test must patch BASE_DIR so that the
+        path-traversal check has a meaningful base to test against.
+        Without patching BASE_DIR, the 'base' variable resolves to the real
+        project root and the traversal assertion is non-deterministic.
+        """
+        session = make_session()
+        session.artifacts["review"] = _PASSING_REVIEW
         session.artifacts["implement"] = (
             "--- FILE: ../../etc/passwd ---\n"
             "root:x:0:0\n"
             "--- END FILE ---\n"
         )
 
+        # Create a shallow jail directory so ../../etc/passwd escapes it
+        jail = tmp_path / "jail"
+        jail.mkdir()
+
         with patch("host.dev_engine.config") as mock_config:
             mock_config.DATA_DIR = tmp_path
+            mock_config.BASE_DIR = jail
             ok, msg = _deploy_files(session)
 
-        # Path traversal should be blocked (error logged, not written)
-        assert "BLOCKED" in msg or (not ok)
+        # Path traversal should be blocked (BLOCKED in errors → summarised in msg)
+        assert "BLOCKED" in msg or (not ok), (
+            f"Expected path traversal to be blocked, got ok={ok}, msg={msg!r}"
+        )
 
 
 if __name__ == "__main__":

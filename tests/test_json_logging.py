@@ -201,7 +201,13 @@ class TestTextFormatRegression:
             json.loads(output)
 
     def test_setup_logging_text_format(self, monkeypatch):
-        """_setup_logging() with LOG_FORMAT=text should not set JsonFormatter."""
+        """_setup_logging() with LOG_FORMAT=text should not set JsonFormatter.
+
+        TEST-09 FIX: host.main imports host.health_monitor which imports psutil
+        at module level.  Guard with importorskip so the test is a clear SKIP
+        rather than a confusing ModuleNotFoundError when psutil is absent.
+        """
+        pytest.importorskip("psutil", reason="host.main requires psutil")
         monkeypatch.setenv("LOG_FORMAT", "text")
         monkeypatch.setenv("LOG_LEVEL", "WARNING")
 
@@ -221,6 +227,7 @@ class TestTextFormatRegression:
 
     def test_setup_logging_json_format(self, monkeypatch):
         """_setup_logging() with LOG_FORMAT=json should set JsonFormatter."""
+        pytest.importorskip("psutil", reason="host.main requires psutil")
         monkeypatch.setenv("LOG_FORMAT", "json")
         monkeypatch.setenv("LOG_LEVEL", "DEBUG")
 
