@@ -1,6 +1,6 @@
 # EvoClaw
 
-[![Version](https://img.shields.io/badge/version-v1.11.42-blue)](https://github.com/KeithKeepGoing/evoclaw/blob/main/CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v1.11.43-blue)](https://github.com/KeithKeepGoing/evoclaw/blob/main/docs/CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Docker](https://img.shields.io/badge/docker-required-blue)](https://www.docker.com/)
@@ -308,7 +308,7 @@ All tracked issues: [GitHub Issues](https://github.com/KeithKeepGoing/evoclaw/is
 
 ## Recent Changes
 
-See [CHANGELOG.md](CHANGELOG.md) for full version history.
+See [CHANGELOG.md](docs/CHANGELOG.md) for full version history.
 
 | Version | Date | Highlights |
 |---------|------|-----------|
