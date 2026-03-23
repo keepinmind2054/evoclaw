@@ -334,8 +334,28 @@ async def start_scheduler_loop(
                         lambda t=task: run_task(t, get_group_fn, run_agent_fn),
                     )
                 else:
-                    # Fallback: direct dispatch (backward compat)
-                    asyncio.create_task(run_task(task, get_group_fn, run_agent_fn))
+                    # Fallback: direct dispatch (backward compat).
+                    # p17c BUG-FIX (MEDIUM): store the task reference in a local
+                    # variable and attach a done-callback.  Without storing the
+                    # reference the task can be garbage-collected before it
+                    # finishes (Python asyncio does not keep strong refs to
+                    # tasks created with create_task()).  The done-callback also
+                    # logs any unhandled exception that would otherwise be
+                    # silently swallowed.
+                    _t = asyncio.create_task(
+                        run_task(task, get_group_fn, run_agent_fn),
+                        name=f"sched-fallback-{task.get('id', 'unknown')}",
+                    )
+                    _t.add_done_callback(
+                        lambda _task: (
+                            log.error(
+                                "Unhandled exception in scheduler fallback task %s: %s",
+                                _task.get_name(), _task.exception(), exc_info=_task.exception(),
+                            )
+                            if not _task.cancelled() and _task.exception() is not None
+                            else None
+                        )
+                    )
         except Exception as e:
             log.error(f"Scheduler error: {e}")
         try:

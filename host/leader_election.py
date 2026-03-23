@@ -162,7 +162,7 @@ class LeaderElection:
             expiry = now - _LEASE_TIMEOUT
             try:
                 # BUG-LE-2 FIX: use timeout-guarded execute
-                cur = await asyncio.get_event_loop().run_in_executor(
+                cur = await asyncio.get_running_loop().run_in_executor(
                     None,
                     lambda: _db_execute(
                         self._conn, _ACQUIRE, (_INSTANCE_ID, now, now, expiry)
@@ -232,7 +232,7 @@ class LeaderElection:
                 now = time.time()
                 # BUG-LE-2 FIX: use timeout-guarded execute in executor so a
                 # stuck DB does not freeze the event loop here either.
-                cur = await asyncio.get_event_loop().run_in_executor(
+                cur = await asyncio.get_running_loop().run_in_executor(
                     None,
                     lambda: _db_execute(self._conn, _HEARTBEAT, (now, _INSTANCE_ID)),
                 )
