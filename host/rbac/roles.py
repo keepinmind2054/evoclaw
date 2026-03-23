@@ -95,12 +95,18 @@ class RBACStore:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.execute("PRAGMA busy_timeout=5000")
+            # BUG-19C-07 FIX: granted_at is NOT NULL with DEFAULT (unixepoch()).
+            #   A NULL granted_at makes audit queries ("who was granted admin and
+            #   when?") unreliable because ORDER BY granted_at ASC/DESC puts NULLs
+            #   at unpredictable positions.  Existing rows with NULL are left as-is
+            #   by CREATE TABLE IF NOT EXISTS; the migration in run_migrations.py
+            #   back-fills them.
             self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS rbac_grants (
                     subject_id TEXT NOT NULL,
                     role TEXT NOT NULL,
                     granted_by TEXT,
-                    granted_at REAL,
+                    granted_at REAL NOT NULL DEFAULT (unixepoch()),
                     PRIMARY KEY (subject_id, role)
                 )
             """)

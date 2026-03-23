@@ -127,12 +127,17 @@ def _create_tables(db: sqlite3.Connection) -> None:
         context_mode TEXT DEFAULT 'group'
     );
 
+    -- BUG-19C-06 FIX: status column is NOT NULL with DEFAULT 'unknown'.
+    --   The previous definition allowed NULL in status.  The scheduler marks runs as
+    --   'success', 'error', or 'timeout' — a NULL status is meaningless and causes
+    --   the consecutive-failure counter in task_scheduler.py to skip the row (it
+    --   checks for "error"/"timeout" explicitly), masking repeated silent failures.
     CREATE TABLE IF NOT EXISTS task_run_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         task_id TEXT NOT NULL,
         run_at INTEGER NOT NULL,
         duration_ms INTEGER,
-        status TEXT,
+        status TEXT NOT NULL DEFAULT 'unknown',
         result TEXT,
         error TEXT
     );
@@ -153,22 +158,34 @@ def _create_tables(db: sqlite3.Connection) -> None:
         session_id TEXT NOT NULL
     );
 
+    -- BUG-19C-03 FIX: added UNIQUE(folder) to registered_groups.
+    --   Each group maps to a unique filesystem folder (groups/<folder>/).  If two
+    --   groups shared the same folder they would read/write each other's MEMORY.md,
+    --   CLAUDE.md, and skill files, causing silent data corruption and security
+    --   cross-contamination.  The UNIQUE constraint prevents this at the DB level.
     CREATE TABLE IF NOT EXISTS registered_groups (
         jid TEXT PRIMARY KEY,
         name TEXT NOT NULL,
-        folder TEXT NOT NULL,
+        folder TEXT NOT NULL UNIQUE,
         trigger_pattern TEXT,
         added_at INTEGER NOT NULL,
         container_config TEXT,
-        requires_trigger INTEGER DEFAULT 1,
-        is_main INTEGER DEFAULT 0
+        requires_trigger INTEGER NOT NULL DEFAULT 1,
+        is_main INTEGER NOT NULL DEFAULT 0
     );
 
     -- ── Container Logs 資料表 ──────────────────────────────────────────────────
     -- container_logs：記錄每次 container 執行的 stderr/stdout，供 Dashboard 查看
+    --
+    -- BUG-19C-04 FIX: added UNIQUE(run_id) to container_logs.
+    --   run_id is a UUID generated once per container invocation in container_runner
+    --   and passed to both log_container_start() and log_container_finish().  Without
+    --   a UNIQUE constraint a crash-and-retry path could create two "start" rows for
+    --   the same run_id, making log_container_finish()'s UPDATE match multiple rows
+    --   and leaving ghost "running" rows that trigger false stuck-container alerts.
     CREATE TABLE IF NOT EXISTS container_logs (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        run_id      TEXT NOT NULL,
+        run_id      TEXT NOT NULL UNIQUE,
         jid         TEXT NOT NULL,
         folder      TEXT NOT NULL DEFAULT '',
         container_name TEXT NOT NULL DEFAULT '',
@@ -187,25 +204,46 @@ def _create_tables(db: sqlite3.Connection) -> None:
 
     -- ── 演化引擎資料表 ──────────────────────────────────────────────────────
     -- evolution_runs：記錄每次 container 執行的效能數據，是適應度計算的原始資料
+    --
+    -- BUG-19C-01 FIX: success DEFAULT changed from 1 → 0.
+    --   The original DEFAULT 1 meant that any row inserted without an explicit
+    --   success value was treated as a successful run, silently inflating fitness
+    --   scores.  A missing/unknown success flag is ambiguous and must not be
+    --   assumed successful; DEFAULT 0 (fail-safe) matches the compute_fitness()
+    --   fix already applied in host/evolution/fitness.py.
+    --
+    -- BUG-19C-02 FIX: added UNIQUE(jid, run_id).
+    --   Without this constraint the same container run_id could be inserted more
+    --   than once (e.g. a retry that re-calls record_evolution_run()), producing
+    --   duplicate rows that double-count a single execution in success_rate and
+    --   speed_score calculations.  The constraint lets callers use INSERT OR IGNORE
+    --   to remain idempotent without explicit duplicate checks.
     CREATE TABLE IF NOT EXISTS evolution_runs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         jid TEXT NOT NULL,
         run_id TEXT NOT NULL,
         response_ms INTEGER,
-        retry_count INTEGER DEFAULT 0,
-        success INTEGER DEFAULT 1,
-        timestamp TEXT DEFAULT (datetime('now'))
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        success INTEGER NOT NULL DEFAULT 0,
+        timestamp TEXT DEFAULT (datetime('now')),
+        UNIQUE(jid, run_id)
     );
     CREATE INDEX IF NOT EXISTS idx_evolution_jid_ts ON evolution_runs(jid, timestamp);
 
     -- group_genome：每個群組的行為基因組，記錄演化出的回應風格偏好
+    --
+    -- BUG-19C-05 FIX: added CHECK constraints on formality and technical_depth.
+    --   Both fields are documented as 0.0–1.0 floats.  Without CHECK constraints
+    --   a corrupt DB write or a future code regression can store out-of-range values
+    --   (e.g. 1.2 or -0.1) that silently produce nonsensical prompt generation and
+    --   break the genome evolution math which assumes values in [0, 1].
     CREATE TABLE IF NOT EXISTS group_genome (
         jid TEXT PRIMARY KEY,
-        response_style TEXT DEFAULT 'balanced',
-        formality REAL DEFAULT 0.5,
-        technical_depth REAL DEFAULT 0.5,
-        generation INTEGER DEFAULT 0,
-        updated_at TEXT DEFAULT (datetime('now'))
+        response_style TEXT NOT NULL DEFAULT 'balanced',
+        formality REAL NOT NULL DEFAULT 0.5 CHECK(formality >= 0.0 AND formality <= 1.0),
+        technical_depth REAL NOT NULL DEFAULT 0.5 CHECK(technical_depth >= 0.0 AND technical_depth <= 1.0),
+        generation INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
     -- immune_threats：免疫系統的威脅記錄，形成「抗體」記憶防止重複攻擊
@@ -304,6 +342,16 @@ CREATE VIRTUAL TABLE IF NOT EXISTS group_warm_logs_fts USING fts5(
     content='group_warm_logs',
     content_rowid='id'
 );
+-- BUG-19C-12 FIX: add DELETE trigger for group_warm_logs_fts.
+--   append_warm_log() manually inserts into the FTS table after each INSERT.
+--   However delete_warm_logs_before() must also remove FTS rows to prevent
+--   stale index entries that return deleted content in memory_fts_search().
+--   The trigger provides a DB-level safety net for any delete path that forgets
+--   to clean the FTS index (e.g. direct SQL deletes during pruning).
+CREATE TRIGGER IF NOT EXISTS warm_logs_ad AFTER DELETE ON group_warm_logs BEGIN
+    INSERT INTO group_warm_logs_fts(group_warm_logs_fts, rowid, jid, log_date, content)
+        VALUES('delete', old.id, old.jid, old.log_date, old.content);
+END;
 
 -- Cold memory: longer-form archives
 CREATE TABLE IF NOT EXISTS group_cold_memory (
@@ -322,6 +370,18 @@ CREATE VIRTUAL TABLE IF NOT EXISTS group_cold_memory_fts USING fts5(
     content='group_cold_memory',
     content_rowid='id'
 );
+-- BUG-19C-12 (continued): add INSERT/DELETE triggers for group_cold_memory_fts
+--   so cold memory entries are automatically indexed on insert and removed from
+--   the FTS index on delete.  Without these triggers cold memory is written but
+--   never appears in memory_fts_search() results — a silent read-gap bug.
+CREATE TRIGGER IF NOT EXISTS cold_memory_ai AFTER INSERT ON group_cold_memory BEGIN
+    INSERT INTO group_cold_memory_fts(rowid, jid, title, content, tags)
+        VALUES(new.id, new.jid, new.title, new.content, new.tags);
+END;
+CREATE TRIGGER IF NOT EXISTS cold_memory_ad AFTER DELETE ON group_cold_memory BEGIN
+    INSERT INTO group_cold_memory_fts(group_cold_memory_fts, rowid, jid, title, content, tags)
+        VALUES('delete', old.id, old.jid, old.title, old.content, old.tags);
+END;
 
 -- Memory sync tracking
 CREATE TABLE IF NOT EXISTS group_memory_sync (
@@ -671,8 +731,12 @@ def record_evolution_run(jid: str, run_id: str, response_ms: int,
     with _db_lock:
         db = get_db()
         try:
+            # INSERT OR IGNORE: the UNIQUE(jid, run_id) constraint added in
+            # BUG-19C-02 prevents duplicate rows for the same run.  Using
+            # OR IGNORE rather than OR REPLACE preserves the original timestamp
+            # and avoids inflating retry metrics on duplicate calls.
             db.execute("""
-                INSERT INTO evolution_runs (jid, run_id, response_ms, retry_count, success)
+                INSERT OR IGNORE INTO evolution_runs (jid, run_id, response_ms, retry_count, success)
                 VALUES (?, ?, ?, ?, ?)
             """, (jid, run_id, response_ms, retry_count, int(success)))
             db.commit()
@@ -1095,6 +1159,54 @@ def delete_warm_logs_before(jid: str, cutoff_ts: float) -> int:
         return cur.rowcount
 
 
+def append_cold_memory(jid: str, title: str, content: str, tags: str = "") -> int:
+    """Insert a long-form archive entry into group_cold_memory.
+
+    BUG-19C-09 FIX: group_cold_memory had a schema, FTS table, and read path
+    (memory_fts_search) but no write function in db.py.  Any code that stored
+    cold memories was using raw SQL bypassing the DB lock and FTS sync.  This
+    function provides the canonical write path.
+
+    The FTS index is kept in sync via the cold_memory_ai trigger added in the
+    schema fix (BUG-19C-12), so no manual FTS INSERT is required here.
+
+    Returns the rowid of the inserted row.
+    """
+    import time as _time
+    with _db_lock:
+        db = get_db()
+        try:
+            cur = db.execute(
+                "INSERT INTO group_cold_memory(jid, title, content, tags, created_at) VALUES(?, ?, ?, ?, ?)",
+                (jid, title, content, tags, _time.time()),
+            )
+            db.commit()
+            return cur.lastrowid
+        except Exception:
+            db.rollback()
+            raise
+
+
+def delete_cold_memory_before(jid: str, cutoff_ts: float) -> int:
+    """Delete old cold memory entries for a group.
+
+    The FTS index is kept in sync via the cold_memory_ad trigger added in the
+    schema fix (BUG-19C-12).
+    """
+    with _db_lock:
+        db = get_db()
+        try:
+            cur = db.execute(
+                "DELETE FROM group_cold_memory WHERE jid=? AND created_at<?",
+                (jid, cutoff_ts),
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        return cur.rowcount
+
+
 def memory_fts_search(jid: str, query: str, limit: int = 10) -> list[dict]:
     """Hybrid search across warm and cold memory using FTS5.
 
@@ -1325,12 +1437,16 @@ def prune_old_logs(days: int = 30) -> None:
 # ── Container Logs ─────────────────────────────────────────────────────────────
 
 def log_container_start(run_id: str, jid: str, folder: str, container_name: str, started_at: float) -> None:
-    """Insert a 'running' row when a container starts."""
+    """Insert a 'running' row when a container starts.
+
+    Uses INSERT OR IGNORE so that a crash-and-retry that re-calls this function
+    with the same run_id does not create a duplicate row (BUG-19C-04 fix).
+    """
     with _db_lock:
         db = get_db()
         try:
             db.execute(
-                "INSERT INTO container_logs (run_id, jid, folder, container_name, started_at, status)"
+                "INSERT OR IGNORE INTO container_logs (run_id, jid, folder, container_name, started_at, status)"
                 " VALUES (?, ?, ?, ?, ?, 'running')",
                 (run_id, jid, folder, container_name, started_at),
             )
