@@ -510,6 +510,14 @@ async def run_container_agent(
     # ── 三層記憶系統：注入熱記憶 ────────────────────────────────────────────
     # 取得此群組的熱記憶（per-group MEMORY.md，8KB 上限），注入到 container 的系統上下文
     hot_memory = get_hot_memory(jid)
+    # p22d-D: Defence-in-depth size cap on injection.  hot.py enforces 8 KB on
+    # write, but a DB record could theoretically be larger (e.g. written by an
+    # older version that had no limit, or via direct DB manipulation).  Cap here
+    # so the container input JSON cannot grow arbitrarily large.
+    _MEMORY_MAX_BYTES = 50_000  # 50 KB absolute ceiling for injection
+    if hot_memory and len(hot_memory.encode("utf-8")) > _MEMORY_MAX_BYTES:
+        hot_memory = hot_memory.encode("utf-8")[-_MEMORY_MAX_BYTES:].decode("utf-8", errors="ignore")
+        log.warning("hot_memory: truncated to %d bytes before injection for jid=%s", _MEMORY_MAX_BYTES, jid)
 
     # Phase 2 (UnifiedClaw): inject stable agent_id so FitnessReporter can self-identify
     _agent_id = _get_agent_id(

@@ -165,7 +165,16 @@ async def process_ipc_dir(group_folder: str, is_main: bool, route_fn: Callable) 
         # ordering is guaranteed regardless of clock skew.
         for f in sorted(d.glob("*.json")):
             try:
-                content = f.read_text(encoding="utf-8")
+                # TOCTOU fix (p22d-B): the file can be deleted between glob()
+                # and read_text() (e.g. a concurrent watcher process or manual
+                # cleanup).  Catch FileNotFoundError explicitly and skip the
+                # file rather than propagating to the generic handler which
+                # would try to move a non-existent file to errors/ dir.
+                try:
+                    content = f.read_text(encoding="utf-8")
+                except FileNotFoundError:
+                    log.debug("IPC file vanished before read (race): %s", f.name)
+                    continue
                 try:
                     payload = json.loads(content)
                 except json.JSONDecodeError as e:
