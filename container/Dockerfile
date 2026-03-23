@@ -82,7 +82,7 @@ ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 # future npm publish cannot silently change agent-browser's behaviour or
 # introduce a supply-chain vulnerability.  Update this pin intentionally when
 # upgrading.
-RUN npm install -g agent-browser@1.1.5
+RUN npm install -g agent-browser@0.21.4
 
 # ── Python: pre-install infrastructure packages ───────────────────────────────
 # Separated from requirements.txt so project deps stay lean and focused.
