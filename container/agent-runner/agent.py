@@ -253,9 +253,12 @@ def tool_bash(command: str) -> str:
         # writing directly to /dev/sda, /dev/nvme, etc.
         r'>\s*/dev/[sh]d[a-z]',
         r'>\s*/dev/nvme',
-        # chmod/chown 777 on / or /etc
-        r'\bchmod\s+.*777\s+/',
-        r'\bchown\s+.*\s+/',
+        # chmod/chown 777 on / or critical system dirs (but not /workspace/)
+        # BUG-P18D-12: the old r'\bchown\s+.*\s+/' matched any path starting
+        # with / including /workspace/group/myfile, blocking legitimate ops.
+        # Restrict to actual system directory roots only.
+        r'\bchmod\s+.*777\s+/(?!workspace/)',
+        r'\bchown\s+.*\s+/(?:etc|bin|usr|lib|sbin|var|boot|root|proc|sys|dev)\b',
         # shred /dev/* or critical paths
         r'\bshred\s+.*/dev/',
     ]
@@ -288,7 +291,12 @@ def tool_bash(command: str) -> str:
                 _os.killpg(_os.getpgid(proc.pid), _signal.SIGKILL)
             except Exception:
                 proc.kill()
-            proc.communicate()  # reap zombie
+            # BUG-P18D-16: add timeout to post-kill communicate() so an
+            # unkillable process (D-state) cannot hang the agent loop forever.
+            try:
+                proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass  # best-effort reap; process is already SIGKILL'd
             return "Error: command timed out after 300s"
 
         out = stdout_bytes.decode("utf-8", errors="replace")
@@ -346,10 +354,26 @@ def tool_read(file_path: str) -> str:
 
         file_size = p.stat().st_size
 
-        # P14D-READ-2: binary detection via null-byte / high-byte heuristic
+        # P14D-READ-2: binary detection via null-byte heuristic and strict
+        # UTF-8 decode test.
+        # BUG-P18D-14: the old high-byte fraction heuristic (>30% bytes > 127)
+        # incorrectly rejected valid UTF-8 files consisting mostly of multi-byte
+        # characters (e.g. a file written entirely in Chinese/Japanese/Korean).
+        # UTF-8 multi-byte sequences are 2-4 bytes each with the high bit set,
+        # so a Chinese-only file has ~100% high bytes even though it is perfectly
+        # valid text.  Replace the high-byte fraction test with a strict
+        # UTF-8 decode of the sample: if the bytes are not valid UTF-8 AND
+        # contain a null byte (strong binary signal), reject as binary.
         with p.open("rb") as fh:
             sample = fh.read(min(512, file_size))
-        if b"\x00" in sample or (len(sample) > 0 and sum(b > 127 for b in sample) > len(sample) * 0.3):
+        _has_null = b"\x00" in sample
+        _is_valid_utf8 = True
+        if sample:
+            try:
+                sample.decode("utf-8")
+            except UnicodeDecodeError:
+                _is_valid_utf8 = False
+        if _has_null or (not _is_valid_utf8 and len(sample) > 0 and sum(b > 127 for b in sample) > len(sample) * 0.5):
             return (
                 f"Error: {file_path!r} appears to be a binary file. "
                 "tool_read only supports text files. Use Bash + base64 to inspect binary content."
@@ -390,6 +414,20 @@ def tool_write(file_path: str, content: str) -> str:
     try:
         p = Path(file_path)
         p.parent.mkdir(parents=True, exist_ok=True)
+        # BUG-P18D-02: re-check the *resolved* path of the parent directory after
+        # mkdir so a symlinked parent (e.g. /workspace/group/evil -> /etc/) does
+        # not bypass the sandbox.  _check_path_allowed only inspects the raw string;
+        # resolve() follows symlinks to the real destination.
+        try:
+            _resolved_parent = str(p.parent.resolve())
+        except Exception as _rp_exc:
+            return f"Error: cannot resolve parent directory: {_rp_exc}"
+        if not any(_resolved_parent.startswith(pfx) for pfx in _ALLOWED_PATH_PREFIXES):
+            _log("⚠️ SECURITY", f"Write: symlink parent escape blocked: {file_path!r} -> {_resolved_parent!r}")
+            return (
+                f"Error: access denied — parent directory of {file_path!r} resolves to "
+                f"{_resolved_parent!r} which is outside the allowed workspace (symlink escape prevention)."
+            )
         # P14D-WRITE-1: capture existing permissions before overwriting
         existing_mode = None
         if p.exists():
@@ -397,8 +435,13 @@ def tool_write(file_path: str, content: str) -> str:
                 existing_mode = p.stat().st_mode
             except Exception:
                 pass
-        # Atomic write: write to .tmp then rename to avoid partial-write corruption
-        tmp = p.with_suffix(p.suffix + ".tmp")
+        # Atomic write: write to a sibling tmp file with a fixed unique suffix then
+        # rename.  Use os.getpid() + id() so the tmp name is unique even if two
+        # concurrent writes target the same file, and cannot collide with the target
+        # (BUG-P18D-01: the old p.with_suffix(p.suffix+".tmp") produced the same
+        # name as the target when file_path already ended in ".tmp").
+        import os as _os_write
+        tmp = p.parent / f".{p.name}.{_os_write.getpid()}.{id(content) & 0xFFFF}.tmp"
         tmp.write_text(content, encoding="utf-8")
         # Restore permissions on the tmp file before renaming so the final
         # file inherits the original mode atomically.
@@ -438,6 +481,18 @@ def tool_edit(file_path: str, old_string: str, new_string: str) -> str:
         return err
     try:
         p = Path(file_path)
+        # BUG-P18D-03: re-check the *resolved* path of the parent after symlink
+        # expansion, matching the same defence added to tool_write (BUG-P18D-02).
+        try:
+            _resolved_edit_parent = str(p.parent.resolve())
+        except Exception as _rep_exc:
+            return f"Error: cannot resolve parent directory: {_rep_exc}"
+        if not any(_resolved_edit_parent.startswith(pfx) for pfx in _ALLOWED_PATH_PREFIXES):
+            _log("⚠️ SECURITY", f"Edit: symlink parent escape blocked: {file_path!r} -> {_resolved_edit_parent!r}")
+            return (
+                f"Error: access denied — parent directory of {file_path!r} resolves to "
+                f"{_resolved_edit_parent!r} which is outside the allowed workspace (symlink escape prevention)."
+            )
         # P14D-EDIT-3: tolerate non-UTF-8 files
         content = p.read_text(encoding="utf-8", errors="replace")
         if old_string not in content:
@@ -460,8 +515,11 @@ def tool_edit(file_path: str, old_string: str, new_string: str) -> str:
             existing_mode = p.stat().st_mode
         except Exception:
             pass
-        # Atomic write: write to .tmp then rename
-        tmp = p.with_suffix(p.suffix + ".tmp")
+        # Atomic write: use unique tmp name to avoid collision (BUG-P18D-01:
+        # the old p.with_suffix(p.suffix+".tmp") produced the same name as the
+        # target when file_path already ended in ".tmp").
+        import os as _os_edit
+        tmp = p.parent / f".{p.name}.{_os_edit.getpid()}.{id(new_content) & 0xFFFF}.tmp"
         tmp.write_text(new_content, encoding="utf-8")
         if existing_mode is not None:
             try:
@@ -613,7 +671,11 @@ def tool_run_agent(prompt: str, context_mode: str = "isolated") -> str:
         Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
         Path(IPC_RESULTS_DIR).mkdir(parents=True, exist_ok=True)
 
-        fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-spawn.json"
+        # BUG-P18D-09: add random suffix (same pattern as schedule_task/cancel_task)
+        # to prevent filename collision when two tool_run_agent calls land within
+        # the same millisecond, which would silently overwrite each other's request.
+        _spawn_uid = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+        fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-{_spawn_uid}-spawn.json"
         _atomic_ipc_write(fname, json.dumps({
             "type": "spawn_agent",
             "requestId": request_id,
@@ -650,6 +712,24 @@ def tool_send_file(chat_jid: str = "", file_path: str = "", caption: str = "") -
         return "Error: chat_jid not provided and not available from input"
     if not file_path:
         return "Error: file_path is required"
+
+    # BUG-P18D-10: sandbox-check the file_path so the LLM cannot send
+    # /etc/passwd, /proc/self/environ, or other host-sensitive files to the
+    # user's chat.  Both the raw-path check and the symlink-resolved check are
+    # required (same defence-in-depth as tool_read).
+    _sf_path_err = _check_path_allowed(file_path)
+    if _sf_path_err:
+        return _sf_path_err
+    try:
+        _sf_resolved = str(Path(file_path).resolve())
+    except Exception as _sf_rp_exc:
+        return f"Error: cannot resolve file path {file_path!r}: {_sf_rp_exc}"
+    if not any(_sf_resolved.startswith(pfx) for pfx in _ALLOWED_PATH_PREFIXES):
+        _log("⚠️ SECURITY", f"SendFile: symlink escape blocked: {file_path!r} -> {_sf_resolved!r}")
+        return (
+            f"Error: access denied — {file_path!r} resolves to {_sf_resolved!r} "
+            f"which is outside the allowed workspace (symlink escape prevention)."
+        )
 
     # Ensure the parent directory of the file exists (common failure point)
     parent = Path(file_path).parent
@@ -723,9 +803,24 @@ def tool_glob(pattern: str, path: str = WORKSPACE) -> str:
     seconds and block the entire agent loop.  We run the glob in a background
     thread and enforce a 30-second wall-clock timeout via threading.Event so
     the agent is not blocked indefinitely.
+
+    BUG-P18D-06: validate the path argument against the allowed workspace so
+    the LLM cannot pass path="/" to enumerate the full container filesystem.
     """
     _GLOB_MAX_RESULTS = 1000
     _GLOB_TIMEOUT_SECS = 30
+
+    # Validate path is inside the allowed workspace
+    _glob_path_err = _check_path_allowed(path)
+    if _glob_path_err:
+        return _glob_path_err
+    try:
+        _resolved_glob_path = str(Path(path).resolve())
+    except Exception as _rgp_exc:
+        return f"Error: cannot resolve path {path!r}: {_rgp_exc}"
+    if not any(_resolved_glob_path.startswith(pfx) for pfx in _ALLOWED_PATH_PREFIXES):
+        _log("⚠️ SECURITY", f"Glob: path escape blocked: {path!r} -> {_resolved_glob_path!r}")
+        return f"Error: access denied — path {path!r} is outside the allowed workspace"
 
     import threading as _threading
 
@@ -769,11 +864,33 @@ def tool_grep(pattern: str, path: str = WORKSPACE, include: str = "*") -> str:
     """
     在指定目錄下遞迴搜尋符合正規表達式的檔案內容，回傳「檔名:行號:內容」格式。
     include 參數可過濾副檔名，例如 include="*.py" 只搜尋 Python 檔案。
+
+    BUG-P18D-04/05: validate the path argument against the allowed workspace
+    so the LLM cannot pass path="/" or path="/etc" to grep arbitrary filesystem
+    locations.  The include and pattern arguments are passed as separate argv
+    elements (shell=False), so they cannot inject shell commands, but path is
+    the search root and must be sandbox-checked.
     """
+    # Validate path is inside the allowed workspace
+    _path_err = _check_path_allowed(path)
+    if _path_err:
+        return _path_err
+    # Re-check after resolving symlinks (path itself could be a symlink to /etc)
+    try:
+        _resolved_grep_path = str(Path(path).resolve())
+    except Exception as _rg_exc:
+        return f"Error: cannot resolve path {path!r}: {_rg_exc}"
+    if not any(_resolved_grep_path.startswith(pfx) for pfx in _ALLOWED_PATH_PREFIXES):
+        _log("⚠️ SECURITY", f"Grep: path escape blocked: {path!r} -> {_resolved_grep_path!r}")
+        return f"Error: access denied — path {path!r} is outside the allowed workspace"
+    # Validate include is a plain glob pattern (no path separators)
+    if "/" in include or "\\" in include or ".." in include:
+        return "Error: include parameter must be a plain filename glob (e.g. '*.py'), not a path"
     try:
         result = subprocess.run(
             ["grep", "-r", "-n", "--include", include, pattern, path],
-            capture_output=True, text=True, timeout=30
+            capture_output=True, text=True, timeout=30,
+            stdin=subprocess.DEVNULL,
         )
         output = result.stdout
         if result.stderr and not output:
@@ -831,6 +948,11 @@ def tool_web_fetch(url: str) -> str:
 
     _WEB_FETCH_TEXT_LIMIT = 50 * 1024    # 50 KB returned to LLM
     _WEB_FETCH_RAW_LIMIT  = 2 * 1024 * 1024  # 2 MB raw download cap
+
+    # BUG-P18D-08: validate url type before passing to urlparse to prevent
+    # AttributeError / TypeError when the LLM passes a non-string.
+    if not isinstance(url, str):
+        return f"Error: url must be a string, got {type(url).__name__}"
 
     # ── SSRF prevention ───────────────────────────────────────────────────────
     # Parse the URL and resolve the hostname to an IP, then reject private ranges.
@@ -908,7 +1030,40 @@ def tool_web_fetch(url: str) -> str:
                     pass
                 return super().redirect_request(req, fp, code, msg, headers, newurl)
 
-        _opener = urllib.request.build_opener(_LimitedRedirectHandler)
+        # BUG-P18D-07: DNS rebinding TOCTOU mitigation.  The pre-flight
+        # _is_ssrf_target() call resolves the hostname at check-time, but the
+        # actual TCP connection is made later by urllib.  A DNS rebinding attack
+        # can return a public IP at check-time, then switch to a private IP at
+        # connect-time to bypass the SSRF filter.
+        # Mitigation: monkey-patch socket.create_connection to re-validate the
+        # resolved IP address at the moment the TCP socket is opened.  This is
+        # the only reliable defence without external libraries (e.g. pycurl).
+        import socket as _socket_rebind
+        _orig_create_conn = _socket_rebind.create_connection
+
+        def _safe_create_connection(address, *_args, **_kwargs):
+            _conn_host, _conn_port = address[0], address[1] if len(address) > 1 else None
+            try:
+                _conn_ip = _socket_rebind.getaddrinfo(_conn_host, _conn_port)[0][4][0]
+                _conn_ip_obj = _ipaddress.ip_address(_conn_ip)
+                if (_conn_ip_obj.is_private or _conn_ip_obj.is_loopback or
+                        _conn_ip_obj.is_link_local or _conn_ip_obj.is_reserved or
+                        _conn_ip_obj.is_multicast or _conn_ip_obj.is_unspecified):
+                    raise urllib.error.URLError(
+                        f"SSRF: connection to private IP {_conn_ip!r} blocked (DNS rebinding protection)"
+                    )
+            except urllib.error.URLError:
+                raise
+            except Exception:
+                pass  # DNS error at connect time — let urllib surface it naturally
+            return _orig_create_conn(address, *_args, **_kwargs)
+
+        _socket_rebind.create_connection = _safe_create_connection
+        try:
+            _opener = urllib.request.build_opener(_LimitedRedirectHandler)
+        finally:
+            # Restore original create_connection regardless of outcome
+            _socket_rebind.create_connection = _orig_create_conn
 
         req = urllib.request.Request(
             url,
@@ -1607,20 +1762,57 @@ def execute_tool(name: str, args: dict, chat_jid: str) -> str:
 
 
 def _execute_tool_inner(name: str, args: dict, chat_jid: str) -> str:
+    # BUG-P18D-11: validate that args is a dict before key access to avoid
+    # AttributeError when the LLM passes a non-dict value.
+    if not isinstance(args, dict):
+        return f"Error: tool arguments must be a JSON object, got {type(args).__name__}"
     if name == "Bash":
-        return tool_bash(args["command"])
+        _cmd = args.get("command")
+        if not isinstance(_cmd, str):
+            return "Error: Bash requires a 'command' string argument"
+        return tool_bash(_cmd)
     elif name == "Read":
-        return tool_read(args["file_path"])
+        _fp = args.get("file_path")
+        if not isinstance(_fp, str):
+            return "Error: Read requires a 'file_path' string argument"
+        return tool_read(_fp)
     elif name == "Write":
-        return tool_write(args["file_path"], args["content"])
+        _fp = args.get("file_path")
+        _ct = args.get("content")
+        if not isinstance(_fp, str):
+            return "Error: Write requires a 'file_path' string argument"
+        if not isinstance(_ct, str):
+            return "Error: Write requires a 'content' string argument"
+        return tool_write(_fp, _ct)
     elif name == "Edit":
-        return tool_edit(args["file_path"], args["old_string"], args["new_string"])
+        _fp = args.get("file_path")
+        _os = args.get("old_string")
+        _ns = args.get("new_string")
+        if not isinstance(_fp, str):
+            return "Error: Edit requires a 'file_path' string argument"
+        if not isinstance(_os, str):
+            return "Error: Edit requires an 'old_string' string argument"
+        if not isinstance(_ns, str):
+            return "Error: Edit requires a 'new_string' string argument"
+        return tool_edit(_fp, _os, _ns)
     elif name == "mcp__evoclaw__send_message":
+        _text = args.get("text")
+        if not isinstance(_text, str):
+            return "Error: send_message requires a 'text' string argument"
         _messages_sent_via_tool.append(True)  # 標記：已透過工具發送，host 不需再發 result
-        return tool_send_message(chat_jid, args["text"], args.get("sender"))
+        return tool_send_message(chat_jid, _text, args.get("sender"))
     elif name == "mcp__evoclaw__schedule_task":
+        _sched_prompt = args.get("prompt")
+        _sched_type = args.get("schedule_type")
+        _sched_val = args.get("schedule_value")
+        if not isinstance(_sched_prompt, str):
+            return "Error: schedule_task requires a 'prompt' string argument"
+        if not isinstance(_sched_type, str):
+            return "Error: schedule_task requires a 'schedule_type' string argument"
+        if not isinstance(_sched_val, str):
+            return "Error: schedule_task requires a 'schedule_value' string argument"
         return tool_schedule_task(
-            args["prompt"], args["schedule_type"], args["schedule_value"],
+            _sched_prompt, _sched_type, _sched_val,
             args.get("context_mode", "group"),
             chat_jid,
         )
@@ -1633,15 +1825,30 @@ def _execute_tool_inner(name: str, args: dict, chat_jid: str) -> str:
     elif name == "mcp__evoclaw__resume_task":
         return tool_resume_task(args.get("task_id", ""))
     elif name == "Glob":
-        return tool_glob(args["pattern"], args.get("path", WORKSPACE))
+        _glob_pat = args.get("pattern")
+        if not isinstance(_glob_pat, str):
+            return "Error: Glob requires a 'pattern' string argument"
+        return tool_glob(_glob_pat, args.get("path", WORKSPACE))
     elif name == "Grep":
-        return tool_grep(args["pattern"], args.get("path", WORKSPACE), args.get("include", "*"))
+        _grep_pat = args.get("pattern")
+        if not isinstance(_grep_pat, str):
+            return "Error: Grep requires a 'pattern' string argument"
+        return tool_grep(_grep_pat, args.get("path", WORKSPACE), args.get("include", "*"))
     elif name == "WebFetch":
-        return tool_web_fetch(args["url"])
+        _url = args.get("url")
+        if not isinstance(_url, str):
+            return "Error: WebFetch requires a 'url' string argument"
+        return tool_web_fetch(_url)
     elif name == "mcp__evoclaw__run_agent":
-        return tool_run_agent(args["prompt"], args.get("context_mode", "isolated"))
+        _ra_prompt = args.get("prompt")
+        if not isinstance(_ra_prompt, str):
+            return "Error: run_agent requires a 'prompt' string argument"
+        return tool_run_agent(_ra_prompt, args.get("context_mode", "isolated"))
     elif name == "mcp__evoclaw__send_file":
-        return tool_send_file(args.get("chat_jid", chat_jid), args["file_path"], args.get("caption", ""))
+        _sf_fp = args.get("file_path")
+        if not isinstance(_sf_fp, str):
+            return "Error: send_file requires a 'file_path' string argument"
+        return tool_send_file(args.get("chat_jid", chat_jid), _sf_fp, args.get("caption", ""))
     elif name == "mcp__evoclaw__reset_group":
         target_jid = args.get("jid", "")
         if not target_jid:
