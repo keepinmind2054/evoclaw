@@ -61,6 +61,64 @@ def _preflight_check() -> None:
         sys.exit(1)
 
 
+def _parse_args() -> None:
+    """Parse command-line arguments before anything else is imported.
+
+    run.py is intentionally minimal — most configuration comes from .env.
+    The only CLI flags currently supported are:
+
+      --version   Print the package version and exit (0).
+      --help / -h Handled by argparse automatically.
+
+    Unknown arguments are rejected so operators get a clear error instead of
+    having stray flags silently ignored and causing confusing startup failures.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="evoclaw",
+        description="EvoClaw — Gemini-powered personal AI assistant",
+        add_help=True,
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        # BUG-RUN-01 FIX: There was no --version flag at all.  Read the
+        # canonical version from pyproject.toml metadata so it stays in sync
+        # automatically.  Fall back gracefully if the package is not installed
+        # (e.g. during development via `python run.py` from the repo root).
+        version=_get_version(),
+        help="Show the EvoClaw version and exit.",
+    )
+    # Parse known args only — if someone passes an unknown flag we want a clear
+    # error, not a silent ignore.
+    _args, unknown = parser.parse_known_args()
+    if unknown:
+        parser.error(f"Unrecognised argument(s): {' '.join(unknown)}")
+
+
+def _get_version() -> str:
+    """Return the package version string from installed metadata or pyproject.toml."""
+    try:
+        from importlib.metadata import version as _meta_version
+        return f"EvoClaw %(prog)s {_meta_version('evoclaw')}"
+    except Exception:
+        pass
+    # Fallback: parse pyproject.toml directly (works during development)
+    try:
+        from pathlib import Path
+        import re
+        toml_path = Path(__file__).parent / "pyproject.toml"
+        if toml_path.exists():
+            text = toml_path.read_text(encoding="utf-8")
+            m = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+            if m:
+                return f"EvoClaw %(prog)s {m.group(1)}"
+    except Exception:
+        pass
+    return "EvoClaw %(prog)s (unknown version)"
+
+
 if __name__ == "__main__":
     # p15d BUG-FIX (LOW): set WindowsProactorEventLoopPolicy before asyncio.run()
     # so asyncio subprocesses work correctly on Windows.  Without this, Docker
@@ -70,6 +128,10 @@ if __name__ == "__main__":
     # point) did not, so the policy was never applied when using `python run.py`.
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    # BUG-RUN-01 FIX: Parse CLI arguments (including --version) before any
+    # heavy imports or the preflight check, so `python run.py --version` works
+    # even when the .env is missing or the host package has import errors.
+    _parse_args()
     _preflight_check()
     from host.main import main
     asyncio.run(main())

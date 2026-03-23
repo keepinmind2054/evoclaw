@@ -4,6 +4,7 @@ Uses HTTP polling instead of WebSocket for simplicity.
 Endpoint: http://localhost:8766/
 """
 import base64
+import hmac
 import http.server
 import json
 import logging
@@ -30,6 +31,11 @@ _MAX_SESSIONS = 500            # maximum concurrent WebPortal sessions
 _MAX_SESSION_MESSAGES = 200    # maximum messages stored per session
 _MAX_BODY_SIZE = 64 * 1024     # 64 KB — reject larger POST bodies (prevent OOM)
 _MAX_TEXT_SIZE = 32 * 1024     # 32 KB — reject individual messages larger than this
+
+# BUG-WP-07 (MEDIUM): JID whitespace-only strings were accepted as valid.
+# Validate JID: must be non-empty after stripping and contain only safe chars.
+import re as _re
+_JID_RE = _re.compile(r'^[\w@.\-:+]{1,256}$')
 
 
 def _expire_sessions() -> None:
@@ -58,6 +64,10 @@ def _check_auth(handler: "http.server.BaseHTTPRequestHandler") -> bool:
     Authentication is enabled when DASHBOARD_PASSWORD is non-empty (re-uses the
     same credential already configured for the dashboard).  Sends a 401 with
     WWW-Authenticate header when the credential is missing or wrong.
+
+    BUG-WP-01 (HIGH): The original comparison `provided_pw == password` is a
+    plain string equality check, which is vulnerable to timing side-channel
+    attacks.  Fixed by using hmac.compare_digest() for constant-time comparison.
     """
     password = config.DASHBOARD_PASSWORD
     if not password:
@@ -66,8 +76,9 @@ def _check_auth(handler: "http.server.BaseHTTPRequestHandler") -> bool:
     if auth_header.startswith("Basic "):
         try:
             decoded = base64.b64decode(auth_header[6:]).decode("utf-8", errors="replace")
-            username, _, provided_pw = decoded.partition(":")
-            if provided_pw == password:
+            _username, _, provided_pw = decoded.partition(":")
+            # BUG-WP-01 FIX: use constant-time comparison to prevent timing attacks
+            if hmac.compare_digest(provided_pw, password):
                 return True
         except Exception:
             pass
@@ -79,9 +90,26 @@ def _check_auth(handler: "http.server.BaseHTTPRequestHandler") -> bool:
     return False
 
 
+# Security headers applied to every response.  Defined once for consistency
+# with Phase 13A's additions to dashboard.py (BUG-WP-04).
+_SECURITY_HEADERS: list[tuple[str, str]] = [
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    (
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline';",
+    ),
+]
+
+
 class _WebPortalHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         log.debug(f"WebPortal: {fmt % args}")
+
+    def _add_security_headers(self) -> None:
+        """BUG-WP-04 FIX: emit security headers on every authenticated response."""
+        for name, value in _SECURITY_HEADERS:
+            self.send_header(name, value)
 
     def do_GET(self):
         # /health is unauthenticated (used by health checkers)
@@ -97,7 +125,10 @@ class _WebPortalHandler(http.server.BaseHTTPRequestHandler):
         elif self.path.startswith("/api/poll"):
             self._api_poll()
         else:
+            # BUG-WP-09 FIX: 404 responses were missing end_headers(), causing
+            # the HTTP response to be incomplete and the connection to hang.
             self.send_response(404)
+            self.send_header("Content-Length", "0")
             self.end_headers()
 
     def do_POST(self):
@@ -108,11 +139,26 @@ class _WebPortalHandler(http.server.BaseHTTPRequestHandler):
         elif self.path == "/api/session":
             self._api_new_session()
         else:
+            # BUG-WP-09 FIX: 404 responses were missing end_headers()
             self.send_response(404)
+            self.send_header("Content-Length", "0")
             self.end_headers()
 
     def _read_body(self) -> bytes:
-        length = int(self.headers.get("Content-Length", 0))
+        raw_length = self.headers.get("Content-Length", "0")
+        try:
+            length = int(raw_length)
+        except (ValueError, TypeError):
+            length = 0
+        # BUG-WP-03 FIX: A crafted request with a negative Content-Length
+        # would pass the upper-bound check (negative < 64 KB) and then cause
+        # rfile.read() to read() with a negative argument, which returns b""
+        # silently on CPython but is technically undefined.  Reject it explicitly.
+        if length < 0:
+            self.send_response(400)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            raise ValueError(f"Invalid Content-Length: {length}")
         if length > _MAX_BODY_SIZE:
             self.send_response(413)
             self.send_header("Content-Length", "0")
@@ -125,13 +171,15 @@ class _WebPortalHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        # BUG-WP-04 FIX: add security headers to JSON responses too
+        self._add_security_headers()
         self.end_headers()
         self.wfile.write(body)
 
     def _api_new_session(self):
         try:
             body = json.loads(self._read_body())
-            jid = body.get("jid", "")
+            jid = body.get("jid", "").strip()
         except Exception:
             jid = ""
         session_id = str(uuid.uuid4())
@@ -166,7 +214,16 @@ class _WebPortalHandler(http.server.BaseHTTPRequestHandler):
         from urllib.parse import urlparse, parse_qs
         qs = parse_qs(urlparse(self.path).query)
         session_id = qs.get("session_id", [""])[0]
-        since = float(qs.get("since", ["0"])[0])
+        # BUG-WP-02 FIX: The original code used `float(qs.get("since", ["0"])[0])`
+        # with no try/except.  A crafted request with since=abc would propagate an
+        # unhandled ValueError up through the handler, causing a 500 internal error
+        # response.  Clamp to 0.0 on any parse failure.
+        try:
+            since = float(qs.get("since", ["0"])[0])
+            if since < 0:
+                since = 0.0
+        except (ValueError, TypeError):
+            since = 0.0
         with _sessions_lock:
             session = _sessions.get(session_id)
             if session is not None:
@@ -201,12 +258,19 @@ class _WebPortalHandler(http.server.BaseHTTPRequestHandler):
             # so this blocks CSRF attacks even when Basic Auth is cached by the browser.
             expected_csrf = session.get("csrf_token", "")
             provided_csrf = self.headers.get("X-CSRF-Token", "")
-            if expected_csrf and provided_csrf != expected_csrf:
+            if expected_csrf and not hmac.compare_digest(provided_csrf, expected_csrf):
                 self._send_json({"error": "CSRF token mismatch"}, 403)
                 return
             jid = session.get("jid", "")
             if not jid:
                 self._send_json({"error": "no group selected"}, 400)
+                return
+            # BUG-WP-07 FIX: Validate the JID stored in the session against the
+            # allowlist pattern.  An empty or malformed JID could slip through
+            # _api_new_session if the client supplied one; reject it here before
+            # it reaches the DB layer.
+            if not _JID_RE.match(jid):
+                self._send_json({"error": "invalid group JID"}, 400)
                 return
             # Store user message in session (cap per-session message list to prevent OOM)
             ts = time.time()
@@ -224,15 +288,23 @@ class _WebPortalHandler(http.server.BaseHTTPRequestHandler):
                 _pending_replies[msg_id] = (session_id, time.time())
             self._send_json({"ok": True, "msg_id": msg_id})
         except ValueError:
-            pass  # _read_body already sent 413
+            pass  # _read_body already sent 413/400
         except Exception as e:
-            self._send_json({"error": str(e)}, 500)
+            # BUG-WP-08 FIX: The original code sent `str(e)` as the error
+            # message, leaking internal exception details (file paths, SQL
+            # errors, stack context) to the client.  Log the full error
+            # server-side and return a generic message to the caller.
+            log.exception("WebPortal: unhandled error in _api_send")
+            self._send_json({"error": "internal server error"}, 500)
 
     def _serve_html(self):
         html = _PORTAL_HTML.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(html)))
+        # BUG-WP-04 FIX: add security headers to HTML response (consistent with
+        # what Phase 13A added to dashboard.py's HTML endpoint).
+        self._add_security_headers()
         self.end_headers()
         self.wfile.write(html)
 
@@ -297,13 +369,13 @@ header h1 { font-size: 18px; color: #a78bfa; }
 </head>
 <body>
 <header>
-  <h1>⚡ EvoClaw</h1>
-  <select id="group-select"><option value="">選擇群組...</option></select>
+  <h1>&#9889; EvoClaw</h1>
+  <select id="group-select"><option value="">&#36984;&#25321;&#32676;&#32244;...</option></select>
 </header>
 <div id="chat"></div>
 <div id="input-area">
-  <textarea id="msg-input" placeholder="輸入訊息... (Enter 送出, Shift+Enter 換行)" rows="1"></textarea>
-  <button id="send-btn" disabled>送出</button>
+  <textarea id="msg-input" placeholder="&#36664;&#20837;&#35338;&#24687;... (Enter &#36865;&#20986;, Shift+Enter &#25442;&#34892;)" rows="1"></textarea>
+  <button id="send-btn" disabled>&#36865;&#20986;</button>
 </div>
 <script>
 let sessionId = null, csrfToken = null, lastTs = 0, pollTimer = null;
@@ -334,7 +406,7 @@ async function startSession(jid) {
 
 async function poll() {
   if (!sessionId) return;
-  const res = await fetch(`/api/poll?session_id=${sessionId}&since=${lastTs}`);
+  const res = await fetch(`/api/poll?session_id=${encodeURIComponent(sessionId)}&since=${lastTs}`);
   const { messages } = await res.json();
   messages.forEach(m => {
     addMessage(m.role, m.text);
@@ -365,7 +437,7 @@ async function sendMessage() {
   const thinking = document.createElement('div');
   thinking.className = 'msg assistant thinking';
   thinking.id = 'thinking';
-  thinking.textContent = '思考中...';
+  thinking.textContent = '\u601d\u8003\u4e2d...';
   document.getElementById('chat').appendChild(thinking);
   document.getElementById('chat').scrollTop = 9999;
   setTimeout(() => { btn.disabled = false; const t = document.getElementById('thinking'); if(t) t.remove(); }, 3000);
@@ -383,15 +455,56 @@ init();
 </html>"""
 
 
-def start_webportal(route_output_fn=None):
-    """Start the web portal in a background daemon thread."""
+def start_webportal(stop_event=None):
+    """Start the web portal in a background daemon thread.
+
+    BUG-WP-06 FIX: The original start_webportal() did not accept a stop_event,
+    unlike start_dashboard() which does.  Without it, the HTTP server runs
+    until the process dies — it cannot be shut down gracefully when the asyncio
+    event loop requests a clean shutdown (e.g. SIGTERM / Ctrl-C).  Accepting the
+    same asyncio.Event that main() uses allows a watcher thread to call
+    server.shutdown() when the event fires, mirroring the dashboard pattern.
+    """
     if not config.WEBPORTAL_ENABLED:
         return None
+
+    # BUG-WP-05 FIX: Emit a warning when the web portal is enabled but no
+    # password has been set.  The dashboard already warns via
+    # config.warn_dashboard_no_password(); the web portal has the same exposure
+    # (it is a browser-accessible HTTP interface) but previously had no warning.
+    if not config.DASHBOARD_PASSWORD:
+        log.warning(
+            "WEBPORTAL_ENABLED=true but DASHBOARD_PASSWORD is not set — "
+            "the web portal has NO authentication. "
+            "Set DASHBOARD_PASSWORD in .env to enable HTTP Basic Auth."
+        )
+
     server = http.server.ThreadingHTTPServer(
         (config.WEBPORTAL_HOST, config.WEBPORTAL_PORT),
         _WebPortalHandler,
     )
     t = threading.Thread(target=server.serve_forever, daemon=True, name="webportal")
     t.start()
-    log.info(f"Web portal started at http://{config.WEBPORTAL_HOST}:{config.WEBPORTAL_PORT}/")
+    log.info("Web portal started at http://%s:%s/", config.WEBPORTAL_HOST, config.WEBPORTAL_PORT)
+
+    if stop_event is not None:
+        # Watch the asyncio stop_event from a background thread and call
+        # server.shutdown() when it fires, mirroring start_dashboard() (Issue #56).
+        import asyncio as _asyncio
+
+        def _watch_stop():
+            try:
+                loop = stop_event._loop  # type: ignore[attr-defined]
+            except AttributeError:
+                loop = _asyncio.get_event_loop()
+            try:
+                future = _asyncio.run_coroutine_threadsafe(stop_event.wait(), loop)
+                future.result()
+            except Exception:
+                pass
+            server.shutdown()
+
+        watcher = threading.Thread(target=_watch_stop, daemon=True, name="webportal-stopper")
+        watcher.start()
+
     return server
