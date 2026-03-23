@@ -226,6 +226,11 @@ _registered_groups: list[dict] = []
 # 使用 per-JID 游標而非全域游標，防止群組 A 的成功執行推進游標
 # 超過群組 B 尚未處理的訊息時間戳記，導致群組 B 的訊息被靜默丟棄。
 # 舊版單一全域游標 lastTimestamp 仍用作啟動時的初始值（向後相容）。
+# Legacy cursor: used only as fallback for groups with no per-JID cursor entry.
+# TODO(v2.x): Remove _last_timestamp entirely once all active groups have been
+# seen at least once and have per-JID cursor entries.  This was the original
+# single-cursor design from v1.0 and exists only for backward compatibility.
+# All new cursor reads/writes should use _per_jid_cursors instead.
 _last_timestamp: int = 0           # global fallback / legacy cursor (read-only after init)
 _per_jid_cursors: dict[str, int] = {}  # per-JID cursors (authoritative)
 

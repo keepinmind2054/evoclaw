@@ -74,6 +74,19 @@ CONTAINER_IMAGE = os.environ.get("CONTAINER_IMAGE", "evoclaw-agent:latest")
 # Default: 1 800 000 ms = 1800 s = 30 minutes.
 # Override via env: CONTAINER_TIMEOUT=60000  (60 s, useful for fast-response groups)
 CONTAINER_TIMEOUT = _env_int("CONTAINER_TIMEOUT", 30 * 60 * 1000) / 1000
+# Startup sanity check: if CONTAINER_TIMEOUT looks like it was set in seconds
+# (i.e. < 1000) instead of milliseconds, warn the operator.  A value of 30
+# means 30 ms — almost certainly a misconfiguration (should be 30000 for 30 s).
+_raw_container_timeout = _env_int("CONTAINER_TIMEOUT", 30 * 60 * 1000)
+if _raw_container_timeout < 1000 and os.environ.get("CONTAINER_TIMEOUT"):
+    import warnings as _warnings
+    _warnings.warn(
+        f"CONTAINER_TIMEOUT={_raw_container_timeout} looks like it may be set in seconds. "
+        f"EvoClaw expects milliseconds (e.g., 30000 for 30 seconds). "
+        f"Current effective timeout: {CONTAINER_TIMEOUT:.1f}s",
+        UserWarning,
+        stacklevel=2,
+    )
 IDLE_TIMEOUT = _env_int("IDLE_TIMEOUT", 30 * 60 * 1000) / 1000
 # BUG-CFG-01 FIX: enforce minimum of 1.  A value of 0 or negative makes the
 # concurrency check (self._active_count >= MAX_CONCURRENT_CONTAINERS) always

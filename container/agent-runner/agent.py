@@ -1593,6 +1593,32 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
                 })
                 final_response = ""
                 continue
+
+            # ── Semantic cross-validation: action claim without any tool call ──
+            # If the agent's text claims it completed an action (using common
+            # completion verbs) but did NOT call any tools this turn, inject a
+            # verification demand.  This catches hallucinations that slip past the
+            # syntactic _FAKE_STATUS_RE patterns above.
+            _ACTION_CLAIM_RE_C = _re_claude.compile(
+                r'(?:已|完成|成功|部署|修復|修正|更新|寫入|建立|刪除|執行)'
+                r'|(?:fixed|deployed|updated|written|created|deleted|executed|completed|done)',
+                _re_claude.IGNORECASE,
+            )
+            _had_tool_calls_this_turn = any(
+                hasattr(b, "type") and b.type == "tool_use"
+                for b in response.content
+            )
+            if not _had_tool_calls_this_turn and _ACTION_CLAIM_RE_C.search(final_response) and n < MAX_ITER - 1:
+                _log("⚠️ SEMANTIC-FAKE", "Claude claims action complete but called no tools this turn")
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "【系統驗證】你的回應中聲稱已執行了某項操作，但本輪沒有呼叫任何工具。"
+                        "請實際使用對應工具（Read/Write/Edit/Bash）執行並確認，不要只是聲明已完成。"
+                    ),
+                })
+                final_response = ""
+                continue
             break
 
         if response.stop_reason != "tool_use":
@@ -2130,6 +2156,26 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                 })
                 continue
 
+            # ── Semantic cross-validation: action claim without any tool call ──
+            # Catches completion-verb hallucinations that slip past syntactic patterns.
+            _ACTION_CLAIM_RE_OAI = _re_cb.compile(
+                r'(?:已|完成|成功|部署|修復|修正|更新|寫入|建立|刪除|執行)'
+                r'|(?:fixed|deployed|updated|written|created|deleted|executed|completed|done)',
+                _re_cb.IGNORECASE,
+            )
+            # OpenAI: tool calls appear as msg.tool_calls (None or empty list when absent)
+            _had_tool_calls_this_turn_oai = bool(getattr(msg, "tool_calls", None))
+            if not _had_tool_calls_this_turn_oai and _ACTION_CLAIM_RE_OAI.search(content) and n < MAX_ITER - 1:
+                _log("⚠️ SEMANTIC-FAKE", "OpenAI model claims action complete but called no tools this turn")
+                history.append({
+                    "role": "user",
+                    "content": (
+                        "【系統驗證】你的回應中聲稱已執行了某項操作，但本輪沒有呼叫任何工具。"
+                        "請實際使用對應工具（Read/Write/Edit/Bash）執行並確認，不要只是聲明已完成。"
+                    ),
+                })
+                continue
+
             # No code blocks, no fake status — model is genuinely done
             final_response = content
             break
@@ -2432,6 +2478,24 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
                 history.append(types.Content(role="user", parts=[types.Part(text=(
                     "【系統警告】你剛才的回覆包含假狀態指示（例如 ✅ Done 或 *(正在執行...)* ），但沒有呼叫任何工具。"
                     "請立刻使用 Bash tool 或其他工具實際執行所需命令，不要只是描述或假裝完成。"
+                ))]))
+                final_response = ""
+                continue
+
+            # ── Semantic cross-validation: action claim without any tool call ──
+            # Catches completion-verb hallucinations that slip past syntactic patterns.
+            _ACTION_CLAIM_RE_G = _re_gemini.compile(
+                r'(?:已|完成|成功|部署|修復|修正|更新|寫入|建立|刪除|執行)'
+                r'|(?:fixed|deployed|updated|written|created|deleted|executed|completed|done)',
+                _re_gemini.IGNORECASE,
+            )
+            # Gemini: fn_calls is already empty here (we're in the `if not fn_calls` branch)
+            # so _had_tool_calls_this_turn is always False at this point.
+            if _ACTION_CLAIM_RE_G.search(final_response) and n < MAX_ITER - 1:
+                _log("⚠️ SEMANTIC-FAKE", "Gemini claims action complete but called no tools this turn")
+                history.append(types.Content(role="user", parts=[types.Part(text=(
+                    "【系統驗證】你的回應中聲稱已執行了某項操作，但本輪沒有呼叫任何工具。"
+                    "請實際使用對應工具（Read/Write/Edit/Bash）執行並確認，不要只是聲明已完成。"
                 ))]))
                 final_response = ""
                 continue

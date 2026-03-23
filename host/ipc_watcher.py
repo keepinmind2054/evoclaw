@@ -153,7 +153,16 @@ async def process_ipc_dir(group_folder: str, is_main: bool, route_fn: Callable) 
     for d in [msg_dir, task_dir]:
         if not d.exists():
             continue
-        # sorted() 確保按檔名（時間戳記前綴）的 FIFO 順序處理
+        # sorted() 確保按檔名（時間戳記前綴）的 FIFO 順序處理。
+        # NOTE (STABILITY_ANALYSIS 5.1): File ordering relies on wall-clock
+        # timestamps embedded in filenames (e.g. ipc_error_alert_1700000000000.json).
+        # On a single-machine deployment this is safe because all writers share the
+        # same system clock.  In a multi-machine / NTP-adjusted environment, clock
+        # skew could cause two near-simultaneous files from different hosts to sort
+        # in the wrong order.  If multi-host IPC is ever needed, replace the
+        # timestamp prefix with a monotonically-increasing sequence number (e.g.
+        # using an atomic integer in shared memory or a database sequence) so that
+        # ordering is guaranteed regardless of clock skew.
         for f in sorted(d.glob("*.json")):
             try:
                 content = f.read_text(encoding="utf-8")

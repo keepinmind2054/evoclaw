@@ -492,11 +492,17 @@ def start_webportal(stop_event=None):
         # server.shutdown() when it fires, mirroring start_dashboard() (Issue #56).
         import asyncio as _asyncio
 
+        # Capture the running loop at call time (this function is called from the
+        # asyncio event loop thread).  _watch_stop runs in a daemon thread where
+        # get_event_loop() / get_running_loop() are not reliable; capturing the
+        # loop here avoids the deprecated get_event_loop() fallback.
+        _captured_loop = _asyncio.get_running_loop()
+
         def _watch_stop():
             try:
                 loop = stop_event._loop  # type: ignore[attr-defined]
             except AttributeError:
-                loop = _asyncio.get_event_loop()
+                loop = _captured_loop
             try:
                 future = _asyncio.run_coroutine_threadsafe(stop_event.wait(), loop)
                 future.result()
