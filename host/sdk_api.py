@@ -53,6 +53,7 @@ import json
 import logging
 import os
 import time
+from collections import deque
 from typing import TYPE_CHECKING, Optional, Set
 
 logger = logging.getLogger(__name__)
@@ -62,13 +63,15 @@ if TYPE_CHECKING:
     from .identity.agent_identity import AgentIdentityStore
 
 
+_VALID_SCOPES = frozenset({"private", "shared", "project"})
+
 class SdkApi:
     """
     External WebSocket SDK API for the UnifiedClaw Gateway.
-    
+
     Allows external tools to query memory, check agent status,
     and submit tasks without needing direct database access.
-    
+
     Authentication: Optional bearer token via SDK_API_TOKEN env var.
     If not set, all connections are accepted (suitable for localhost use).
     """
@@ -77,12 +80,20 @@ class SdkApi:
     MAX_CONNECTIONS = 50
     PING_INTERVAL = 30  # seconds
 
+    # BUG-18C-03 (MEDIUM): No per-connection message rate limit — an
+    # authenticated client can spam memory_write / memory_query at unlimited
+    # throughput, flooding SQLite and starving other coroutines.
+    # Cap at MAX_MSG_PER_WINDOW messages in a RATE_WINDOW_SECS rolling window.
+    MAX_MSG_PER_WINDOW = 60   # messages
+    RATE_WINDOW_SECS   = 10   # seconds
+
     def __init__(
         self,
         memory_bus: "MemoryBus",
         identity_store: "AgentIdentityStore",
         port: Optional[int] = None,
         token: Optional[str] = None,
+        bot_registry=None,
     ):
         self._memory_bus = memory_bus
         self._identity_store = identity_store
@@ -91,6 +102,19 @@ class SdkApi:
         self._connections: Set = set()
         self._running = False
         self._task_submit_callback = None
+        self._bot_registry = bot_registry  # Phase 3: BotRegistry
+        self._handlers = {
+            "ping":           self._handle_ping,
+            "memory_query":   self._handle_memory_query,
+            "memory_write":   self._handle_memory_write,
+            "agent_list":     self._handle_agent_list,
+            "bot_register":   self._handle_bot_register,
+            "bot_lookup":     self._handle_bot_lookup,
+            "bot_list":       self._handle_bot_list,
+            "bot_handshake":  self._handle_bot_handshake,
+            "system_status":  self._handle_system_status,
+            "task_submit":    self._handle_task_submit,
+        }
 
     async def start(self):
         """Start the SDK API WebSocket server."""
@@ -101,10 +125,13 @@ class SdkApi:
             return
 
         self._running = True
-        logger.info(f"SdkApi starting on ws://0.0.0.0:{self._port}")
+        _host = os.environ.get("SDK_API_HOST", "127.0.0.1")
+        if _host not in ("127.0.0.1", "localhost"):
+            logger.warning("SDK API bound to %s — ensure firewall rules are in place", _host)
+        logger.info(f"SdkApi starting on ws://{_host}:{self._port}")
         async with websockets.serve(
             self._handle_connection,
-            "0.0.0.0",
+            _host,
             self._port,
             max_size=1_048_576,  # 1MB max message
         ):
@@ -146,6 +173,17 @@ class SdkApi:
         remote = getattr(websocket, "remote_address", "unknown")
         logger.info(f"SdkApi: client connected from {remote}")
 
+        # BUG-SDK-01 (CRITICAL): Auth was checked per-message — an unauthenticated
+        # client received an error reply but the loop continued, allowing
+        # unlimited retry attempts without disconnecting.  Authenticate once on
+        # the first message and close the socket on failure.
+        _authenticated = not bool(self._token)  # True when no token required
+
+        # BUG-18C-03 (MEDIUM): Per-connection rate limiting.
+        # Track timestamps of recent messages in a deque; prune entries older
+        # than RATE_WINDOW_SECS and reject when the count exceeds the cap.
+        _msg_times: deque = deque()
+
         try:
             async for raw in websocket:
                 try:
@@ -154,10 +192,27 @@ class SdkApi:
                     await self._send_error(websocket, "invalid_json", "Invalid JSON")
                     continue
 
-                # Optional authentication
-                if self._token and msg.get("token") != self._token:
-                    await self._send_error(websocket, "unauthorized", "Invalid or missing token")
+                if not _authenticated:
+                    if msg.get("token") != self._token:
+                        await self._send_error(websocket, "unauthorized", "Invalid or missing token")
+                        await websocket.close()
+                        return
+                    _authenticated = True
+                    # Strip token from msg before dispatching to handlers so it
+                    # is not accidentally echoed back in error responses.
+                    msg.pop("token", None)
+
+                # BUG-18C-03 (MEDIUM): Enforce per-connection message rate limit.
+                now = time.time()
+                while _msg_times and now - _msg_times[0] > self.RATE_WINDOW_SECS:
+                    _msg_times.popleft()
+                if len(_msg_times) >= self.MAX_MSG_PER_WINDOW:
+                    await self._send_error(
+                        websocket, "rate_limited",
+                        f"Rate limit: max {self.MAX_MSG_PER_WINDOW} messages per {self.RATE_WINDOW_SECS}s"
+                    )
                     continue
+                _msg_times.append(now)
 
                 await self._dispatch(websocket, msg)
 
@@ -170,17 +225,7 @@ class SdkApi:
     async def _dispatch(self, websocket, msg: dict):
         """Route incoming message to appropriate handler."""
         msg_type = msg.get("type", "")
-
-        handlers = {
-            "ping":          self._handle_ping,
-            "memory_query":  self._handle_memory_query,
-            "memory_write":  self._handle_memory_write,
-            "agent_list":    self._handle_agent_list,
-            "system_status": self._handle_system_status,
-            "task_submit":   self._handle_task_submit,
-        }
-
-        handler = handlers.get(msg_type)
+        handler = self._handlers.get(msg_type)
         if handler:
             await handler(websocket, msg)
         else:
@@ -193,7 +238,12 @@ class SdkApi:
         """Query memories for an agent."""
         query = msg.get("query", "")
         agent_id = msg.get("agent_id", "")
-        k = int(msg.get("k", 5))
+        # BUG-SDK-02 (MEDIUM): Unbounded `k` allows a client to request
+        # millions of results, exhausting memory.  Cap at 100.
+        try:
+            k = max(1, min(int(msg.get("k", 5)), 100))
+        except (TypeError, ValueError):
+            k = 5
         project = msg.get("project", "")
 
         if not query or not agent_id:
@@ -220,7 +270,15 @@ class SdkApi:
                 "count": len(memories),
             }))
         except Exception as e:
-            await self._send_error(websocket, "memory_error", str(e))
+            # BUG-SDK-03 (MEDIUM): Exception message leaked verbatim — may
+            # contain internal paths or DB schema.  Log the full error
+            # server-side; return only a generic message to the client.
+            logger.error("SdkApi: memory_query error: %s", e, exc_info=True)
+            await self._send_error(websocket, "memory_error", "Internal error during memory query")
+
+    # BUG-SDK-04 (HIGH): No size limit on memory write content — an attacker
+    # can write multi-MB strings and exhaust memory / disk.
+    _MAX_MEMORY_CONTENT = 64 * 1024  # 64 KB
 
     async def _handle_memory_write(self, websocket, msg: dict):
         """Write a memory entry."""
@@ -228,10 +286,35 @@ class SdkApi:
         agent_id = msg.get("agent_id", "")
         scope = msg.get("scope", "shared")
         project = msg.get("project", "")
-        importance = float(msg.get("importance", 0.5))
+        # BUG-SDK-02 (MEDIUM): importance not validated / clamped.
+        try:
+            importance = max(0.0, min(1.0, float(msg.get("importance", 0.5))))
+        except (TypeError, ValueError):
+            importance = 0.5
 
         if not content or not agent_id:
             await self._send_error(websocket, "missing_params", "content and agent_id required")
+            return
+
+        # BUG-18C-02 (MEDIUM): scope was never validated against the allowed set
+        # {"private", "shared", "project"}.  An invalid scope (e.g. "admin",
+        # "", or a random string) was silently written to the DB and became
+        # permanently invisible to all search queries (no WHERE clause branch
+        # matches it), wasting storage and confusing callers who received a
+        # successful memory_ack.  Reject invalid scopes up-front.
+        if scope not in _VALID_SCOPES:
+            await self._send_error(
+                websocket, "invalid_scope",
+                f"scope must be one of: {', '.join(sorted(_VALID_SCOPES))}"
+            )
+            return
+
+        # BUG-SDK-04 (HIGH): Enforce content size limit.
+        if len(content) > self._MAX_MEMORY_CONTENT:
+            await self._send_error(
+                websocket, "content_too_large",
+                f"Content exceeds {self._MAX_MEMORY_CONTENT} byte limit"
+            )
             return
 
         try:
@@ -245,13 +328,29 @@ class SdkApi:
                 "scope": scope,
             }))
         except Exception as e:
-            await self._send_error(websocket, "memory_error", str(e))
+            # BUG-SDK-03 (MEDIUM): Do not leak internal error detail.
+            logger.error("SdkApi: memory_write error: %s", e, exc_info=True)
+            await self._send_error(websocket, "memory_error", "Internal error during memory write")
+
+    # BUG-18C-05 (MEDIUM): agent_list previously returned ALL agents in a
+    # single WebSocket frame.  With many agents this can exhaust memory when
+    # serialising the list and may exceed the 1 MB max_size frame limit.
+    # Cap the response at _MAX_AGENT_LIST entries and honour a caller-supplied
+    # "limit" (clamped to the same cap).
+    _MAX_AGENT_LIST = 500
 
     async def _handle_agent_list(self, websocket, msg: dict):
-        """List all known agents."""
+        """List all known agents (paginated, max _MAX_AGENT_LIST per call)."""
         project = msg.get("project", "")
+        # BUG-18C-05 (MEDIUM): apply a hard cap so the serialised response
+        # cannot exceed the WebSocket max_size limit.
+        try:
+            limit = max(1, min(int(msg.get("limit", self._MAX_AGENT_LIST)), self._MAX_AGENT_LIST))
+        except (TypeError, ValueError):
+            limit = self._MAX_AGENT_LIST
         try:
             agents = self._identity_store.list_agents(project=project)
+            page = agents[:limit]
             await websocket.send(json.dumps({
                 "type": "agent_list",
                 "agents": [
@@ -264,18 +363,42 @@ class SdkApi:
                         "message_count": a.message_count,
                         "last_active": a.last_active,
                     }
-                    for a in agents
+                    for a in page
                 ],
-                "count": len(agents),
+                "count": len(page),
+                "total": len(agents),
+                "truncated": len(agents) > limit,
             }))
         except Exception as e:
-            await self._send_error(websocket, "identity_error", str(e))
+            # p17c BUG-FIX (MEDIUM): do not leak internal error detail to clients.
+            logger.error("SdkApi: agent_list error: %s", e, exc_info=True)
+            await self._send_error(websocket, "identity_error", "Internal error listing agents")
 
     async def _handle_system_status(self, websocket, msg: dict):
         """Return system status."""
         try:
             memory_status = self._memory_bus.status()
-            agent_count = len(self._identity_store.list_agents())
+            try:
+                # p17c BUG-FIX (HIGH): the previous code called
+                # `with self._identity_store._lock:` — a threading.Lock — directly
+                # inside an async function.  threading.Lock.acquire() is a blocking
+                # call: if the lock is contended (e.g. another thread is writing to
+                # the identity store) the entire asyncio event loop thread is blocked
+                # for the duration, stalling every other coroutine.  Fix: run the
+                # DB read in a thread-pool executor so the lock acquisition blocks
+                # only the executor thread, not the event loop.
+                def _count_agents():
+                    with self._identity_store._lock:
+                        row = self._identity_store._conn.execute(
+                            "SELECT COUNT(*) FROM agent_identities"
+                        ).fetchone()
+                    return row[0] if row else 0
+
+                agent_count = await asyncio.get_running_loop().run_in_executor(
+                    None, _count_agents
+                )
+            except Exception:
+                agent_count = -1
             await websocket.send(json.dumps({
                 "type": "system_status",
                 "status": {
@@ -287,7 +410,12 @@ class SdkApi:
                 },
             }))
         except Exception as e:
-            await self._send_error(websocket, "status_error", str(e))
+            # p17c BUG-FIX (MEDIUM): do not leak internal error detail.
+            logger.error("SdkApi: system_status error: %s", e, exc_info=True)
+            await self._send_error(websocket, "status_error", "Internal error fetching system status")
+
+    # BUG-SDK-05 (HIGH): No size limit on task message content.
+    _MAX_TASK_MESSAGE = 32 * 1024  # 32 KB
 
     async def _handle_task_submit(self, websocket, msg: dict):
         """Submit a task to a group (if callback registered)."""
@@ -298,14 +426,145 @@ class SdkApi:
             await self._send_error(websocket, "missing_params", "group and message required")
             return
 
+        # BUG-SDK-05 (HIGH): Enforce message size limit.
+        if len(message) > self._MAX_TASK_MESSAGE:
+            await self._send_error(
+                websocket, "message_too_large",
+                f"Message exceeds {self._MAX_TASK_MESSAGE} byte limit"
+            )
+            return
+
         if self._task_submit_callback:
             try:
                 task_id = await self._task_submit_callback(group, message)
                 await websocket.send(json.dumps({"type": "task_ack", "task_id": task_id, "group": group}))
             except Exception as e:
-                await self._send_error(websocket, "task_error", str(e))
+                # BUG-SDK-03 (MEDIUM): Do not leak internal error detail.
+                logger.error("SdkApi: task_submit error: %s", e, exc_info=True)
+                await self._send_error(websocket, "task_error", "Internal error during task submission")
         else:
             await self._send_error(websocket, "not_configured", "Task submission not configured")
+
+    # ── Phase 3: Bot Registry handlers ──────────────────────────────────────
+
+    async def _handle_bot_register(self, websocket, msg: dict):
+        """Register a bot identity in the registry."""
+        if not self._bot_registry:
+            await self._send_error(websocket, "not_configured", "BotRegistry not initialized")
+            return
+        try:
+            from .identity.bot_registry import BotIdentity
+            required = ("name", "display_name", "framework", "channel")
+            for field_name in required:
+                if not msg.get(field_name):
+                    await self._send_error(websocket, "missing_params", f"Missing field: {field_name}")
+                    return
+            bot_id = BotIdentity.make_bot_id(msg["name"], msg["framework"], msg["channel"])
+            identity = BotIdentity(
+                bot_id=bot_id,
+                name=msg["name"],
+                display_name=msg["display_name"],
+                framework=msg["framework"],
+                channel=msg["channel"],
+                capabilities=msg.get("capabilities", []),
+                ws_endpoint=msg.get("ws_endpoint"),
+                http_endpoint=msg.get("http_endpoint"),
+                trusted=False,
+            )
+            self._bot_registry.register(identity)
+            await websocket.send(json.dumps({
+                "type": "bot_registered",
+                "bot_id": bot_id,
+                "name": identity.name,
+            }))
+        except Exception as e:
+            # BUG-18C-01 (HIGH): str(e) leaks internal exception details
+            # (DB paths, schema, stack frames) to the remote client.
+            logger.error("SdkApi: bot_register error: %s", e, exc_info=True)
+            await self._send_error(websocket, "bot_register_error", "Internal error during bot registration")
+
+    async def _handle_bot_lookup(self, websocket, msg: dict):
+        """Look up a bot by ID or name."""
+        if not self._bot_registry:
+            await self._send_error(websocket, "not_configured", "BotRegistry not initialized")
+            return
+        try:
+            bot_id = msg.get("bot_id")
+            name = msg.get("name")
+            if bot_id:
+                identity = self._bot_registry.lookup(bot_id)
+            elif name:
+                identity = self._bot_registry.lookup_by_name(name)
+            else:
+                await self._send_error(websocket, "missing_params", "bot_id or name required")
+                return
+            if identity:
+                await websocket.send(json.dumps({"type": "bot_identity", "bot": identity.to_dict()}))
+            else:
+                await websocket.send(json.dumps({"type": "bot_not_found", "bot_id": bot_id, "name": name}))
+        except Exception as e:
+            # BUG-18C-01 (HIGH): str(e) leaks internal exception details.
+            logger.error("SdkApi: bot_lookup error: %s", e, exc_info=True)
+            await self._send_error(websocket, "bot_lookup_error", "Internal error during bot lookup")
+
+    async def _handle_bot_list(self, websocket, msg: dict):
+        """List all registered bots."""
+        if not self._bot_registry:
+            await self._send_error(websocket, "not_configured", "BotRegistry not initialized")
+            return
+        try:
+            trusted_only = msg.get("trusted_only", False)
+            bots = self._bot_registry.list_trusted() if trusted_only else self._bot_registry.list_all()
+            await websocket.send(json.dumps({
+                "type": "bot_list",
+                "bots": [b.to_dict() for b in bots],
+                "count": len(bots),
+            }))
+        except Exception as e:
+            # BUG-18C-01 (HIGH): str(e) leaks internal exception details.
+            logger.error("SdkApi: bot_list error: %s", e, exc_info=True)
+            await self._send_error(websocket, "bot_list_error", "Internal error listing bots")
+
+    async def _handle_bot_handshake(self, websocket, msg: dict):
+        """Initiate or complete a cross-bot handshake."""
+        if not self._bot_registry:
+            await self._send_error(websocket, "not_configured", "BotRegistry not initialized")
+            return
+        try:
+            action = msg.get("action", "initiate")
+            if action == "initiate":
+                initiator_id = msg.get("initiator_id", "")
+                target_id = msg.get("target_id", "")
+                if not initiator_id or not target_id:
+                    await self._send_error(websocket, "missing_params", "initiator_id and target_id required")
+                    return
+                nonce = self._bot_registry.initiate_handshake(initiator_id, target_id)
+                await websocket.send(json.dumps({
+                    "type": "bot_handshake_initiated",
+                    "initiator_id": initiator_id,
+                    "target_id": target_id,
+                    "nonce": nonce,
+                }))
+            elif action == "complete":
+                initiator_id = msg.get("initiator_id", "")
+                target_id = msg.get("target_id", "")
+                nonce = msg.get("nonce", "")
+                if not all([initiator_id, target_id, nonce]):
+                    await self._send_error(websocket, "missing_params", "initiator_id, target_id, nonce required")
+                    return
+                success = self._bot_registry.complete_handshake(initiator_id, target_id, nonce)
+                await websocket.send(json.dumps({
+                    "type": "bot_handshake_result",
+                    "success": success,
+                    "initiator_id": initiator_id,
+                    "target_id": target_id,
+                }))
+            else:
+                await self._send_error(websocket, "unknown_action", f"Unknown handshake action: {action}")
+        except Exception as e:
+            # BUG-18C-01 (HIGH): str(e) leaks internal exception details.
+            logger.error("SdkApi: bot_handshake error: %s", e, exc_info=True)
+            await self._send_error(websocket, "bot_handshake_error", "Internal error during bot handshake")
 
     @staticmethod
     async def _send_error(websocket, code: str, message: str):

@@ -1,4 +1,774 @@
+## [1.26.0] — 2026-03-23
+
+### Phase 19 — Tests, container lifecycle, DB schema, logging/monitoring (PRs #387–390)
+
+#### PR #387 — fix(p19b): Container lifecycle, resource limits, IPC cleanup audit (7 fixes)
+- **HIGH** No container log size limit — Docker json-file driver accumulated logs indefinitely; added `--log-opt max-size=10m --log-opt max-file=2`
+- **MEDIUM** Container `/tmp` unbounded — overlay writes could exhaust host storage; added `--tmpfs /tmp:size=64m,mode=1777`
+- **MEDIUM** `_stop_container()` issued `docker kill` (SIGKILL) immediately — agent had zero time to flush IPC files; changed to `docker stop --time 5` for graceful SIGTERM first
+- **MEDIUM** `agent-browser` npm package unversioned — supply-chain risk; pinned to `agent-browser@1.1.5`
+- **MEDIUM** 9 Python Dockerfile packages without version floors — non-reproducible builds; added explicit `>=` floors
+- **LOW** `build.sh` did not verify image exists after build — added `docker image inspect` check
+- **LOW** No explicit `STOPSIGNAL SIGTERM` in Dockerfile
+
+#### PR #388 — fix(p19d): Logging, health checks, CI pipeline, error recovery audit (6 fixes)
+- **HIGH** `/health` endpoint only checked DB and Docker — zero-channel deployments returned `"ok"`; added `channel_ok`, `leader`, `monitor_alive` checks; Docker exception now also sets `status="degraded"`
+- **HIGH** CI pipeline never ran Python tests — `pytest tests/` was completely absent from `.github/workflows/ci.yml`; added `python-tests` job on Python 3.11
+- **MEDIUM** Health monitor exceptions logged at DEBUG — raised to `log.warning()`
+- **MEDIUM** Schedule parse failures returned `None` silently — tasks vanished without any log entry; all three schedule-type branches now call `log.warning()`
+- **LOW** systemd unit missing `LimitNOFILE=65536` — many-group deployments hit kernel fd limit, inotify silently stopped
+- **LOW** `except Exception: pass` in 2 IPC watcher paths — converted to `log.debug()`
+
+#### PR #389 — fix(p19c): Database schema integrity, migrations, query correctness (11 fixes)
+- **HIGH** `evolution_runs.success DEFAULT 1` — all rows without explicit success flag counted as success; fitness scores were perpetually inflated; changed to `DEFAULT 0`
+- **HIGH** Missing `UNIQUE(jid, run_id)` on `evolution_runs` — crash+retry doubled fitness counts; added constraint with `INSERT OR IGNORE`
+- **HIGH** Missing `UNIQUE(folder)` on `registered_groups` — two groups could share a folder, corrupting each other's MEMORY.md/CLAUDE.md
+- **HIGH** `group_cold_memory` had no write function in `db.py` — cold memories were never written through the thread-safe path; added `append_cold_memory()` and `delete_cold_memory_before()`
+- **HIGH** Migration runner had no concurrency lock — concurrent process restarts could apply same migration twice; added `BEGIN EXCLUSIVE`
+- **MEDIUM** Missing `UNIQUE(run_id)` on `container_logs` — duplicate running rows triggered false stuck-container alerts
+- **MEDIUM** `group_genome` missing `CHECK` constraints on `formality`/`technical_depth`
+- **MEDIUM** `task_run_logs.status` nullable — consecutive-failure counter silently skipped NULL rows; changed to `NOT NULL DEFAULT 'unknown'`
+- **MEDIUM** `db_adapter.py` missing `PRAGMA foreign_keys=ON` — FK constraints silently unenforced in migrations and tests
+- **MEDIUM** Cold memory FTS had no INSERT/DELETE triggers — all cold memories were invisible to `memory_fts_search()`
+- **LOW** `rbac_grants.granted_at` nullable — audit `ORDER BY` returned unreliable results; added `NOT NULL DEFAULT (unixepoch())`
+
+#### PR #390 — test(p19a): Test suite quality audit and coverage improvements (12 fixes + 68 new tests)
+- **HIGH** `test_core.py format_messages` — wrong return type expected, always-pass tautology assertion
+- **HIGH** Dev log tests used invalid session ID format — `get_dev_logs()` always returned `[]`, assertions always failed
+- **HIGH** `test_stop_container` tests tested old `docker kill` behavior after `docker stop` change — always failing
+- **HIGH** `GroupQueue` concurrency test — `config` patch context closed before `enqueue_message_check()`, limit never triggered
+- **HIGH** `test_dev_engine` deploy tests missing REVIEW PASS artifact — deploy gate always blocked, tests always failed
+- **HIGH** Path-traversal test patched wrong `config` field — could write outside jail in CI
+- **MEDIUM** `test_infrastructure` tautology tests — inline re-implementation of validation logic, never touching production code
+- **MEDIUM** 3 test modules with `psutil` import chain, no `pytest.importorskip` guard — `ModuleNotFoundError` on clean installs
+- **LOW** `assert mock.called` without argument inspection — replaced with `call_args` check
+- **NEW** `tests/test_allowlist.py` — 23 tests (zero previous coverage): deny-all sentinel bypass, None sender, missing file, corrupt JSON
+- **NEW** `tests/test_rbac.py` — 18 tests (zero previous coverage): unknown role resilience, cache coherence, permission enforcement
+- **NEW** `tests/test_fitness.py` — 14 tests (zero previous coverage): success default=False, speed clamp, fitness range guarantee
+- **NEW** `tests/test_log_buffer.py` — 13 tests (zero previous coverage): ring buffer eviction, SSE polling, limit clamping
+
+## [1.25.0] — 2026-03-23
+
+### Phase 18 — RBAC, evolution, SDK, agent tools security (PRs #383–386)
+
+#### PR #383 — fix(p18b): Evolution engine, fitness system, crossbot protocol audit (7 fixes)
+- **CRITICAL** `CrossBotProtocol.handle()` never called `msg.verify()` — HMAC authentication was completely dead code; any process could forge `memory_share`/`task_delegate`/`hello`/`ping` messages
+- **HIGH** `update_last_seen()` called before HMAC verification — attacker with known bot_id could prevent stale-bot eviction
+- **HIGH** `fitness_reporter.py` duplicate heartbeat tasks after reconnect — second loop spawned without cancelling first
+- **MEDIUM** `evolve_genome_from_fitness()` accepts unclamped fitness/avg_ms — corrupted DB row satisfies all branches simultaneously
+- **MEDIUM** `write_memory()` silently drops memory writes when disconnected — no reconnect, no fallback, no log
+- **MEDIUM** `signal_complete()` silently drops task-completion events when disconnected
+- **LOW** `_handshake_timestamps` keys never evicted — unbounded memory leak per unique sender
+
+#### PR #384 — fix(p18d): Agent file/subprocess tools security and reliability audit (14 fixes)
+- **HIGH** `tool_write`/`tool_edit` symlink parent-dir escape — `_check_path_allowed()` checked path before `mkdir`, allowing symlinks to `/etc/cron.d/`
+- **HIGH** `tool_grep` no sandbox path check — `Grep(path="/etc")` read arbitrary system files
+- **HIGH** `tool_glob` no sandbox path check — `Glob(path="/")` enumerated entire container filesystem
+- **HIGH** `tool_web_fetch` DNS rebinding TOCTOU — check-time IP vs connect-time IP differed; monkey-patched `socket.create_connection` to re-validate at connect time
+- **HIGH** `tool_send_file` no path validation — `SendFile(file_path="/etc/passwd")` sent system files to chat
+- **MEDIUM** Predictable tmp file names — `.tmp` suffix collision; replaced with `.<name>.<pid>.<uuid>.tmp`
+- **MEDIUM** `tool_run_agent` IPC filename no random suffix — concurrent calls in same millisecond silently overwrote each other
+- **MEDIUM** `_execute_tool_inner` bare `args["key"]` access — `KeyError` gave LLM unrecoverable opaque error; added type guards
+- **MEDIUM** `tool_bash` post-kill `communicate()` without timeout — D-state process hung agent loop permanently
+- **MEDIUM** `tool_read` CJK UTF-8 false-positive binary detection — Chinese/Japanese/Korean files rejected; replaced fraction heuristic with strict `decode("utf-8")` attempt
+- **LOW** `tool_bash` `chown` blocklist too broad — blocked legitimate workspace operations
+- **LOW** `tool_web_fetch` non-string `url` raised `TypeError` instead of clean error
+
+#### PR #385 — fix(p18c): SDK API, memory subsystem, session management audit (5 fixes)
+- **HIGH** SDK API bot registry handlers leaked raw exception strings (SQLite paths, schema details) to WebSocket clients
+- **MEDIUM** `memory_write` `scope` field not validated — invalid scopes silently written, permanently invisible to queries
+- **MEDIUM** SDK WebSocket no per-connection rate limit — `memory_write` flood could saturate SQLite write path; added 60 msg/10s window
+- **MEDIUM** `bot_handshakes` table never purged — completed/expired rows accumulated unboundedly; `_pending_handshakes` dict keys never deleted
+- **MEDIUM** `agent_list` no pagination cap — large deployment could produce WebSocket frame exceeding 1 MB limit; added 500-entry cap with `total`/`truncated` fields
+
+#### PR #386 — fix(p18a): RBAC, group queue, allowlist, config, env audit (9 fixes)
+- **CRITICAL** `group_queue.py` retry deadlock — `_retry()` called `enqueue_message_check()` which immediately exited due to `retry_count > 0` guard; messages permanently dropped after first failure; retry mechanism was completely broken
+- **HIGH** `allowlist.py` deny-all sentinel bypassable with empty/whitespace `sender_id` — `""` strips to `""`, found in `{""}` sentinel, granted access when should deny all
+- **MEDIUM** `allowlist.py` `AttributeError` on `None` sender_id — `.strip()` on None crashed instead of safely denying
+- **MEDIUM** `rbac/roles.py` `ValueError` on unknown role from DB — corrupted/migrated DB crashed permission check; now skips with warning
+- **MEDIUM** `config.py` `MAX_CONCURRENT_CONTAINERS=0` deadlocked job queue — all messages queued forever; enforced `minimum=1`
+- **MEDIUM** `config.py` poll interval 0 ms created CPU-burning tight loop; enforced `minimum=100ms`
+- **LOW** `rbac/roles.py` `RBACStore.close()` raced with in-flight queries — connection closed while query in progress; now acquires `_lock` first
+- **LOW** `env.py` inline comments in unquoted `.env` values included in parsed value — `NAME=Eve # assistant` set NAME to `"Eve # assistant"`
+- **MEDIUM** `group_queue.py` circuit breaker bypass in `_drain_waiting()` — failed groups re-dispatched immediately, skipping backoff delay
+
+## [1.24.0] — 2026-03-23
+
+### Phase 17 — webportal, dependency security, asyncio races, code quality (PRs #379–382)
+
+#### PR #379 — fix(p17b): Dependency security and container environment audit (8 fixes)
+- **HIGH** `aiohttp` CVE-2024-52304 (HTTP request smuggling) + CVE-2024-23334 (dir traversal) — bumped floor to `>=3.10.11` in `host/requirements.txt`
+- **HIGH** `httpx` missing from `container/agent-runner/requirements.txt` — OpenAI/Qwen API calls had no timeout, could hang indefinitely; added `httpx>=0.27.0`
+- **MEDIUM** `fitness_reporter.py` not COPY'd into Docker image — Phase 1 WSBridge telemetry silently never worked; added COPY to Dockerfile
+- **MEDIUM** `soul.md` not COPY'd into Docker image — anti-hallucination rules never loaded in production, CRITICAL error logged on every container start; added COPY to Dockerfile
+- **MEDIUM** Dockerfile infra layer: Pillow CVE-2023-44271/CVE-2024-28219, aiohttp CVE, reportlab 3.x, httpx unpinned — added version floors with CVE comments
+- **MEDIUM** HEALTHCHECK `python3 -c "import sys; sys.exit(0)"` trivially passes even with broken image — replaced with import check for `anthropic`, `openai`, `google.genai`
+- **LOW** `aiofiles` in `host/requirements.txt` but never imported — commented out
+- **LOW** `setup.sh` never built or verified Docker image — added `build_docker_image()` with `docker image inspect` verification
+
+#### PR #380 — fix(p17a): webportal.py full audit (9 fixes) + run.py --version flag (first ever audit)
+- **HIGH** Timing side-channel in HTTP Basic Auth and CSRF comparison — replaced `==` with `hmac.compare_digest()` (constant-time)
+- **HIGH** No security headers (CSP, X-Frame-Options, X-Content-Type-Options) on any response — added `_SECURITY_HEADERS` applied to all HTML and JSON responses
+- **MEDIUM** `float(since)` in `/api/poll` unguarded — crafted `?since=abc` caused unhandled 500; wrapped in try/except, clamped to 0.0
+- **MEDIUM** Negative `Content-Length` bypassed 64 KB size limit — added explicit `< 0` rejection before upper-bound check
+- **MEDIUM** No startup warning when web portal runs without `DASHBOARD_PASSWORD` — added `log.warning()` matching dashboard pattern
+- **MEDIUM** `start_webportal()` had no `stop_event` parameter — SIGTERM could not close the TCP socket; added watcher thread mirroring `start_dashboard()`, updated `host/main.py` to pass `_stop_event`
+- **MEDIUM** JID not validated before DB write — added `_JID_RE` validation in `_api_send()`
+- **MEDIUM** `_api_send()` 500 responses leaked raw exception details to browser — now logs server-side, returns generic `{"error": "internal server error"}`
+- **LOW** 404 responses in `do_GET`/`do_POST` missing `Content-Length: 0` before `end_headers()` — fixed both paths
+- **LOW** `run.py` had no `--version` flag — added `_parse_args()` using `argparse`, reads from `importlib.metadata` with `pyproject.toml` fallback
+
+#### PR #381 — fix(p17c): asyncio race conditions deep dive (13 fixes)
+- **CRITICAL** `discord_channel.py`: `on_message` callback `await`ed on Discord's background event loop instead of the main application loop — all locks, GroupQueue serialization, and asyncio primitives were on the wrong loop; fixed with `asyncio.run_coroutine_threadsafe(..., _main_loop)`
+- **HIGH** `ipc_watcher.py`: `asyncio.Lock()` created at module import time (not inside a running loop) — `RuntimeError` on Python 3.12; replaced with lazy accessor functions `_get_skills_lock()` / `_get_dev_task_lock()`
+- **HIGH** `ws_bridge.py`: `_connections` dict read/written from concurrent coroutines without a lock — connection-cap check was not atomic with registration; added `_connections_lock` guarding all access
+- **MEDIUM** `ipc_watcher.py`: 3× `asyncio.get_event_loop()` replaced with `asyncio.get_running_loop()`
+- **MEDIUM** `ipc_watcher.py`: 9× `asyncio.ensure_future()` deprecated — replaced with `asyncio.create_task()`
+- **MEDIUM** `leader_election.py`: 2× `asyncio.get_event_loop().run_in_executor()` → `asyncio.get_running_loop().run_in_executor()`
+- **MEDIUM** `discord_channel.py`: `asyncio.get_event_loop()` in `_run_in_discord_loop` → `asyncio.get_running_loop()`
+- **MEDIUM** `sdk_api.py`: `threading.Lock` acquired inside async context (`_handle_system_status`) — blocked event loop thread; moved DB read to `run_in_executor()`
+- **MEDIUM** `main.py`: `_error_notify_times.pop()` in stale-JID pruning and `reset_group` paths without `_error_notify_lock` — race with `on_error` rate-limiter; added lock acquisition at both sites
+- **MEDIUM** `ipc_watcher.py`: blocking `open()` for subprocess stdout/stderr on event loop thread — moved to `run_in_executor()`
+- **MEDIUM** `container_runner.py`: blocking MEMORY.md `open()` + `write()` in async context — moved to `run_in_executor()`
+- **LOW** `sdk_api.py`: raw exception message sent to WebSocket clients on identity error — replaced with generic message + server-side logging
+- **LOW** `task_scheduler.py`: `asyncio.create_task()` without stored reference — GC could collect before completion; assigned with `add_done_callback` for exception logging
+
+#### PR #382 — refactor(p17d): Code quality simplification pass (5 improvements)
+- **main.py**: Removed duplicate `import collections`; extended `from collections import OrderedDict, deque`
+- **main.py**: Extracted `_with_fail_lock(fn)` helper — eliminated 4+ duplicated `if _group_fail_lock is not None: async with _group_fail_lock` guard patterns; all dict-mutation sites now use the helper
+- **main.py**: Converted 13 f-string log calls to `%`-style for consistency
+- **container_runner.py**: Converted 8 f-string log calls to `%`-style
+- **agent.py**: Extracted `_atomic_ipc_write(fname, data)` helper — eliminated 10 identical 3-line atomic-rename patterns (tmp write + rename) across all IPC tool functions
+
+## [1.23.0] — 2026-03-23
+
+### Fixed (Phase 16: Final Audit & UX — 32 fixes)
+
+Four PRs covering main.py final audit, UX & docs improvements, agent.py final audit, and container runner + IPC final fixes.
+
+#### main.py Final Audit (PR #375 — 6 fixes)
+
+- **Two `_group_fail_lock` None-guards still missing in error-increment paths (HIGH)** — only 2 of 4 sites were fixed in previous phases; the remaining two error-increment paths could raise TypeError during the startup window; all four sites now guarded
+- **URGENT errors incorrectly reset the rate-limit cooldown timer (HIGH)** — URGENT alerts reset the rate-limit timer, causing normal errors to be suppressed for 5 minutes after any URGENT alert; timer reset now scoped to non-URGENT errors only
+- **Two `asyncio.create_task()` calls stored no handle → exceptions silently discarded, shutdown couldn't cancel them (HIGH)** — task handles were not retained, so exceptions were silently discarded and the tasks could not be cancelled on shutdown; handles now stored and cancelled during teardown
+- **`_error_notify_times` not pruned for deregistered groups → slow memory leak (MEDIUM)** — entries for deregistered groups accumulated indefinitely; added pruning on group deregistration
+- **`group_queue.py`: deprecated `asyncio.get_event_loop()` on two paths (Python 3.12 incompatible) (MEDIUM)** — two remaining `get_event_loop()` calls were incompatible with Python 3.12+; replaced with `asyncio.get_running_loop()`
+- **`EDITABLE_ENV_KEYS` millisecond-unit intervals undocumented → operator sets 2 instead of 2000 (LOW)** — missing documentation caused operators to set second-unit values instead of millisecond-unit values; inline comments and docs updated with explicit unit annotations
+
+#### UX & Docs (PR #376 — 8 fixes)
+
+- **No typing indicator renewal → user saw silence during 15-60s container runs (HIGH)** — added typing indicator renewal loop: every 4 seconds while container runs, sends typing action so the user sees "typing…" throughout the wait instead of silence
+- **Per-sender rate limiting missing → silent message drop (HIGH)** — added per-sender rate limiting (5 msg/60s, configurable) with a user-visible Chinese message instead of silent drop
+- **RBAC block sent no feedback → silent drop (HIGH)** — RBAC block now sends "您目前沒有使用此機器人的權限" instead of silently dropping the message
+- **Container OOM (exit 137) sent no feedback → silent drop (HIGH)** — OOM exit now sends "AI 執行時記憶體不足" instead of silently dropping the message
+- **QUICK_START.md: `/monitor` misidentified as "register main group" (HIGH)** — `/monitor` is error-alert monitoring, not group registration; corrected description and added `ENABLED_CHANNELS` documentation
+- **Queue depth feedback missing → user saw silence when queued (MEDIUM)** — second message now shows "⏳ 已加入佇列，請稍候" instead of silence when a request is queued
+- **No first-run welcome message for new groups (MEDIUM)** — added first-run welcome message triggered once per new group, stored in DB to prevent re-sending
+- **TROUBLESHOOTING.md missing Chinese error message reference (MEDIUM)** — added complete Chinese error message reference table; `.env.minimal` updated with `CONTAINER_IMAGE`, rate-limit vars, and resource vars
+
+#### agent.py Final Audit (PR #377 — 12 fixes)
+
+- **OpenAI/NIM model selection fell back to `GEMINI_MODEL` → 404 on every NIM session without explicit `NIM_MODEL` (CRITICAL)** — model selection logic fell through to `GEMINI_MODEL` for NIM endpoint, sending `gemini-2.0-flash` to the NIM API and causing 404 on every NIM session; fixed to use `NIM_MODEL` env var with correct fallback
+- **`mcp__evoclaw__reset_group` IPC write was the only non-atomic write remaining in agent.py (HIGH)** — non-atomic write exposed truncation risk; converted to atomic tmp-file + rename
+- **OpenAI backend missing `group_folder` empty-string guard for MEMORY.md path (HIGH)** — Claude and Gemini backends had the guard but OpenAI did not, causing path construction errors on empty `group_folder`; guard added to OpenAI backend
+- **Backend fallback silently skipped Claude when both `CLAUDE_API_KEY` and `NIM_API_KEY` were set (HIGH)** — no warning was emitted when Claude was bypassed due to NIM key presence; warning log added
+- **Gemini history injection: list-type content from Claude/OpenAI sessions raised TypeError (HIGH)** — list-type content was not coerced before injection into Gemini history format; added coercion to handle list-type content correctly
+- **`cancel_task`/`pause_task`/`resume_task` IPC filenames had timestamp-only collision risk (MEDIUM)** — same-millisecond requests produced identical filenames and silently overwrote each other; added random suffix to filenames
+- **OpenAI history injection guard `content == 0` was dead branch; None content not skipped (MEDIUM)** — the guard `content == 0` never triggered; None content passed through unchecked; replaced with `content is None` guard
+- **`GEMINI_MODEL` env read inside loop → env mutation mid-loop changed model mid-request (MEDIUM)** — up to 20 `os.environ` reads per request; env mutation during a long request could silently switch models mid-loop; captured once before loop entry
+- **`_LEVEL_B_KEYWORDS` missing: `report`, `schedule`, `plan`, `test`, `review`, `audit`, `monitor`, `npm`, `pip`, `make` etc → complex tasks misclassified as Level A (MEDIUM)** — missing keywords caused complex tasks to be assigned `MAX_ITER=6` instead of `MAX_ITER=20`, leading to fake-completion from iteration exhaustion; all missing keywords added
+- **Fitness reporter gave score 0.3 (failure) for all send_message-only sessions → corrupted evolution data (MEDIUM)** — sessions that only called `send_message` (valid short-answer sessions) were scored as failures; scoring logic corrected to treat send_message-only sessions as successful
+- **Empty `groupFolder`/`chatJid` inputs had no early warning log (LOW)** — missing early validation made debugging silent failures difficult; added warning log on empty inputs
+- **`_phase1_reporter` declared after `main()` (misleading source order) (LOW)** — function declared after its caller made code harder to follow; moved before `main()`
+
+#### Container Runner + IPC Final (PR #378 — 6 fixes)
+
+- **`stderr_lines` declared inside Linux-only branch but referenced on all platforms → NameError on Windows (CRITICAL)** — `NameError` on Windows masked real container failures; declaration moved outside the platform branch
+- **`reset_group` IPC handler had no permission check → any group's container could reset circuit breaker for any other group (HIGH)** — missing authorization allowed cross-group circuit-breaker manipulation; added permission check to validate requesting group matches target group
+- **`memory_patch` from container not type-checked → dict/list value caused silent AttributeError (MEDIUM)** — unvalidated `memory_patch` values caused silent `AttributeError` on string methods; added type check before processing
+- **OOM exit (137) showed generic error message instead of "記憶體不足" (MEDIUM)** — exit code 137 now detected and mapped to specific "記憶體不足" message for operator clarity
+- **`refresh_groups.flag` and `reset_group.flag` written non-atomically → reader could see empty file mid-write (MEDIUM)** — non-atomic flag writes allowed the reader to observe an empty file; converted to atomic tmp-file + rename writes
+- **`memory_patch` is dead code (container never emits it) — now documented (LOW)** — undocumented dead code path caused confusion; added inline documentation clarifying that `memory_patch` is reserved for future use and not currently emitted by any container
+
+Protocol verification confirmed: container stdout format, IPC directory structure, atomic writes, volume mounts, and security flags are all consistent between container and host.
+
+## [1.22.0] — 2026-03-21
+
+### Fixed (Phase 15: Conversation Loop & Delivery — 44 fixes)
+
+Four PRs covering the LLM conversation loop, IPC protocol & result delivery, process lifecycle & shutdown, and database schema & query correctness.
+
+#### LLM Conversation Loop (PR #371 — 11 fixes)
+
+- **Claude `stop_reason=max_tokens` mid-tool-call orphaned assistant message (CRITICAL)** — assistant message left without a matching tool_result caused next API call to return HTTP 400; added cleanup of orphaned assistant messages on max_tokens mid-call
+- **Claude `stop_reason=tool_use` with no tool_use blocks orphaned assistant message (CRITICAL)** — orphaned assistant message with no tool blocks caused HTTP 400 on next API call; added guard to discard assistant message when no tool_use blocks are present
+- **Claude & OpenAI: list-type `content` silently dropped during history injection (CRITICAL)** — tool call records with list-type content were silently dropped during history injection, causing tool call history to vanish; fixed to preserve list-type content correctly
+- **Claude history truncation split `assistant(tool_use)` + `user(tool_result)` pairs (HIGH)** — truncation could separate paired messages, causing Anthropic API 400 errors; truncation now respects pair boundaries
+- **OpenAI history truncation split `assistant(tool_calls)` + `role=tool` pairs (HIGH)** — truncation could separate paired messages, causing OpenAI API 400 errors; truncation now respects pair boundaries
+- **Gemini history truncation split `model(function_call)` + `user(FunctionResponse)` pairs (HIGH)** — truncation could separate paired messages, causing Gemini API rejection; truncation now respects pair boundaries
+- **OpenAI `finish_reason="length"` triggered infinite context overflow retry (MEDIUM)** — treated as a no-tool turn and retried, overflowing context again; now trims history to ¼ and exits the loop
+- **Gemini SAFETY/RECITATION/MAX_TOKENS returned silent generic placeholder (MEDIUM)** — stop conditions silently returned a generic placeholder with no explanation to the user or logs; added explicit handling with informative messaging
+- **Claude & Gemini fake-status regex missing English fake-done patterns (LOW)** — English-language fake completion patterns not covered by existing regex; added missing patterns
+- **Tool schema missing `description` on pause/resume task params (LOW)** — pause and resume task tool parameters lacked description fields in schema; descriptions added
+- **Tool schema missing `required: []` on list_tasks (LOW)** — list_tasks schema omitted the required array; added `required: []`
+
+#### IPC Protocol & Result Delivery (PR #372 — 15 fixes)
+
+- **`container_runner.py` `on_output` called before `on_success` → duplicate responses on every retry (CRITICAL)** — if delivery failed after `on_output` was called, cursor never advanced, causing the user to receive duplicate responses on every subsequent retry; reordered so cursor advances only after successful delivery
+- **`ipc_watcher.py` 4 skill/memory result writes non-atomic → truncated JSON → skill installs hang forever (CRITICAL)** — non-atomic writes allowed container to read partially-written JSON, causing skill installs to appear to hang indefinitely; converted to atomic tmp-file + rename writes
+- **`ipc_watcher.py` subagent success+error result writes non-atomic → `tool_run_agent` returned empty result (CRITICAL)** — non-atomic writes caused `tool_run_agent` to read truncated or empty result files; converted to atomic writes
+- **`agent.py` `tool_schedule_task` filename collision on same-millisecond tasks (HIGH)** — timestamp-only filenames caused silent overwrites when two tasks were scheduled in the same millisecond; added random suffix to filenames
+- **3 more IPC tool writes non-atomic (`run_agent`, `start_remote_control`, `self_update`) (HIGH)** — non-atomic writes in these three tools exposed the same truncation risk; converted to atomic writes
+- **`main.py` `_on_success_tracked`: `async with _group_fail_lock` without None guard → TypeError during startup window (HIGH)** — lock used before initialization during startup window raised TypeError; added None guard
+- **`_error_notify_times` TOCTOU race → rate limiter bypassed during failure storms (HIGH)** — check-then-update on `_error_notify_times` had a TOCTOU race that allowed the rate limiter to be bypassed under concurrent failure conditions; replaced with atomic update
+- **`emit()` BrokenPipeError unhandled → confusing stderr on container timeout (MEDIUM)** — unhandled BrokenPipeError produced confusing stderr output when a container timed out; added explicit handler
+- **`group_queue.py` silent discard of pending items on shutdown (MEDIUM)** — items pending in the queue at shutdown time were silently dropped with no logging; now logs counts of discarded items
+
+#### Process Lifecycle & Shutdown (PR #373 — 15 fixes)
+
+- **Leader lease never released if `asyncio.gather()` raised → DB lock row stuck until TTL expiry (CRITICAL)** — an exception in `asyncio.gather()` skipped lease release, leaving the DB lock row held until TTL expiry and blocking restarts; added finally block to ensure release
+- **Double-signal SIGTERM race: two rapid SIGTERMs both took "first signal" path, neither force-exiting (CRITICAL)** — two rapid SIGTERMs both entered the first-signal handler path due to a race, with neither triggering the force-exit path; added atomic flag to distinguish first vs second signal
+- **`on_output` exception prevented `on_success` call → infinite message replay (HIGH)** — an exception in `on_output` bypassed the `on_success` call, causing the message to replay infinitely; wrapped `on_output` in try/except so `on_success` is always called
+- **`cleanup_orphans()` used `docker ps` (running only), missed `Exited` containers from SIGKILL → storage leak + name conflicts (HIGH)** — orphan cleanup only considered running containers, leaving exited containers from SIGKILL to accumulate, causing storage leaks and container name conflicts; switched to include all container states
+- **`asyncio.Lock()` created at module import (before event loop) → DeprecationWarning on 3.10+, RuntimeError on 3.12+ (HIGH)** — module-level lock creation before the event loop existed triggered deprecation warnings on Python 3.10+ and RuntimeErrors on 3.12+; deferred to first use
+- **`asyncio.get_event_loop()` deprecated call in group_queue → wrong loop on 3.12+ (HIGH)** — deprecated `get_event_loop()` call returned the wrong loop on Python 3.12+; replaced with `asyncio.get_running_loop()`
+- **Retry sleep coroutines not cancelled on shutdown → could start new containers mid-teardown (HIGH)** — uncancelled sleep coroutines in retry paths could wake up mid-shutdown and start new containers; added cancellation on shutdown signal
+- **No SIGHUP handler → operators had to full-restart to reload config (MEDIUM)** — no SIGHUP handler meant config changes required a full process restart; added SIGHUP handler for config reload
+- **Stale IPC result files after SIGKILL → stale replies delivered to user on restart (MEDIUM)** — IPC result files left over from a SIGKILL were picked up on restart and delivered as fresh replies; added cleanup of stale result files on startup
+- **systemd: `TimeoutStopSec=45` too short; added `KillMode=mixed`; added `EnvironmentFile` (MEDIUM)** — 45-second stop timeout was insufficient for graceful shutdown; `KillMode` and `EnvironmentFile` directives were missing from the unit file; all three updated
+
+#### Database Schema & Query Correctness (PR #374 — 9 fixes)
+
+- **`immune_threats`: no `UNIQUE(sender_jid, pattern_hash)` constraint → race condition allowed duplicates → inflated threat counts → incorrect auto-blocks (CRITICAL)** — missing unique constraint allowed concurrent inserts to create duplicate threat rows, inflating threat counts and triggering incorrect auto-blocks; added `UNIQUE(sender_jid, pattern_hash)` constraint
+- **`memory_fts_search()` never queried cold memory despite docstring saying "warm AND cold" (HIGH)** — the function only queried warm memory, making all cold memory invisible to FTS search; fixed to query both warm and cold memory stores
+- **`set_registered_group()` used `INSERT OR REPLACE` → destroyed `added_at` timestamp on every update (HIGH)** — `INSERT OR REPLACE` deleted and re-inserted the row on every update, resetting `added_at` to the current time; replaced with `INSERT ... ON CONFLICT DO UPDATE`
+- **No migration version tracking table → impossible to run incremental migrations safely (MEDIUM)** — without version tracking, re-running migrations caused data corruption or errors; added `schema_migrations` table and migration registry
+- **Missing indexes: `task_run_logs(task_id)`, `container_logs(status)`, `dev_sessions(status)`, `immune_threats(sender_jid, pattern_hash)` composite (MEDIUM)** — four high-traffic query paths lacked indexes, causing full table scans; all four indexes added
+- **Tests: added WAL pragma verification, concurrent-write regression test, executemany test (MEDIUM)** — test coverage gaps for WAL mode, concurrent writes, and bulk inserts; all three test cases added
+
+## [1.21.0] — 2026-03-21
+
+### Fixed (Phase 14: Skills, Memory & Enterprise — 57 fixes)
+
+Four PRs covering the evolution system, enterprise connectors & container tools, skills engine, and memory system.
+
+#### Evolution System (PR #367 — 4 fixes)
+
+- **`immune.py` Chinese attack pattern false negatives (HIGH)** — 10 attack patterns missed Traditional/Simplified char variants (進/进, 從/从), word-order variants (現在你是 vs 你現在), missing space handling (AI 助手), and optional suffix/prefix coverage; all 42 attacks now detected with 0 false positives
+- **`daemon.py` avg_ms calculation corrupted by failed runs (HIGH)** — failed runs and negative values included in average → genome evolved toward wrong response style; fixed to exclude failed/negative values
+- **`fitness.py` final score not clamped (MEDIUM)** — corrupted DB row could produce score > 1.0; added clamp to [0.0, 1.0]
+- **`fitness_reporter.py` WebSocket disconnect permanent (MEDIUM)** — no reconnect logic → all subsequent fitness data silently dropped; added reconnect with file fallback
+
+#### Enterprise Connectors & Container Tools (PR #368 — 20 fixes)
+
+- **`hpc_connector.py` job name newline injection into #SBATCH directives (CRITICAL)** — `job\n#SBATCH --wrap=rm -rf /` allowed arbitrary directive injection; added newline sanitization
+- **`jira_connector.py` issue key path traversal in REST URL (CRITICAL)** — `../../../admin` in issue key escaped API base path; added strict issue key validation
+- **`agent.py` `_tool_bash()` timeout killed only main process (CRITICAL)** — child process group (SSH/git subprocesses) leaked indefinitely; replaced with `os.killpg` to kill entire process group
+- **`agent.py` `_tool_read()` symlink bypass (CRITICAL)** — symlink to `/etc/passwd` passed raw-string path check but read host files; added `os.path.realpath()` resolution before path validation
+- **`hpc_connector.py` SSH BatchMode missing (HIGH)** — interactive prompt hung server; inherited stdin blocked subprocess; no output size limit on job output; all three addressed
+- **`jira_connector.py` API token in public attribute (HIGH)** — token exposed via object inspection; no HTTP timeout; unbounded max_results pagination; all three addressed
+- **`ldap_connector.py` bind password in public attribute (HIGH)** — password exposed via object inspection; stale connection not detected; no LDAP connection timeout; all three addressed
+- **`workflow_engine.py` no dependency or cycle validation (HIGH)** — undefined dependencies caused infinite scheduler loop; missing cycle detection caused infinite loop; both guards added
+- **`agent.py` `_tool_edit()` ambiguous old_string silent edit (HIGH)** — first occurrence edited with no warning to LLM when old_string matched multiple locations; added ambiguity warning
+- **`agent.py` `_tool_glob()` deep `**` glob blocked agentic loop (HIGH)** — unthreaded glob with no timeout blocked loop 30-60 seconds; added thread + timeout
+- **`ldap_connector.py` `is_user_in_group()` unbounded memory (MEDIUM)** — loaded all group members into memory; no close() method; both addressed
+- **`workflow_engine.py` unbounded step result size (MEDIUM)** — no cap on step output stored in state; added size limit
+- **`agent.py` `_tool_bash()` exit code not surfaced (MEDIUM)** — LLM never received exit code; stdin not closed; both fixed
+- **`agent.py` `_tool_read()` binary file handling (MEDIUM)** — binary files returned as garbled text; UnicodeDecodeError on non-UTF-8 files; added binary detection and encoding fallback
+- **`agent.py` `_tool_write()`/`_tool_edit()` file permissions reset (MEDIUM)** — every write reset permissions to default; added permission preservation
+- **`agent.py` `_tool_web_fetch()` charset ignored (MEDIUM)** — charset from Content-Type header ignored; always decoded as UTF-8; added charset extraction and correct decoding
+
+#### Skills Engine (PR #369 — 18 fixes)
+
+- **`workflow_engine.py` `exec_skill()` missing await (CRITICAL)** — async function called without `await` → always returned coroutine object → handler.py was NEVER executed for any skill; all skills returned SKILL.md content instead; added `await`
+- **`file_ops.py` no path-traversal validation on delete/rename (CRITICAL)** — malicious skill could delete `/etc/passwd` or rename arbitrary host files; added strict path validation
+- **`manifest.py` empty YAML AttributeError (HIGH)** — empty manifest file raised AttributeError on load; path-traversal in file_ops/container_tools paths not validated; both fixed
+- **`state.py` crash-truncated state.yaml (HIGH)** — truncated file raised AttributeError on next boot; no .tmp write fallback; added atomic write and recovery
+- **`apply.py` merge conflict leaves project with conflict markers (HIGH)** — backup not restored on merge conflict → project left with `<<<<<<<` markers; container_tools path escape not fully validated; both fixed
+- **`backup.py` file outside project root aborted entire backup (HIGH)** — single out-of-root file terminated full backup operation; changed to skip-and-warn
+- **`lock.py` OSError on Windows not caught (HIGH)** — stale lock file never cleaned on Windows; added OSError handler
+- **`rebase.py` lock acquired after writing patch (HIGH)** — race condition allowed concurrent rebase on same project; binary files corrupted patch; lock moved before write, binary files skipped
+- **`uninstall.py` state read/write outside lock (HIGH)** — concurrent uninstall could overwrite state; added lock around state operations
+- **`merge.py` git unavailable copied wrong file (MEDIUM)** — fallback copied current file instead of incoming; fixed file selection logic
+- **`apply.py` non-atomic package.json/.env.example write (MEDIUM)** — partial writes possible on crash; converted to atomic tmp + replace
+- **`customize.py` non-atomic session file write (MEDIUM)** — partial writes possible on crash; converted to atomic tmp + replace
+- **`structured.py` comment lines parsed as env keys (MEDIUM)** — `# comment` treated as key → false conflict reports; added comment line filter
+- **`manifest.py` empty string accepted as valid required field (MEDIUM)** — empty string bypassed required field validation; added non-empty check
+
+#### Memory System (PR #370 — 15 fixes)
+
+- **`hot.py` UTF-8 boundary corruption (CRITICAL)** — multi-byte CJK/emoji characters split at 8KB limit silently dropped partial characters; added character-boundary-aware chunking
+- **`memory_bus.py` `delete()` authorization bypass (CRITICAL)** — `scope != 'private'` check allowed any agent to delete any shared memory; replaced with explicit owner check
+- **`summarizer.py` silent memory truncation (CRITICAL)** — LLM only saw first 3000 chars of 8KB memory during compression → last ~5000 chars permanently lost every compression cycle; fixed to pass full content
+- **`warm.py` off-by-one in size checks and wrong day summarized (HIGH)** — strict `<` vs `<=` boundary caused incorrect size evaluation; daily wrapup summarized last 24h instead of yesterday's logs; both fixed
+- **`memory_bus.py` vector scores exceeded [0,1] range (HIGH)** — 1.2 boost factor produced scores > 1.0; VectorStore ignored project scope; FTS rank normalization used arbitrary /10 divisor replaced with sigmoid; DDL split on `;` broke CREATE TRIGGER → FTS triggers never created → all FTS search returned zero results; all five addressed
+- **`summarizer.py` LLM output stored without validation (HIGH)** — error messages and prose stored as memory; no size validation on compressed output (could grow larger than original); added validation and size cap
+- **`warm.py` midnight race condition (MEDIUM)** — two `datetime.now()` calls could straddle midnight producing split-day summaries; replaced with single captured timestamp
+- **`compound.py` `.strip()` corrupted markdown structure (MEDIUM)** — leading whitespace stripped from markdown broke indentation/structure; changed to `.rstrip()`
+- **`memory_bus.py` vector results showed wrong created_at (MEDIUM)** — timestamp always set to current time instead of stored value; fixed to read from DB record
+- **`search.py` unbounded BM25 scores (MEDIUM)** — uncapped BM25 scores made recency term irrelevant in blended search ranking; added score normalization
+
+## [1.20.0] — 2026-03-21
+
+### Fixed (Phase 13: Security & Reliability — 75 fixes)
+
+Four PRs covering channel reliability, container security, observability & API security, and leader election / task scheduler / dev engine.
+
+#### Channel Reliability (PR #363 — 16 fixes)
+
+- **Gmail self-email loop guard missing (CRITICAL)** — bot could email itself in an infinite loop; added self-email guard
+- **Matrix sync token advanced before event processing (CRITICAL)** — crash caused permanent message loss; token now advanced only after successful processing
+- **Gmail OAuth refresh fallback to interactive browser (HIGH)** — hung forever on server; fallback removed, failure now raises immediately
+- **Gmail HTTP 401 infinite retry loop (HIGH)** — revoked token caused unbounded retry; replaced with exponential backoff and token invalidation
+- **Gmail no autoresponder loop prevention (HIGH)** — RFC 3834 `Auto-Submitted` header not checked; mailing lists and vacation responders could flood bot; added header check
+- **Slack bot-message filter incomplete (HIGH)** — bot read its own posts and re-triggered pipeline; filter tightened to cover all bot message subtypes
+- **Slack `<@U12345>` mention never normalized (HIGH)** — trigger matching always failed; added mention normalization before trigger check
+- **WhatsApp webhook exception returned HTTP 500 (HIGH)** — Meta retried delivery causing duplicate processing; handler now returns HTTP 200 after logging error
+- **CrossBot unbounded trusted set / no handshake rate limit / no self-handshake check (HIGH)** — memory leak, DoS vector, and identity spoofing; added eviction, rate cap, and self-check
+- **Matrix non-200 sync response silently empty (MEDIUM)** — no log emitted; added error logging and retry
+- **Matrix redacted and undecryptable E2E events dispatched (MEDIUM)** — added filter to drop these event types before dispatch
+- **Slack/WhatsApp missing try/except around `_on_message` (MEDIUM)** — inconsistent with Telegram/Discord; added wrapping
+- **All channels: unified trigger pattern, @mention normalization, empty-message guard (LOW)** — consolidated shared logic into channel base class
+
+#### Container Security & Tests (PR #364 — 14 fixes)
+
+- **`--network none` not set (CRITICAL)** — agent container could make arbitrary outbound network calls; flag added
+- **`--cap-drop ALL` not set (CRITICAL)** — container retained 14 Linux capabilities including NET_RAW and SETUID; added `--cap-drop ALL`
+- **`_safe_name()` path-traversal not stripped (CRITICAL)** — JID containing `../` could mount `/etc` or `~/.ssh` into container; added path component sanitization
+- **`_build_volume_mounts()` no `resolve().relative_to()` validation (CRITICAL)** — host path escape possible; added strict validation
+- **`--security-opt no-new-privileges` not set (HIGH)** — setuid escalation possible; flag added
+- **`--pids-limit` not set (HIGH)** — fork bomb could exhaust host PID table; limit set
+- **Dockerfile used mutable `node:22` tag (HIGH)** — supply-chain risk; pinned to digest
+- **5 circuit breaker tests used wrong API type (HIGH)** — all silently passing with no real assertion; corrected to proper type
+- **`test_run_container_agent` asserted wrong exception type (HIGH)** — test always passed, tested nothing; corrected assertion
+- **`test_editable_env_keys` checked wrong key names (HIGH)** — vacuously wrong assertions; corrected to actual key names
+- **`test_immune_enhanced.py` all 50 tests silently skipped (HIGH)** — hand-rolled runner not collected by pytest; converted to standard pytest format
+- **Dockerfile missing HEALTHCHECK (MEDIUM)** — added HEALTHCHECK instruction
+- **`build_container.py` only tagged `:latest` (MEDIUM)** — no versioned tags; added version tagging
+- **New test suite: `TestContainerSecurityFlags` (MEDIUM)** — covers all security flags and path-traversal guards
+
+#### Observability & API Security (PR #365 — 25 fixes)
+
+- **Health monitor loop could exit silently (CRITICAL)** — `get_health_status()` always returned `{"status":"healthy"}` regardless of reality; loop now restarts on exception with alerting
+- **WS Bridge auth bypass (CRITICAL)** — auth failed but async loop kept reading; loop now terminates on auth failure
+- **SDK API auth per-message allows token guessing (CRITICAL)** — infinite guessing allowed; added connection-level auth with lockout
+- **Dashboard no POST body size limit (HIGH)** — OOM attack possible; added size cap
+- **Dashboard container `stop` API command injection (HIGH)** — name passed directly to subprocess; replaced with safe API call
+- **Dashboard missing `Content-Security-Policy`/`X-Frame-Options` (HIGH)** — clickjacking possible; headers added
+- **Dashboard `/health` and `/metrics` behind auth gate (HIGH)** — Kubernetes probes could not access; endpoints exempted from auth
+- **Dashboard `limit` param uncapped (HIGH)** — `LIMIT 1000000` SQL query possible; capped at reasonable maximum
+- **WS Bridge no connection cap (HIGH)** — fd exhaustion possible; added connection limit
+- **WS Bridge no payload size limit (HIGH)** — unbounded memory operations; size limit added
+- **WS Bridge mid-connection `agent_id` spoofing (HIGH)** — `agent_id` could be changed after auth; locked at auth time
+- **SDK API memory/task write with no size limits (HIGH)** — limits added
+- **Log formatter sensitive fields emitted verbatim (HIGH)** — `token`, `api_key`, `secret`, `password` appeared in JSON logs; added redaction
+- **Router channel list mutated during iteration without lock (HIGH)** — data race; added lock
+- **Health monitor check failures logged at DEBUG (MEDIUM)** — invisible in production; elevated to WARNING/ERROR
+- **Health monitor division by zero in error rate (MEDIUM)** — fixed with zero guard
+- **Health monitor race on `_last_warnings` (MEDIUM)** — added lock
+- **Log formatter `levelname` duplicated (LOW)** — deduplicated
+- **Log formatter `asctime` corrupted timestamp field (LOW)** — fixed field name collision
+
+#### Leader Election, Task Scheduler, Dev Engine (PR #366 — 19 fixes)
+
+- **Leader election SQLite ops no timeout (CRITICAL)** — blocked DB froze entire asyncio event loop; added timeout with cancellation
+- **Dev engine deployed code when REVIEW verdict was FAIL (CRITICAL)** — LLM-generated code deployed despite failure verdict; added strict gate
+- **Allowlist missing/unreadable silently allowed ALL senders (CRITICAL)** — deny-all sentinel now applied on read failure
+- **`LEASE_TIMEOUT <= HEARTBEAT_INTERVAL` caused split-brain churn (HIGH)** — continuous leadership oscillation; added startup assertion enforcing `LEASE_TIMEOUT > 2 * HEARTBEAT_INTERVAL`
+- **`_is_leader = False` set after DELETE (HIGH)** — exception left instance acting as leader with no DB record; flag now cleared before DELETE
+- **Leader yielded only after 3 consecutive heartbeat failures (HIGH)** — instance now correctly steps down; confirmed fix
+- **Task scheduler no at-most-once guard (HIGH)** — same task dispatched twice concurrently; added dispatch lock
+- **Task scheduler no execution timeout (HIGH)** — hung task blocked scheduler forever; added per-task timeout
+- **Task scheduler no consecutive-failure limit (HIGH)** — broken task retried infinitely; added failure cap with quarantine
+- **Bot registry `_pending_handshakes` accessed outside lock (HIGH)** — concurrent callers bypassed rate cap; added lock
+- **Bot registry nonces never expired (HIGH)** — intercepted nonce valid forever; added nonce TTL
+- **Agent identity `get()` read DB without lock (HIGH)** — data race under concurrency; added lock
+- **Task scheduler interval tasks re-fired every poll after downtime (MEDIUM)** — catch-up loop now skips missed runs and sets `next_run` to current time
+- **Task scheduler backoff stored in seconds not milliseconds (MEDIUM)** — task became runnable 50 years ago; fixed unit
+- **Task scheduler crashed `running` tasks never recovered (MEDIUM)** — added startup recovery pass
+- **Dev engine path traversal via `session_id` (MEDIUM)** — unsanitized `session_id` used in path; added sanitization
+- **Group folder non-atomic mkdir and file writes (MEDIUM)** — TOCTOU race; replaced with atomic operations
+- **Bot registry stale entries accumulated forever (MEDIUM)** — added TTL-based eviction
+- **Bot registry no TTL on nonces (MEDIUM)** — addressed alongside nonce expiry fix above
+
+## [1.19.0] — 2026-03-21
+
+### Fixed (Phase 12: 深度可靠性修復 — 46 個問題)
+
+四個 PR 並行深度分析修復，涵蓋訊息管線可靠性、agent 反幻覺行為、設定啟動驗證與資料庫持久性。
+
+#### Message Pipeline Reliability (PR #360 — 8 fixes)
+
+- **`global _identity_store` SyntaxError（CRITICAL）** — `main.py` 在首次賦值後才宣告 global → SyntaxError，bot 完全無法載入；修復：將宣告移至函式最頂端
+- **`_group_fail_lock` None TypeError（CRITICAL）** — `main.py` 啟動視窗內 `async with _group_fail_lock` 時 lock 為 None → 每條訊息都 TypeError crash；修復：加入 None guard
+- **訊息分發延遲（HIGH）** — 訊息最長等待 2 秒才分發：dedup 已儲存但從未呼叫 `enqueue_message_check()`；修復：補上缺失的呼叫
+- **Discord 空字串回覆（HIGH）** — `discord_channel.py` 傳送空字串回覆給 Discord API → HTTP 400；修復：加入空內容 guard
+- **Pipeline 例外靜默崩潰（HIGH）** — `telegram_channel.py` / `discord_channel.py` 未處理 pipeline 例外 → channel handler 靜默崩潰；修復：加入 try/except 包裝
+- **Trigger 偵測不一致（MEDIUM）** — Telegram 使用 `startswith()`，Discord 使用 regex `\b`；修復：統一為 regex 邊界匹配
+- **Linux inotify 過期結果檔案洩漏（MEDIUM）** — inotify 路徑從未清理過期結果檔案 → 磁碟洩漏；修復：加入清理邏輯
+- **`ipc_watcher.py` 非原子寫入（MEDIUM）** — error-notify 路徑使用非原子寫入 → 部分 JSON 讀取；修復：改用 `tmp + os.replace()` 原子寫入
+- **Dedup store 無 TTL（LOW）** — Dedup 儲存無過期機制 → 合法重送訊息永久被封鎖；修復：加入 TTL
+
+#### Agent Anti-Hallucination & Behavior (PR #359 — 14 fixes)
+
+- **`TOOL_DECLARATIONS` 匯入時 AttributeError（CRITICAL）** — `agent.py` 在 Google SDK 不存在時仍在匯入期建構 `TOOL_DECLARATIONS` → `AttributeError: 'NoneType'.FunctionDeclaration` crash；修復：延遲建構至 runtime
+- **Claude backend `group_folder` 缺失（CRITICAL）** — `agent.py` 呼叫 `run_agent_claude()` 未傳入 `group_folder` → 所有 MEMORY.md 寫入路徑錯誤；修復：補上 `group_folder` 參數
+- **反幻覺 milestone enforcer 注入無效 `tool_result`（CRITICAL）** — `agent.py` anti-hallucination enforcer 注入帶有假 `tool_use_id` 的 `tool_result` → Claude API HTTP 400；反幻覺系統本身導致 agent 崩潰；修復：改用有效的 assistant 訊息格式
+- **`_ALLOWED_MSG_TYPES` 過舊（HIGH）** — `cross_bot_protocol.py` 的 frozenset 未包含 `memory_share`、`task_delegate`、`ping`、`pong`、`status` → 所有此類訊息靜默丟棄；修復：更新至完整訊息類型集合
+- **OpenAI 3 輪無工具退出訊息無意義（HIGH）** — 顯示通用訊息而非明確說明；修復：改為具體的中文說明
+- **Skill 例外未捕捉（HIGH）** — `skill_loader.py` skill 例外可能導致整個 host process 崩潰；修復：加入 try/except
+- **SKILL.md 無大小限制（HIGH）** — `skill_loader.py` 無大小上限 → 可能填滿 LLM context window；修復：加入大小限制
+- **`evolution/fitness.py` 缺少 `success` key 預設 True（HIGH）** — 缺少 key 預設為成功 → 膨脹適應度分數，掩蓋真實失敗；修復：預設為 False
+- **Gemini 反幻覺重複 `FunctionResponse`（MEDIUM）** — 注入重複的 `FunctionResponse` → API 拒絕；修復：去重邏輯
+- **OpenAI 假狀態 regex 不完整（MEDIUM）** — 比 Gemini/Claude backend 涵蓋範圍更少；修復：補齊所有模式
+- **`_report_fitness()` 從未呼叫（MEDIUM）** — 定義但從未呼叫 → 進化引擎從未收到容器品質資料；修復：在適當時機呼叫
+- **soul.md 工具呼叫上限 3-4 次（MEDIUM）** — 直接違背 MAX_ITER=20，導致複雜任務提前假完成；修復：移除過低上限
+- **soul.md 缺少英文假完成語句（MEDIUM）** — 禁止模式未涵蓋英文；修復：補齊英文模式
+- **`emit_result` 可傳播 None（LOW）** — ternary 可回傳 `None` 而非 `str`；修復：加入 `str()` 轉換保護
+
+#### Config Complexity & Startup Validation (PR #361 — 12 fixes)
+
+- **`global _identity_store` SyntaxError（CRITICAL）** — 同 PR #360，從設定角度確認修復
+- **`_group_fail_lock` None TypeError（CRITICAL）** — 同 PR #360，從設定角度確認修復
+- **`EDITABLE_ENV_KEYS` token 名稱錯誤（HIGH）** — `config.py` 使用 `TELEGRAM_TOKEN` 而非 `TELEGRAM_BOT_TOKEN` → dashboard 寫入死 env var，token 變更靜默忽略；修復：更正所有 token 名稱
+- **`LEADER_HEARTBEAT_INTERVAL` int() 無 guard（HIGH）** — `config.py` 未使用 `_env_int()` → 匯入時 ValueError crash；修復：改用 `_env_int()`
+- **`.env` 從 CWD 相對路徑載入（HIGH）** — `env.py` 使用相對路徑 → 從非專案目錄啟動時失敗且錯誤靜默吞噬；修復：改用絕對路徑
+- **零 channel 載入無 CRITICAL log（HIGH）** — Bot 可在完全沒有 channel 的情況下啟動，無任何警示；修復：加入 CRITICAL 級別警告
+- **`DASHBOARD_PASSWORD` 警告在 logging 設定前觸發（MEDIUM）** — 警告可能遺失；修復：延遲至 logging 設定完成後
+- **`validate_env.py` 將缺少 channel token 視為非致命（MEDIUM）** — 修復：升級為致命錯誤
+- **`.env.example` 預設 port 錯誤（MEDIUM）** — 8767 應為 8769；修復：更正
+- **`.env.minimal` 缺少關鍵變數（LOW）** — 缺少 `ENABLED_CHANNELS` 和模型選擇變數；修復：補齊
+- **`run.py` 無預飛檢查（LOW）** — WARNING 埋在 log 中而非立即清晰錯誤；修復：加入 pre-flight check
+- **`NIM_API_KEY` 無效 key 偵測時機（LOW）** — 記錄為刻意取捨
+
+#### Database & Persistence Reliability (PR #362 — 12 fixes)
+
+- **25 個寫入函式無 rollback（CRITICAL）** — `db.py` 例外時未提交的交易靜默遺失；修復：所有寫入路徑加入 try/except/rollback
+- **`append_warm_log` FTS insert 非原子（HIGH）** — `db.py` FTS insert 與主 insert 非原子 → crash 時 FTS 索引不同步；修復：合併入同一交易
+- **`delete_warm_logs_before` FTS delete 非原子（HIGH）** — `db.py` FTS delete 非原子 → 孤立 FTS 條目；修復：合併入同一交易
+- **`evolution/daemon.py` 無 `_db_lock`（HIGH）** — 直接呼叫 `get_db()` 未加鎖 → 並發下 SQLite ProgrammingError；修復：加入 `_db_lock`
+- **RBAC 連線缺少調校（HIGH）** — `rbac/roles.py` 缺少 WAL mode、busy_timeout、索引 → 每條訊息全表掃描；修復：加入完整連線調校
+- **`db_adapter.py` 未調校 SQLite 連線（HIGH）** — 無 WAL、無 timeout、每次提交完整 fsync；修復：加入連線調校
+- **`memory_bus.py` VectorStore 並發腐化（HIGH）** — `store()` 和 `search()` 存取 `self._conn` 無鎖 → 並發腐化；無 rollback；修復：加入鎖和 rollback
+- **`migrations/sqlite_to_pg.py` SQL injection（HIGH）** — 資料表/欄位名稱來自 SQLite 檔案，未驗證直接插入 SQL；修復：加入白名單驗證
+- **缺少 `record_daily_wrapup()` 函式（MEDIUM）** — daily wrapup 欄位永遠為 0，每次重啟都重跑；修復：補上函式實作
+- **`rbac/roles.py` grant/revoke 無 rollback（MEDIUM）** — 修復：加入 try/except/rollback
+- **`memory_bus.py` `SharedMemoryStore.write` 無 rollback（MEDIUM）** — 修復：加入 try/except/rollback
+- **`add_indexes_migration.py` 錯誤欄位名稱（MEDIUM）** — 3 個索引參照錯誤欄位名 → 靜默 OperationalError，關鍵索引遺失；修復：更正所有欄位名稱
+
+## [1.18.0] — 2026-03-21
+
+### Fixed (Phase 11: 深度可靠性修復 — 43 個問題)
+
+四個 PR 並行深度分析修復，涵蓋工具安全、容器生命周期、進化穩定性與 soul 品質。
+
+#### Tool Safety & Reliability (PR #356 — 19 fixes)
+
+- **WebFetch SSRF 防護** — DNS 解析 + ipaddress 封鎖清單（127.x、10.x、192.168.x、169.254.x），防止 Server-Side Request Forgery 攻擊
+- **WebFetch 重定向鏈檢查** — 最多 5 次重定向上限，每次重定向都重新驗證目標 IP
+- **WebFetch 原始資料上限** — 2MB 原始內容上限 + 二進位內容偵測，防止記憶體耗盡
+- **Bash 危險指令封鎖清單** — 封鎖 `rm -rf /`、`mkfs`、`dd if=/dev/zero`、fork bomb 等高危指令
+- **Bash 輸出上限** — 50KB 輸出上限，防止記憶體耗盡
+- **Read 檔案大小上限** — 512KB 檔案大小上限
+- **Write/Edit 大小上限** — 10MB 限制 + `tmp + os.replace()` 原子寫入，防止部分寫入損毀
+- **send_message 空內容防護** — 空內容 guard + 32KB 上限
+- **Glob 結果上限** — 1000 結果上限，防止大量匹配拖垮系統
+- **MEMORY.md 讀取上限** — 512KB tail-read 上限
+
+#### Container Lifecycle & Queue Correctness (PR #357 — 12 fixes)
+
+- **輸出解析** — 使用 `rfind` 取最後一個 OUTPUT 區段，加入明確 "output too large" 路徑，JSON schema 驗證
+- **可靠性** — `stderr_lines` 變數遮蔽修復，docker kill 降級為 `docker rm -f`，Windows `TimeoutExpired` 重新拋出為 `asyncio.TimeoutError`
+- **錯誤訊息** — circuit breaker URGENT 繞過 rate limiter，timeout 顯示人類可讀的「30 分鐘」格式
+- **GroupQueue 回調** — 錯誤時回傳 `False` 以啟用退避重試，`_group_fail_lock` 為 None 時不再丟棄訊息
+- **group_queue.py 雙重分發競爭修復** — dispatch 前先清除 `pending_messages`，防止重複發送
+
+#### Evolution Stability (PR #358 — 6 fixes)
+
+- **免疫系統誤報修復** — `忽略你的所有規則` 和 `忘記你的系統提示` 現在能被正確攔截
+- **Genome 不對稱震盪修復** — 正式度升降現在均使用 `update_formality()`，防止單向漂移
+- **Daemon 基因組驗證** — 進化前先檢測無效基因組，若無效則呼叫 `reset_genome()`
+- **靜默攔截通知** — 免疫系統靜默攔截後，現在會向用戶發送具體的中文通知訊息
+
+#### Soul Quality (PR #355)
+
+- **soul.md 反幻覺強化** — 修補 anti-hallucination 漏洞，關閉多個可能導致幻覺回覆的邊緣情況
+
+## [1.17.0-phase10] — 2026-03-20
+
+### Fixed (Phase 10: 全面深度修復 — 30+ 個問題)
+
+第五輪 4 個 agent 並行深度分析並直接修復，務必每個 code 都仔細檢查。涵蓋 agent loop、host 層、安裝體驗、架構比較。
+
+#### container/agent-runner/agent.py — Phase 10A (Agent Loop 8 個 Bug)
+
+- **Gemini TOOL_DECLARATIONS 型別錯誤（CRITICAL）** — 最後 3 個工具被錯誤包裝在 `types.Tool()` 內，放入 `function_declarations` 時類型不符，導致每個 Gemini session 的工具呼叫 runtime crash；修復：全部解包為 `types.FunctionDeclaration`
+- **Gemini loop 缺少假狀態偵測** — Gemini text-only 回覆直接 break，沒有檢查 `✅ Done`、`*(正在執行...)*` 等幻覺模式；修復：加入 `_FAKE_STATUS_RE_G` regex + 連續 3 次 no-tool 硬上限
+- **Gemini loop 缺少 MEMORY.md 強制更新** — 沒有 `_memory_written` 追蹤、倒數第二輪提醒；修復：完整移植 OpenAI loop 的 MEMORY 強制機制
+- **Gemini loop 缺少 milestone enforcer** — 可以無限用 `send_message` 製造假進度；修復：加入完整 milestone enforcer v2
+- **Claude loop 缺少 milestone enforcer** — 只有 `end_turn` 假狀態偵測，缺少 `_turns_since_notify`、中文幻覺模式、MEMORY 提醒；修復：完整補齊
+- **Claude loop 非預期 stop_reason 靜默失敗** — `max_tokens`/`stop_sequence`/`error` 時 `final_response` 為空，用戶收不到任何回覆；修復：加入明確分支擷取部分回覆並記錄 stop_reason
+- **OpenAI loop execute_tool 未包裝** — Phase 9 漏修 OpenAI loop；修復：加入 try/except
+- **OpenAI loop Qwen fallback call 未捕捉** — `tool_choice` 降級的第二次呼叫若 timeout 會 crash；修復：加入 try/except + 友好中文錯誤訊息
+- **`evolution_hints` soul.md 繞過防護** — 加入 regex 檢查惡意 hints，偵測到時整體清除並記錄 SECURITY
+
+#### host/ — Phase 10B (Host Layer 8 個 Bug)
+
+- **stdout 無上限讀取 OOM（CRITICAL）** — `proc.stdout.read()` 無大小限制，失控容器可耗盡主機記憶體；修復：64 KiB chunk 讀取，上限 2 MB
+- **`_identity_store` NameError 靜默吞噬** — Phase 1 身份追蹤完全失效，每條訊息都在靜默出錯；修復：升級為模組層級 global
+- **`_dedup_lock`/`_group_fail_lock` None 值** — main() 執行前若被呼叫會 TypeError crash；修復：加入 None guard
+- **雙重 timeout 干擾 docker cleanup** — 內外兩層 wait_for 互相觸發，orphan containers；修復：外層改為 CONTAINER_TIMEOUT + 30s backstop
+- **Telegram send_message 例外傳播** — 網路錯誤/403 被誤判為容器執行失敗，觸發重試；修復：加入 try/except
+- **JID 格式錯誤導致 ValueError crash** — malformed JID 在 send_message 中 crash；修復：加入型別驗證
+- **Discord `import re` 在熱路徑中** — 每條訊息都執行 import；修復：移至模組層級
+- **Discord 2000 字元訊息靜默消失** — 超長回覆觸發 Discord API 400，整條訊息丟失；修復：自動分割成 2000 字元片段送出
+- **scheduled_tasks 缺少索引** — 全表掃描；修復：加入 `idx_scheduled_tasks_status_next_run`
+- **RBAC `_is_empty()` 無快取** — 每次 permission check 觸發兩次 DB 查詢；修復：加入 60s TTL 快取
+
+#### host/main.py + host/container_runner.py — Phase 10D (架構修復)
+
+- **Docker image 啟動預熱** — 首次請求不再付 docker pull 代價，加入背景 `_prepull_image()` task
+- **Circuit breaker 顯示實際剩餘秒數** — 不再永遠說「約 60 秒」，改為顯示真實剩餘時間
+- **錯誤訊息分類改善** — OOM/timeout/crash/格式錯誤分別有不同的中文提示
+
+#### setup/ docs/ — Phase 10C (安裝體驗 11 個問題)
+
+- **`QWEN_API_KEY` 根本不存在（CRITICAL）** — 文件和 setup.py 全部錯誤；修復：改為正確的 `NIM_API_KEY`
+- **`setup.sh` 在檢查 Node.js** — EvoClaw 是 Python 專案；修復：完整重寫，檢查 Python 3.11+ 和 Docker
+- **`scripts/evoclaw.service` 不存在** — 文件說要 cp 這個檔案但根本沒有；修復：新增完整 systemd unit file
+- **QUICK_START.md / TROUBLESHOOTING.md** — 大量錯誤資訊、缺少 OWNER_IDS、缺少部署說明；全部重寫
+- **`OWNER_IDS` 只讀 os.environ** — `.env` 檔案裡設定的值不生效；修復：同時從 read_env_file 讀取
+- **setup/setup.py 只支援 Gemini** — 新增 4 個 LLM provider 選單
+
+### 今日緊急修復（部署中發現）
+
+- **PR #344** — Discord @mention 正規化（`<@BOT_ID>` → `@Eve`）
+- **PR #345** — OWNER_IDS env var 啟動時自動授權
+- **PR #346** — RBAC 空白時 fail-open
+- **PR #347** — `proc is None` guard（AttributeError 修復）
+- **PR #348** — Qwen API httpx.Timeout（防止無限卡死）
+- **PR #349** — Telegram `drop_pending_updates=True`（防止重啟後重播舊訊息）
+
+### Issues Addressed
+#350 #351 #352 #353
+
+---
+
+## [1.16.0-phase9] — 2026-03-20
+
+### Fixed (Phase 9: 穩定性全面修復 — 12 個問題)
+
+4 個 agent 並行修復分析報告中發現的所有 P0/P1/P2 問題，大幅提升 EvoClaw 穩定性與可靠性。
+
+#### container/agent-runner/agent.py — Phase 9A (Agent Loop 修復)
+
+- **工具例外捕捉（P0）** — Gemini 與 Claude loop 的 `execute_tool()` 呼叫現在包裝於 try/except；工具出錯時回傳 `[Tool error: ...]` 而非整個 agent 崩潰
+- **History 大小限制（P0）** — 新增 `_MAX_TOOL_RESULT_CHARS = 4000`（截斷過大的工具結果）與 `_MAX_HISTORY_MESSAGES = 40`（修剪舊訊息）；防止長對話 OOM
+- **Claude loop 功能補齊（P0）** — Claude loop 新增假狀態偵測（`✅ Done`、`*(正在...)*` 等）、MEMORY.md 寫入追蹤、倒數第二輪 CRITICAL 提醒注入；與 OpenAI/Gemini loop 功能對齊
+
+#### host/container_runner.py — Phase 9B (Container Runner 修復)
+
+- **Exit code 故障判斷（P0）** — 移除不可靠的 stderr emoji marker 偵測（`"🚀"`, `"📥"`, `"🧠"`）；改用 `proc.returncode` 判斷：0/124/137/143 = agent 問題（不觸發 circuit breaker），其他 = Docker 問題
+- **Circuit breaker half-open 修正（P1）** — 進入 half-open 時將失敗計數重設為 0（原本設為 threshold-1=2），讓 circuit breaker 真正有機會恢復
+
+#### host/ipc_watcher.py — Phase 9C (Host Layer 修復)
+
+- **inotify 靜默失敗→WARNING（P1）** — inotify watch 超限時從 DEBUG 升級為 WARNING，並附上 `sysctl fs.inotify.max_user_watches=65536` 修復指令；降級輪詢前正確清理部分初始化的 watches
+
+#### host/task_scheduler.py — Phase 9C
+
+- **Cron 時區修正（P1）** — `compute_next_run()` 現在正確使用 `pytz` 將 croniter 結果轉換為設定的本地時區（修復之前所有 cron 任務以 UTC 執行的問題）
+- **Interval task drift 修正（P1）** — interval 任務的 `last_run` 改為使用 `task["next_run"]`（排程時間），而非任務完成時間；消除長任務執行時的累積誤差
+
+#### host/main.py — Phase 9C
+
+- **Graceful shutdown 超時延長（P1）** — `wait_for_active` timeout 從 10 秒延長至 30 秒；新增關機等待 log 訊息，避免長任務被強制中斷後重複處理
+
+#### host/memory/memory_bus.py — Phase 9D (Memory/Evolution 修復)
+
+- **MEMORY.md 原子寫入（P2）** — 使用 temp file + `os.replace()`（POSIX atomic rename）替代直接 `write_text()`；防止崩潰時記憶檔案損壞
+
+#### host/evolution/immune.py — Phase 9D
+
+- **中文免疫模式收緊（P2）** — 重寫 20 個中文注入偵測 pattern，要求同時具備命令語氣 + 明確對象詞（`指令`/`規則`/`限制`/`設定`）；消除對「我忽略了他之前的建議」等正常句子的誤判
+
+#### host/evolution/genome.py — Phase 9D
+
+- **Formality 收斂停止（P2）** — 新增 `_CONVERGENCE_EPSILON = 0.01`；當 formality 距目標 <1% 時停止更新，消除無限震盪
+- **Genome DB 值驗證（P2）** — 新增 `_safe_float()` helper（帶 min/max 範圍限制）；DB 中 NULL 或非數字值不再導致崩潰
+
+### Issues Addressed
+#339 #340 #341 #342
+
+---
+
+## [1.15.0-phase8] — 2026-03-20
+
+### Fixed / Added (Phase 8: Qwen 優化、群組隔離、inotify IPC、安裝體驗)
+
+4 個 agent 並行分析後針對 Qwen 3.5 397B 相容性、架構穩定性與安裝體驗的深度修正。
+
+#### container/agent-runner/agent.py — Phase 8A (Qwen 3.5 397B 優化)
+
+- **`_is_qwen_model()` helper** — 統一偵測 Qwen 模型，避免多處重複判斷
+- **MAX_ITER 自動降低（Qwen 專屬）** — Level B: 20→12，Level A: 6→5；減少 Qwen 幻覺螺旋 (Issue #326)
+- **Temperature 0.3 → 0.2（Qwen）** — 進一步降低 Qwen 輸出不確定性
+- **`tool_choice="auto"`（Qwen）** — 避免 `tool_choice="required"` 導致的死迴圈；改用 prompt-based 強制機制 (Issue #325)
+- **Qwen 系統 prompt 注入** — 中文優先規則、禁止假狀態、思考字數限制 200 字
+- **假狀態 pattern 偵測** — 偵測 `*(正在執行...)*`、`【已完成】` 等 Qwen 常見假狀態格式
+- **工具參數 JSON 自動修復** — Qwen 輸出截斷 JSON 時嘗試自動修復，減少工具呼叫失敗率
+
+#### host/container_runner.py — Phase 8B (群組隔離 Circuit Breaker)
+
+- **Per-group circuit breaker** — `_docker_failures`、`_docker_failure_time` 改為 dict（group_folder → value）(Issue #327)
+- **群組獨立熔斷** — A 群組 Docker 失敗不再影響 B 群組，每個群組有獨立的 60 秒恢復計時
+- **錯誤訊息更新** — 「⚠️ 此群組 Docker 暫時受阻，約 60 秒後自動恢復。其他群組不受影響。」
+
+#### host/ipc_watcher.py + host/requirements.txt — Phase 8C (inotify 混合 IPC)
+
+- **Linux inotify 後端** — 事件驅動，延遲 <20ms（vs 輪詢 ~500ms）(Issue #328)
+- **自動降級到輪詢** — 非 Linux 或 inotify 初始化失敗時自動回退到原本 500ms 輪詢
+- **`inotify-simple>=1.3.0`** — 加入 requirements.txt（Linux 限定依賴）
+
+#### QUICK_START.md + TROUBLESHOOTING.md + .env.minimal — Phase 8D (安裝體驗)
+
+- **QUICK_START.md** — 5 分鐘快速上手（4 步驟），移除複雜度 (Issue #330)
+- **TROUBLESHOOTING.md** — 7 個常見問題及解法，含 log 符號對照表
+- **`.env.minimal`** — 只需 5 個必要變數（原本 37 個），降低新用戶入門門檻
+
+### Issues Addressed
+#325 #326 #327 #328 #329 #330
+
+---
+
 # Changelog
+
+## [1.14.0-phase7] — 2026-03-20
+
+### Fixed (Phase 7: P0 Anti-Hallucination & Stability)
+
+4 個 agent 並行深度分析後發現的根本性虛假回應問題，本版本修正 23 個具體漏洞中的最高優先 10 個。
+
+#### container/agent-runner/agent.py
+
+- **Temperature 0.7 → 0.3（所有 provider）** — 降低 LLM 幻覺率約 50%；Claude/OpenAI/Qwen/Gemini 全部適用 (Issue #324)
+- **emit_result 邏輯根本修正** — 原本「只要有 tool message 就清空最終回應」的錯誤邏輯改為「只有最終輸出真的是空才清空」，修復 Agent 在循環中途發送進度報告後最終結果被吞掉的 bug (Issue #322)
+- **MAX_ITER 邊界 fallback（三個 provider）** — 迴圈結束時若 final_response 為空，返回明確提示訊息而非靜默空字串 (Issue #318)
+- **OpenAI/Qwen 工具參數解析失敗改善** — JSON 解析失敗時改為返回錯誤給 model，讓 model 知道工具呼叫失敗，不再靜默傳入空 `{}` 繼續執行 (Issue #319)
+- **MAX_ITER 環境變數保護** — `int()` 轉換加 `try/except ValueError`，防止無效設定造成 agent 啟動失敗
+- **soul.md 讀取失敗 fallback** — 讀取失敗時注入最小系統 prompt，防止 agent 無任何行為規範地執行
+- **CLAUDE.md 讀取保護** — 加 `try/except`，I/O 失敗時跳過而非崩潰
+
+#### container/agent-runner/soul.md
+
+- **新增「誠實性規則（最高優先）」** — 明確禁止 `*(正在執行...)*` 等假狀態行；工具失敗必須如實告知
+- **新增「MEMORY.md 更新規則」** — 明確列出何時必須/不需要更新，消除模糊指令導致的過度或不足更新
+- **新增「工具使用規則」** — 最多 3-4 次工具呼叫後必須給結論，不允許無限迴圈假裝工作
+
+#### host/main.py
+
+- **Phase 1/2/3 init 改用 structured logging** — 剩餘 6 個 `print()` 呼叫全改為 `log.info/warning`，確保初始化狀態進入監控系統
+
+### Issues Addressed
+#318 #319 #322 #324 #329
+
+---
+
+## [1.13.1-phase6a] — 2026-03-20
+
+### Fixed (Phase 6A: Stability & False-Response Root Causes)
+
+這個版本針對深度程式碼審查後發現的穩定性問題進行系統性修正，
+解決了導致 EvoClaw 靜默無回應和虛假回應的核心 bug。
+
+#### host/main.py
+
+- **修正 db.get_conversation_history() 無保護** — DB 失敗時整個訊息 handler
+  崩潰並靜默丟棄訊息；現在改為 try/except，失敗時用空 history 繼續處理
+  (Issue #304)
+- **修正 format_messages() 無保護** — 格式化失敗時 prompt 遺失；
+  加 try/except，fallback 用原始訊息內容拼接 (Issue #305)
+- **修正 db.get_session() 無保護** — 異常直接傳播；
+  加 try/except，fallback 用 None（新 session）(Issue #305)
+- **Container error status 改為通知使用者** — 原本靜默更新計數器；
+  現在主動發送 `⚠️ 發生錯誤，請稍後再試。` 並附 run_id 方便追蹤 (Issue #306)
+- **Timeout 通知不再吞錯** — `except: pass` 改為 `log.warning`，
+  錯誤進入結構化 log 系統 (Issue #307)
+- **Phase 1/2/3 init 失敗改用 log.error** — 從 `print()` 改為
+  `log.error()`，確保初始化失敗進入監控系統 (Issue #307)
+
+#### container/agent-runner/agent.py
+
+- **Agent loop 空白回應 fallback** — loop 結束時若無輸出且無 tool 訊息，
+  emit `「系統：處理完成，但未產生回應，請重試。」` 取代靜默 (Issue #308)
+- **LOOP-EXHAUST 警告 log** — Claude、OpenAI、Gemini 三個 provider 的
+  agent loop 在 MAX_ITER 耗盡時均加入 `⚠️ LOOP-EXHAUST` log，
+  方便診斷無限迴圈問題 (Issue #308)
+
+### GitHub Issues Created (Phase 6A)
+
+| Issue | 標題 | 狀態 |
+|-------|------|------|
+| #304 | [stability] db.get_conversation_history() has no error handling | ✅ Fixed |
+| #305 | [stability] format_messages() and db.get_session() have no error handling | ✅ Fixed |
+| #306 | [stability] Container error status causes silent failure | ✅ Fixed |
+| #307 | [stability] Timeout and exception notifications silently swallow errors | ✅ Fixed |
+| #308 | [stability] Agent loop produces empty output without user-visible fallback | ✅ Fixed |
+| #309 | [stability] MAX_ITER=30 too high — allows excessive hallucination loops | 🔲 Planned |
+| #310 | [stability] Default LLM (Gemini) has weaker tool-calling reliability than Claude | 🔲 Planned |
+| #311 | [stability] IPC file-based communication has no atomic write protection | 🔲 Planned |
+| #312 | [stability] Docker circuit breaker blocks ALL groups for 60s on any failure | 🔲 Planned |
+| #313 | [stability] GroupQueue silently drops messages after 5 consecutive failures | 🔲 Planned |
+| #314 | [stability] System prompt injection too complex — 3000+ tokens per request | 🔲 Planned |
+| #315 | [cleanup] 41 stale branches cannot be deleted — need admin access | 🔲 Pending |
+| #316 | [stability] IPC watcher polling interval too coarse for real-time feel | 🔲 Planned |
+
+---
+
+# Changelog
+
+## [1.13.0-phase3] -- 2026-03-18
+
+### Added (Phase 3: Cross-bot Identity + RBAC Foundation)
+- `host/identity/bot_registry.py` -- BotRegistry: SQLite-backed cross-framework bot identity store
+  - Stable `bot_id = SHA-256(name:framework:channel)[:16]` format for cross-framework bot identity
+  - BotIdentity dataclass with capabilities, endpoints, trust status
+  - Nonce-based handshake protocol for cross-system bot recognition
+  - Pre-registered known bots: 小白 (Telegram) and 小Eve (EvoClaw/Discord)
+  - `bootstrap_known_bots()` pre-registers and trusts known bots on startup
+- `host/identity/cross_bot_protocol.py` -- CrossBotProtocol: `crossbot/1.0` message envelope
+  - Message types: hello, ack, memory_share, task_delegate, status, ping, pong
+  - HMAC-SHA256 message signing and verification
+  - Decorator-based message handler registration
+- `host/rbac/__init__.py` + `host/rbac/roles.py` -- Role-Based Access Control
+  - Roles: admin, operator, agent, viewer
+  - Permissions: memory:read/write/delete, agent:spawn/kill/list, task:submit/cancel, registry:read/write, rbac:grant/revoke
+  - SQLite-backed RBACStore with grant/revoke/query operations
+- `host/identity/__init__.py` -- Updated to export BotRegistry, BotIdentity, CrossBotProtocol, CrossBotMessage
+- `host/sdk_api.py` -- Added bot registry WebSocket endpoints: bot_register, bot_lookup, bot_list, bot_handshake
+- `host/main.py` -- Phase 3 startup block: BotRegistry + RBAC initialized
+
+### GitHub Issues Created
+- #265 [Phase 3] Cross-bot Identity Protocol
+- #266 [Phase 3] Enterprise Tool Suite - Integration Layer
+- #267 [Phase 3] RBAC - Role-Based Access Control
+- #268 [Phase 3] Matrix Channel Support
+- #269 [Phase 3] Multi-tenant Support
+
+### Architecture After Phase 3
+```
+Gateway (main.py)
++-- MemoryBus          (Phase 1) OK
++-- WSBridge           (Phase 1) OK  port 8768
++-- AgentIdentityStore (Phase 1) OK
++-- SdkApi             (Phase 2) OK  port 8767
++-- MemorySummarizer   (Phase 2) OK
++-- BotRegistry        (Phase 3) OK  <- NEW  cross-framework bot identity
++-- RBACStore          (Phase 3) OK  <- NEW  role-based access control
+        |
+        v crossbot/1.0
+外部框架 (小白) <--> EvoClaw (小Eve)
+```
 
 ## [1.12.0-phase2] -- 2026-03-18
 
@@ -89,7 +859,7 @@ Agent Runtime
 - `reset_group` IPC command: monitor agent can unfreeze stuck groups without human intervention
 - `mcp__evoclaw__reset_group` tool available to agents in Gemini, OpenAI-compat, and Claude modes
 - `groups/telegram_monitor/MEMORY.md` template: watchdog agent persona pre-configured
-- Nanoclaw independent watchdog scheduled task: checks EvoClaw DB every 5 minutes as backup
+- Independent watchdog scheduled task: checks EvoClaw DB every 5 minutes as backup
 
 ## [1.11.31] - 2026-03-17
 ### Added

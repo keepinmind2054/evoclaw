@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from typing import Optional
 
@@ -52,6 +53,23 @@ _COMPRESS_PROMPT = (
     "Memory:\n{memory}\n\n"
     "Output compressed memory ONLY:"
 )
+
+# Minimum length (chars) for a valid summarization result.
+_MIN_SUMMARY_CHARS = 5
+# Regex: a valid summary line starts with a bullet marker or a dash.
+_BULLET_RE = re.compile(r"^\s*[-•*]|^\s*bullet\s", re.MULTILINE | re.IGNORECASE)
+
+
+def _looks_like_summary(text: str) -> bool:
+    """Return True if *text* looks like it contains at least one bullet point.
+
+    This is a lightweight sanity check to reject obvious garbage (e.g. an
+    API error message or an empty-ish response) before storing into memory.
+    """
+    stripped = text.strip()
+    if len(stripped) < _MIN_SUMMARY_CHARS:
+        return False
+    return bool(_BULLET_RE.search(stripped))
 
 
 class MemorySummarizer:
@@ -88,6 +106,11 @@ class MemorySummarizer:
         Summarize a conversation session into bullet points for MEMORY.md.
 
         Returns a patch string to append to MEMORY.md.
+
+        Bug fixed (p14b-12): LLM output is now validated before use.  If the
+        response does not look like a bullet-point list (e.g. it is an error
+        message, empty, or pure whitespace) we fall back to the stub summary
+        rather than storing garbage into MEMORY.md.
         """
         if not messages:
             return ""
@@ -106,7 +129,13 @@ class MemorySummarizer:
         )
 
         result = await self._call_llm(prompt, max_tokens=200)
-        if not result:
+
+        # Validate LLM output before trusting it.
+        if not result or not _looks_like_summary(result):
+            logger.warning(
+                "MemorySummarizer: LLM output failed validation for %s, using fallback",
+                agent_id,
+            )
             return self._fallback_summarize(agent_id, messages)
 
         date_str = time.strftime("%Y-%m-%d")
@@ -122,14 +151,31 @@ class MemorySummarizer:
     ) -> str:
         """
         Compress MEMORY.md when it approaches the size limit.
+
+        Bug fixed (p14b-13): the previous code truncated the prompt input to
+        3000 chars (``memory_content[:3000]``) but then returned the LLM's
+        output as the *entire* replacement for the original content.  This
+        silently discarded every byte past the 3000-char slice — the LLM
+        never saw the tail of the memory, so it could not have preserved it.
+        We now pass the full content to the LLM (up to ``MAX_MEMORY_BYTES``
+        which is the hard cap) and only fall back to truncation when the LLM
+        is unavailable.
+
+        Bug fixed (p14b-14): the compressed result is now validated.  If the
+        LLM returns something larger than the original or suspiciously small
+        (< 10 chars) we fall back to tail-truncation rather than storing the
+        bad output.
         """
         current_size = len(memory_content.encode("utf-8"))
         if current_size < COMPRESS_THRESHOLD:
             return memory_content
 
         max_words = target_bytes // 6
+        # Pass the full memory content — do NOT truncate the input here.
+        # The prompt token limit is handled by the LLM itself; we send up to
+        # MAX_MEMORY_BYTES worth of content which is only 8 KB.
         prompt = _COMPRESS_PROMPT.format(
-            memory=memory_content[:3000],
+            memory=memory_content[:MAX_MEMORY_BYTES],
             max_words=max_words,
         )
 
@@ -140,6 +186,16 @@ class MemorySummarizer:
 
         compressed = result.strip()
         new_size = len(compressed.encode("utf-8"))
+
+        # Validate: reject if suspiciously empty or larger than the original.
+        if new_size < 10 or new_size >= current_size:
+            logger.warning(
+                "MemorySummarizer: compress output invalid for %s "
+                "(original=%d bytes, compressed=%d bytes), truncating instead",
+                agent_id, current_size, new_size,
+            )
+            return self._truncate_memory(memory_content, target_bytes)
+
         reduction = 100 * (1 - new_size / max(current_size, 1))
         logger.info(
             "MemorySummarizer: compressed %s memory %d->%d bytes (%.0f%% reduction)",
@@ -187,7 +243,7 @@ class MemorySummarizer:
                 url, data=payload,
                 headers={"Content-Type": "application/json"}, method="POST"
             )
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             response = await loop.run_in_executor(
                 None, lambda: urllib.request.urlopen(req, timeout=10)
             )
@@ -217,7 +273,7 @@ class MemorySummarizer:
                 },
                 method="POST",
             )
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             response = await loop.run_in_executor(
                 None, lambda: urllib.request.urlopen(req, timeout=10)
             )
@@ -248,7 +304,7 @@ class MemorySummarizer:
                 },
                 method="POST",
             )
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             response = await loop.run_in_executor(
                 None, lambda: urllib.request.urlopen(req, timeout=10)
             )

@@ -16,6 +16,14 @@ from .group_folder import is_valid_group_folder
 from .router import route_file
 import asyncio as _asyncio
 
+# Optional: inotify for Linux (pip install inotify-simple)
+_INOTIFY_AVAILABLE = False
+try:
+    import inotify_simple as _inotify_simple
+    _INOTIFY_AVAILABLE = True
+except ImportError:
+    pass
+
 log = logging.getLogger(__name__)
 
 # ── skills_engine loader: add repo root to sys.path once at module load ────────
@@ -33,11 +41,32 @@ def _get_skills_engine():
     return _skills_engine_mod
 
 # Module-level lock to prevent concurrent skill installs/uninstalls
-_skills_lock = asyncio.Lock()
+# p17c BUG-FIX (HIGH): asyncio.Lock() created at module import time is bound to
+# the event loop that exists at import time.  In Python 3.10+ this is deprecated
+# and in Python 3.12 may raise RuntimeError when used on a different loop (e.g.
+# after asyncio.run() creates a fresh loop).  Lazily initialise via accessors so
+# the Lock is always created on the running loop.
+_skills_lock: asyncio.Lock | None = None
+_dev_task_lock: asyncio.Lock | None = None
 
 # ── dev_task concurrency guard ─────────────────────────────────────────────────
 _dev_task_active: set[str] = set()
-_dev_task_lock = asyncio.Lock()
+
+
+def _get_skills_lock() -> asyncio.Lock:
+    """Return (and lazily create) the asyncio.Lock for skill install/uninstall."""
+    global _skills_lock
+    if _skills_lock is None:
+        _skills_lock = asyncio.Lock()
+    return _skills_lock
+
+
+def _get_dev_task_lock() -> asyncio.Lock:
+    """Return (and lazily create) the asyncio.Lock for dev_task concurrency."""
+    global _dev_task_lock
+    if _dev_task_lock is None:
+        _dev_task_lock = asyncio.Lock()
+    return _dev_task_lock
 
 
 def _ipc_task_done_callback(task: asyncio.Task) -> None:
@@ -70,7 +99,14 @@ def _sanitize_error_for_notification(error: str) -> str:
 
 def _notify_main_group_error(filename: str, error: str) -> None:
     """Send IPC error notification to main group by writing a new IPC message file.
-    The error text is sanitized to remove internal filesystem paths before delivery."""
+    The error text is sanitized to remove internal filesystem paths before delivery.
+
+    Fix(p12a): previously used Path.write_text() which is non-atomic — the OS
+    creates the file (triggering inotify CREATE) while the write is still in
+    progress, so the host may read a partial JSON and log a parse error.  Now
+    uses an atomic write: write to a .tmp sibling then os.rename() so the
+    inotify MOVED_TO event fires only after the file is fully written.
+    """
     try:
         groups = db.get_all_registered_groups()
         main = next((g for g in groups if g.get("is_main")), None)
@@ -88,7 +124,11 @@ def _notify_main_group_error(filename: str, error: str) -> None:
             "text": f"IPC Error: failed to process `{safe_filename}`\n```\n{safe_error}\n```",
         }
         out = ipc_dir / f"ipc_error_alert_{int(time.time() * 1000)}.json"
-        out.write_text(json.dumps(payload), encoding="utf-8")
+        # Atomic write: write to .tmp then rename so inotify MOVED_TO fires only
+        # after the file is complete, preventing partial-JSON reads.
+        tmp = out.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.rename(out)
     except Exception as exc:
         log.debug("_notify_main_group_error failed: %s", exc)
 
@@ -256,21 +296,34 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
         # 寫入旗標檔案通知 _message_loop 重新從 DB 載入群組清單
         # 用檔案旗標（而非直接呼叫函式）是因為 IPC watcher 與 message loop
         # 在不同的 asyncio task 中，透過旗標可以避免跨 task 的直接耦合
+        # p16c BUG-FIX (MEDIUM): use atomic tmp+rename so the main loop never reads
+        # an empty or half-written flag file if it polls exactly at write time.
         flag = config.DATA_DIR / "refresh_groups.flag"
-        flag.write_text("1", encoding="utf-8")
+        _flag_tmp = flag.with_suffix(".flag.tmp")
+        _flag_tmp.write_text("1", encoding="utf-8")
+        _flag_tmp.rename(flag)
         log.info("Groups refresh requested via IPC")
 
     elif msg_type == "reset_group":
         # 重置指定群組的失敗計數器，解凍被 cooldown 鎖定的群組。
-        # 僅限 monitor 群組（is_monitor=True）或主群組可呼叫，防止普通群組互相干擾。
+        # 僅限主群組可呼叫，防止普通群組互相干擾或濫用重置功能。
+        # p16c BUG-FIX (HIGH): the comment described a main/monitor restriction but
+        # no code enforced it, allowing any group's container to reset the failure
+        # counter of any other group — a privilege-escalation vector.
+        if not is_main:
+            raise PermissionError("Only main group can reset group failure counters")
         target_jid = payload.get("jid", "")
         if not target_jid:
             raise ValueError("reset_group requires 'jid' field")
         # Write a flag file — main.py's _message_loop reads it and resets counters
         # Using file flag avoids cross-task direct coupling (same pattern as refresh_groups)
+        # p16c BUG-FIX (MEDIUM): use atomic tmp+rename so the main loop never reads
+        # a partial JSON payload if it polls exactly at write time.
         import json as _json
         flag = config.DATA_DIR / "reset_group.flag"
-        flag.write_text(_json.dumps({"jid": target_jid, "ts": time.time()}), encoding="utf-8")
+        _reset_tmp = flag.with_suffix(".flag.tmp")
+        _reset_tmp.write_text(_json.dumps({"jid": target_jid, "ts": time.time()}), encoding="utf-8")
+        _reset_tmp.rename(flag)
         log.info("reset_group requested via IPC for jid=%s by group=%s", target_jid, group_folder)
 
     elif msg_type == "apply_skill":
@@ -281,7 +334,7 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
         skill_path = payload.get("skill_path", "")
         request_id = payload.get("requestId", "")
         if skill_path:
-            t = _asyncio.ensure_future(_run_apply_skill(skill_path, request_id, group_folder, route_fn))
+            t = _asyncio.create_task(_run_apply_skill(skill_path, request_id, group_folder, route_fn))
             t.add_done_callback(_ipc_task_done_callback)
 
     elif msg_type == "uninstall_skill":
@@ -291,14 +344,14 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
         skill_name = payload.get("skill_name", "")
         request_id = payload.get("requestId", "")
         if skill_name:
-            t = _asyncio.ensure_future(_run_uninstall_skill(skill_name, request_id, group_folder, route_fn))
+            t = _asyncio.create_task(_run_uninstall_skill(skill_name, request_id, group_folder, route_fn))
             t.add_done_callback(_ipc_task_done_callback)
 
     elif msg_type == "list_skills":
         # 列出已安裝的 Skills：任何群組都可以查詢（唯讀操作）
         # 結果寫入 results 目錄（供 container 輪詢讀取），同時如有 requestId 也可 route 回訊息
         request_id = payload.get("requestId", "")
-        t = _asyncio.ensure_future(_run_list_skills(request_id, group_folder, route_fn))
+        t = _asyncio.create_task(_run_list_skills(request_id, group_folder, route_fn))
         t.add_done_callback(_ipc_task_done_callback)
 
     elif msg_type == "spawn_agent":
@@ -309,7 +362,7 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
         if request_id and prompt:
             # 找出目前正在執行此群組的父 container（用於 dashboard 親子關係顯示）
             parent_name = _find_parent_container(group_folder)
-            t = _asyncio.ensure_future(_run_subagent(request_id, prompt, context_mode, group_folder, parent_name))
+            t = _asyncio.create_task(_run_subagent(request_id, prompt, context_mode, group_folder, parent_name))
             t.add_done_callback(_ipc_task_done_callback)
 
     elif msg_type == "dev_task":
@@ -329,7 +382,7 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
                     "will attempt lookup by folder in _run_dev_task", group_folder
                 )
                 _dev_group_jid = group_folder  # pass folder as fallback, handled in _run_dev_task
-            t = _asyncio.ensure_future(_run_dev_task(
+            t = _asyncio.create_task(_run_dev_task(
                 {"prompt": dev_prompt, "mode": mode, "session_id": session_id},
                 _dev_group_jid,
                 route_fn,
@@ -367,13 +420,13 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
                     except OSError as e:
                         log.warning("send_file IPC: failed to delete temp file %r: %s", host_path, e)
 
-            t = _asyncio.ensure_future(_send_and_cleanup())
+            t = _asyncio.create_task(_send_and_cleanup())
             t.add_done_callback(_ipc_task_done_callback)
         else:
             log.warning("send_file IPC: file NOT found at host_path=%r (container: %r)",
                         host_path, container_path)
             fname = os.path.basename(container_path) if container_path else "unknown"
-            _asyncio.ensure_future(route_fn(
+            _asyncio.create_task(route_fn(
                 _sf_jid,
                 f"⚠️ 檔案無法傳送：找不到 {fname}\n路徑：{host_path}"
             ))
@@ -387,7 +440,7 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
         _sf_match = next((g for g in _sf_groups if g.get("folder") == group_folder), None)
         _ms_jid = _sf_match["jid"] if _sf_match else ""
         if query and _ms_jid:
-            t = _asyncio.ensure_future(_run_memory_search(query, request_id, _ms_jid, group_folder))
+            t = _asyncio.create_task(_run_memory_search(query, request_id, _ms_jid, group_folder))
             t.add_done_callback(_ipc_task_done_callback)
 
     elif msg_type == "start_remote_control":
@@ -398,7 +451,7 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
             _rc_match = next((g for g in _rc_groups if g.get("folder") == group_folder), None)
             rc_jid = _rc_match["jid"] if _rc_match else ""
         if rc_jid:
-            t = _asyncio.ensure_future(_run_start_remote_control(rc_jid, rc_sender, route_fn))
+            t = _asyncio.create_task(_run_start_remote_control(rc_jid, rc_sender, route_fn))
             t.add_done_callback(_ipc_task_done_callback)
         else:
             log.warning("start_remote_control IPC: could not resolve JID for group %s", group_folder)
@@ -409,7 +462,7 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
             _su_groups = db.get_all_registered_groups()
             _su_match = next((g for g in _su_groups if g.get("folder") == group_folder), None)
             _su_jid = _su_match["jid"] if _su_match else ""
-        t = _asyncio.ensure_future(_run_self_update(_su_jid, route_fn))
+        t = _asyncio.create_task(_run_self_update(_su_jid, route_fn))
         t.add_done_callback(_ipc_task_done_callback)
 
     else:
@@ -428,7 +481,19 @@ async def _run_dev_task(payload: dict, group_jid: str, route_fn) -> None:
     每個階段完成後透過 route_fn 發送進度通知給用戶。
     Uses _dev_task_lock to prevent concurrent dev_task invocations per group.
     """
-    async with _dev_task_lock:
+    # p17c BUG-FIX (HIGH): The original code acquired _dev_task_lock for the
+    # membership check+add, released it, then re-acquired it in finally for
+    # discard.  Between the two acquisitions any awaited operation (e.g.
+    # route_fn below) could yield, and a second coroutine for the same group
+    # could enter the lock, see _dev_task_active still populated (because we
+    # haven't removed yet), and correctly reject itself — BUT if the first
+    # coroutine crashes before reaching finally the entry is never removed,
+    # permanently blocking future dev_tasks.  More subtly: if _dev_task_active
+    # is mutated by concurrent coroutines between lock acquisitions the set is
+    # no longer consistent.  Fix: keep the add AND the guard check inside the
+    # same lock scope, and use a single lock reference from the lazy accessor.
+    _dtl = _get_dev_task_lock()
+    async with _dtl:
         if group_jid in _dev_task_active:
             await route_fn(group_jid, "⚙️ A dev task is already running for this group. Please wait.")
             return
@@ -477,7 +542,7 @@ async def _run_dev_task(payload: dict, group_jid: str, route_fn) -> None:
     except Exception as e:
         log.error(f"DevEngine IPC error: {e}")
     finally:
-        async with _dev_task_lock:
+        async with _get_dev_task_lock():
             _dev_task_active.discard(group_jid)
 
 
@@ -489,7 +554,7 @@ async def _run_apply_skill(
     完成後透過 route_fn 發送結果，並（若提供 requestId）寫入 results 目錄。
     Uses _skills_lock to prevent concurrent skill installs/uninstalls.
     """
-    async with _skills_lock:
+    async with _get_skills_lock():
         try:
             apply_skill = _get_skills_engine().apply_skill
             groups = db.get_all_registered_groups()
@@ -523,7 +588,11 @@ async def _run_apply_skill(
             if request_id:
                 result_dir = config.DATA_DIR / "ipc" / group_folder / "results"
                 result_dir.mkdir(parents=True, exist_ok=True)
-                (result_dir / f"{request_id}.json").write_text(
+                # p15b-fix: atomic write (tmp+rename) so the container polling
+                # for this file never reads a partial JSON.
+                _out = result_dir / f"{request_id}.json"
+                _tmp = _out.with_suffix(".json.tmp")
+                _tmp.write_text(
                     json.dumps({
                         "requestId": request_id,
                         "output": msg,
@@ -533,6 +602,7 @@ async def _run_apply_skill(
                     }),
                     encoding="utf-8",
                 )
+                _tmp.rename(_out)
         except Exception as e:
             log.error(f"apply_skill IPC error: {e}")
 
@@ -544,7 +614,7 @@ async def _run_uninstall_skill(
     在 thread executor 中執行 skills_engine.uninstall_skill()（同步函式）。
     Uses _skills_lock to prevent concurrent skill installs/uninstalls.
     """
-    async with _skills_lock:
+    async with _get_skills_lock():
         try:
             uninstall_skill = _get_skills_engine().uninstall_skill
             groups = db.get_all_registered_groups()
@@ -576,7 +646,10 @@ async def _run_uninstall_skill(
             if request_id:
                 result_dir = config.DATA_DIR / "ipc" / group_folder / "results"
                 result_dir.mkdir(parents=True, exist_ok=True)
-                (result_dir / f"{request_id}.json").write_text(
+                # p15b-fix: atomic write
+                _out = result_dir / f"{request_id}.json"
+                _tmp = _out.with_suffix(".json.tmp")
+                _tmp.write_text(
                     json.dumps({
                         "requestId": request_id,
                         "output": msg,
@@ -584,6 +657,7 @@ async def _run_uninstall_skill(
                     }),
                     encoding="utf-8",
                 )
+                _tmp.rename(_out)
         except Exception as e:
             log.error(f"uninstall_skill IPC error: {e}")
 
@@ -607,7 +681,10 @@ async def _run_list_skills(
         if request_id:
             result_dir = config.DATA_DIR / "ipc" / group_folder / "results"
             result_dir.mkdir(parents=True, exist_ok=True)
-            (result_dir / f"{request_id}.json").write_text(
+            # p15b-fix: atomic write
+            _out = result_dir / f"{request_id}.json"
+            _tmp = _out.with_suffix(".json.tmp")
+            _tmp.write_text(
                 json.dumps({
                     "requestId": request_id,
                     "output": output,
@@ -615,6 +692,7 @@ async def _run_list_skills(
                 }),
                 encoding="utf-8",
             )
+            _tmp.rename(_out)
     except Exception as e:
         log.error(f"list_skills IPC error: {e}")
 
@@ -656,13 +734,16 @@ def restore_remote_control() -> None:
             log.info("Restored remote-control session pid=%s url=%s", pid, url)
         else:
             _rc_state_file().unlink(missing_ok=True)
-    except Exception:
-        pass
+    except Exception as exc:
+        # BUG-19D-04 (LOW): was bare pass — log at debug so startup state
+        # restore failures are visible without being noisy on fresh installs
+        # (state file simply does not exist yet on first run).
+        log.debug("restore_remote_control: could not restore state: %s", exc)
 
 
 async def _run_start_remote_control(jid: str, sender: str, route_fn: Callable) -> None:
     """Spawn `claude remote-control` in the EvoClaw directory, poll for the URL,
-    and deliver it to the originating group. Mirrors nanoclaw's startRemoteControl()."""
+    and deliver it to the originating group."""
     global _rc_active_pid, _rc_active_url
 
     if _rc_active_pid is not None:
@@ -679,12 +760,27 @@ async def _run_start_remote_control(jid: str, sender: str, route_fn: Callable) -
     stderr_path = config.DATA_DIR / "remote-control.stderr"
     stdout_path.write_text("", encoding="utf-8")
 
+    # p17c BUG-FIX (MEDIUM): open() is a blocking syscall.  Calling it directly
+    # inside an async function can block the event loop if the filesystem is slow
+    # (NFS, overlayfs, full disk).  Open the file handles in an executor thread
+    # before passing them to create_subprocess_exec().
+    try:
+        _loop = asyncio.get_running_loop()
+        _stdout_fh, _stderr_fh = await _loop.run_in_executor(
+            None,
+            lambda: (open(stdout_path, "w"), open(stderr_path, "w")),
+        )
+    except Exception as exc:
+        log.error("remote_control: failed to open log files: %s", exc)
+        await route_fn(jid, f"❌ Remote control 啟動失敗：{exc}")
+        return
+
     try:
         proc = await asyncio.create_subprocess_exec(
             "claude", "remote-control", "--name", "EvoClaw Remote",
             stdin=asyncio.subprocess.PIPE,
-            stdout=open(stdout_path, "w"),
-            stderr=open(stderr_path, "w"),
+            stdout=_stdout_fh,
+            stderr=_stderr_fh,
             cwd=cwd,
             start_new_session=True,
         )
@@ -692,6 +788,16 @@ async def _run_start_remote_control(jid: str, sender: str, route_fn: Callable) -
         log.error("remote_control: spawn failed: %s", exc)
         await route_fn(jid, f"❌ Remote control 啟動失敗：{exc}")
         return
+    finally:
+        # File handles are now owned by the subprocess; close our references.
+        try:
+            _stdout_fh.close()
+        except Exception:
+            pass
+        try:
+            _stderr_fh.close()
+        except Exception:
+            pass
 
     if proc.stdin:
         try:
@@ -820,7 +926,10 @@ async def _run_memory_search(
         if request_id:
             result_dir = config.DATA_DIR / "ipc" / group_folder / "results"
             result_dir.mkdir(parents=True, exist_ok=True)
-            (result_dir / f"{request_id}.json").write_text(
+            # p15b-fix: atomic write
+            _out = result_dir / f"{request_id}.json"
+            _tmp = _out.with_suffix(".json.tmp")
+            _tmp.write_text(
                 json.dumps({
                     "requestId": request_id,
                     "output": output,
@@ -828,6 +937,7 @@ async def _run_memory_search(
                 }),
                 encoding="utf-8",
             )
+            _tmp.rename(_out)
         log.info("memory_search IPC: query=%r found %d results for jid=%s", query, len(results), jid)
     except Exception as e:
         log.error("memory_search IPC error: %s", e)
@@ -849,8 +959,10 @@ def _find_parent_container(group_folder: str) -> str | None:
         if candidates:
             # 取最早啟動的（started_at 最小）
             return min(candidates, key=lambda x: x["started_at"])["name"]
-    except Exception:
-        pass
+    except Exception as exc:
+        # BUG-19D-04 (LOW): was bare pass — log at debug so lookup errors
+        # are traceable without being noisy in normal operation.
+        log.debug("_find_parent_container(%r) failed: %s", group_folder, exc)
     return None
 
 
@@ -892,18 +1004,25 @@ async def _run_subagent(
         if len(_encoded) > _SUBAGENT_RESULT_MAX_BYTES:
             result_text = _encoded[:_SUBAGENT_RESULT_MAX_BYTES].decode("utf-8", errors="ignore")
             log.warning("Subagent result truncated from %d to %d bytes", len(_encoded), _SUBAGENT_RESULT_MAX_BYTES)
-        output_file.write_text(
+        # p15b-fix: atomic write (tmp+rename) so the parent container polling
+        # for this file never reads a partial JSON midway through the write.
+        _out_tmp = output_file.with_suffix(".json.tmp")
+        _out_tmp.write_text(
             json.dumps({"requestId": request_id, "output": result_text}),
-            encoding="utf-8"
+            encoding="utf-8",
         )
+        _out_tmp.rename(output_file)
         log.info(f"Subagent {request_id} completed, result written to {output_file}")
     except Exception as e:
         log.error(f"Subagent {request_id} error: {e}")
         try:
-            output_file.write_text(
+            # p15b-fix: atomic write for error result too
+            _err_tmp = output_file.with_suffix(".json.tmp")
+            _err_tmp.write_text(
                 json.dumps({"requestId": request_id, "output": f"Subagent error: {e}"}),
-                encoding="utf-8"
+                encoding="utf-8",
             )
+            _err_tmp.rename(output_file)
         except Exception:
             pass
 
@@ -1018,13 +1137,18 @@ def _compute_next_run(schedule_type: str, schedule_value: str) -> int | None:
             from datetime import datetime
             dt = datetime.fromisoformat(schedule_value)
             return int(dt.timestamp() * 1000)
-        except Exception:
+        except Exception as exc:
+            # BUG-19D-05 (LOW): silent parse failures make it impossible to
+            # diagnose why a scheduled task never fires.  Log at warning so
+            # operators can spot misconfigured schedule_value strings.
+            log.warning("_compute_next_run: invalid 'once' value %r: %s", schedule_value, exc)
             return None
     elif schedule_type == "interval":
         try:
             # schedule_value 單位是毫秒，直接加到現在時間上
             return now_ms + int(schedule_value)
-        except Exception:
+        except Exception as exc:
+            log.warning("_compute_next_run: invalid 'interval' value %r: %s", schedule_value, exc)
             return None
     elif schedule_type == "cron":
         try:
@@ -1032,7 +1156,8 @@ def _compute_next_run(schedule_type: str, schedule_value: str) -> int | None:
             # croniter(cron_expr, start_time) 計算 start_time 之後的下次執行時間
             c = croniter(schedule_value, time.time())
             return int(c.get_next() * 1000)
-        except Exception:
+        except Exception as exc:
+            log.warning("_compute_next_run: invalid 'cron' expression %r: %s", schedule_value, exc)
             return None
     return None
 
@@ -1063,16 +1188,141 @@ async def _cleanup_stale_results() -> None:
         log.warning("IPC result cleanup error: %s", exc)
 
 
+async def _start_ipc_watcher_inotify(get_groups_fn: Callable, route_fn: Callable, stop_event: asyncio.Event) -> None:
+    """
+    Linux inotify-based IPC watcher.
+    Reacts to file CREATE events instead of polling — latency <20ms vs ~500ms.
+    Falls back to polling if inotify setup fails.
+    """
+    inotify = _inotify_simple.INotify()
+    watch_map: dict = {}  # wd → (group_folder, is_main)
+
+    def _refresh_watches():
+        """Update watches when groups change."""
+        groups = get_groups_fn()
+        watched_dirs = set()
+        for group in groups:
+            folder = group.get("folder", "")
+            is_main = bool(group.get("is_main"))
+            for sub in ("messages", "tasks"):
+                ipc_dir = config.DATA_DIR / "ipc" / folder / sub
+                ipc_dir.mkdir(parents=True, exist_ok=True)
+                dir_str = str(ipc_dir)
+                if dir_str not in watched_dirs:
+                    try:
+                        wd = inotify.add_watch(
+                            dir_str,
+                            _inotify_simple.flags.CREATE | _inotify_simple.flags.MOVED_TO
+                        )
+                        watch_map[wd] = (folder, is_main)
+                        watched_dirs.add(dir_str)
+                    except OSError as _we:
+                        # Check if this is an inotify watch limit error (errno 28 = ENOSPC)
+                        if hasattr(_we, 'errno') and _we.errno == 28:
+                            log.warning(
+                                "inotify watch limit exceeded — falling back to polling. "
+                                "Fix: sudo sysctl fs.inotify.max_user_watches=65536 "
+                                "or add to /etc/sysctl.conf: fs.inotify.max_user_watches=65536"
+                            )
+                            # Clean up any partially-initialized inotify watches before failing
+                            try:
+                                inotify.close()
+                            except Exception:
+                                pass
+                            raise
+                        log.warning("inotify: cannot watch %s: %s", dir_str, _we)
+                    except Exception as _we:
+                        log.warning("inotify: cannot watch %s: %s", dir_str, _we)
+
+    _refresh_watches()
+    log.info("IPC watcher (inotify): watching %d directories", len(watch_map))
+
+    # p17c BUG-FIX (MEDIUM): asyncio.get_event_loop() is deprecated in Python
+    # 3.10+ when called from a coroutine — use asyncio.get_running_loop() which
+    # always returns the loop the current coroutine is executing on.
+    _loop = asyncio.get_running_loop()
+    _last_refresh = _loop.time()
+    _REFRESH_INTERVAL = 30.0  # Re-scan groups every 30s
+    # Fix(p12a): the inotify path never called _cleanup_stale_results(), so on
+    # Linux (the primary deployment) subagent result files accumulated forever.
+    # Mirror the polling backend: run cleanup roughly every 60 s.
+    _last_result_cleanup = _loop.time()
+    _RESULT_CLEANUP_INTERVAL = 60.0  # seconds between stale-result sweeps
+
+    while not stop_event.is_set():
+        try:
+            # Non-blocking read with 1s timeout (also serves as keepalive)
+            loop = asyncio.get_running_loop()
+            events = await loop.run_in_executor(
+                None,
+                lambda: inotify.read(timeout=1000)  # 1000ms timeout
+            )
+
+            # Refresh watches periodically (new groups may have been added)
+            now = loop.time()
+            if now - _last_refresh > _REFRESH_INTERVAL:
+                _refresh_watches()
+                _last_refresh = now
+
+            # Periodically purge stale subagent result files
+            if now - _last_result_cleanup > _RESULT_CLEANUP_INTERVAL:
+                try:
+                    await _cleanup_stale_results()
+                except Exception as _cse:
+                    log.debug("inotify: stale result cleanup error: %s", _cse)
+                _last_result_cleanup = now
+
+            # Process events
+            triggered_folders: set = set()
+            for event in events:
+                if event.wd in watch_map and event.name.endswith(".json"):
+                    folder, is_main = watch_map[event.wd]
+                    triggered_folders.add((folder, is_main))
+
+            # Process IPC for triggered folders
+            for folder, is_main in triggered_folders:
+                try:
+                    await process_ipc_dir(folder, is_main, route_fn)
+                except Exception as _e:
+                    log.error("inotify: process_ipc_dir error for %s: %s", folder, _e)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as _err:
+            log.error("inotify: read error: %s", _err)
+            await asyncio.sleep(0.5)
+
+    # Cleanup
+    try:
+        inotify.close()
+    except Exception:
+        pass
+    log.info("IPC watcher (inotify) stopped")
+
+
 async def start_ipc_watcher(get_groups_fn: Callable, route_fn: Callable, stop_event: asyncio.Event) -> None:
     """
-    IPC 監控主迴圈：每隔 IPC_POLL_INTERVAL 秒掃描所有群組的 IPC 目錄。
+    IPC 監控主迴圈：自動選擇 inotify（Linux）或 polling（其他平台）後端。
 
-    之所以用輪詢（polling）而非 inotify/watchdog 等檔案系統事件，
-    是為了保持跨平台相容性，並簡化 container volume mount 的互動邏輯。
+    在 Linux 且已安裝 inotify-simple 時使用 inotify backend，訊息延遲 <20ms；
+    其他平台或 inotify 初始化失敗時 fallback 到 polling（IPC_POLL_INTERVAL 秒間隔）。
+    完全向後相容。
     """
     global _result_cleanup_cycle
     restore_remote_control()  # Re-adopt any surviving remote-control session from previous run
     log.info("IPC watcher started")
+
+    # Try inotify on Linux
+    if _INOTIFY_AVAILABLE and _sys.platform.startswith("linux"):
+        log.info("IPC watcher: attempting inotify backend (Linux)")
+        try:
+            await _start_ipc_watcher_inotify(get_groups_fn, route_fn, stop_event)
+            return  # inotify ran successfully
+        except Exception as _ino_err:
+            log.warning("IPC watcher: inotify failed (%s), falling back to polling", _ino_err)
+
+    # Fallback: polling (all platforms)
+    log.info("IPC watcher: using polling backend (interval=%.1fs)", config.IPC_POLL_INTERVAL)
     while True:
         try:
             groups = get_groups_fn()

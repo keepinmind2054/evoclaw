@@ -22,6 +22,33 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
+# 收斂停止閾值：若正式程度已在目標值的 1% 以內，停止更新（避免無限振盪）
+_CONVERGENCE_EPSILON = 0.01
+
+
+def _safe_float(value, default: float, min_val: float = 0.0, max_val: float = 1.0) -> float:
+    """
+    安全地將資料庫讀取的值轉換為 float，並限制在合法範圍內。
+    若值為 None 或無法轉換，回傳預設值。
+    """
+    try:
+        result = float(value)
+        return max(min_val, min(max_val, result))
+    except (TypeError, ValueError):
+        return default
+
+
+def update_formality(formality: float, target: float = 0.5) -> float:
+    """
+    將正式程度向目標值靠攏一步。
+    若已在目標值的 _CONVERGENCE_EPSILON 以內，直接回傳（停止振盪）。
+    """
+    FORMALITY_STEP = 0.05
+    if abs(formality - target) < _CONVERGENCE_EPSILON:
+        return formality  # Already converged, don't oscillate
+    return formality + FORMALITY_STEP * (target - formality)
+
+
 # 基因組預設值：中立起點，不偏向任何風格
 DEFAULT_GENOME = {
     "response_style": "balanced",   # concise / balanced / detailed
@@ -42,7 +69,13 @@ def get_genome(jid: str) -> dict:
     try:
         genome = db.get_group_genome(jid)
         if genome:
-            return genome
+            # Validate and clamp float values read from DB to prevent crashes on NULL/invalid data
+            return {
+                "response_style": genome.get("response_style", DEFAULT_GENOME["response_style"]),
+                "formality": _safe_float(genome.get("formality"), default=0.5),
+                "technical_depth": _safe_float(genome.get("technical_depth"), default=0.5),
+                "generation": genome.get("generation", 0),
+            }
     except Exception as e:
         log.warning(f"Failed to get genome for {jid}: {e}")
     return dict(DEFAULT_GENOME)
@@ -66,6 +99,61 @@ def upsert_genome(jid: str, **kwargs) -> None:
         log.error("upsert_genome failed (jid=%s): %s", jid, exc)
 
 
+def is_genome_valid(genome: dict) -> bool:
+    """
+    Validate that a genome dict has sane values.
+
+    Returns False (bad genome) if:
+      - formality or technical_depth is outside [0, 1]
+      - response_style is not one of the allowed values
+      - generation is negative
+    """
+    valid_styles = {"concise", "balanced", "detailed"}
+    try:
+        formality = float(genome.get("formality", 0.5))
+        tech_depth = float(genome.get("technical_depth", 0.5))
+        if not (0.0 <= formality <= 1.0):
+            return False
+        if not (0.0 <= tech_depth <= 1.0):
+            return False
+        if genome.get("response_style", "balanced") not in valid_styles:
+            return False
+        if int(genome.get("generation", 0)) < 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def reset_genome(jid: str) -> None:
+    """
+    Reset a group's genome to defaults (used when a bad/corrupted genome is detected).
+
+    Logs a warning and writes DEFAULT_GENOME values back to the DB, preserving the
+    existing generation counter so evolution history is not lost.
+    """
+    from host import db
+    try:
+        existing = db.get_group_genome(jid)
+        gen = 0
+        if existing:
+            try:
+                gen = max(0, int(existing.get("generation", 0)))
+            except (TypeError, ValueError):
+                gen = 0
+        log.warning("reset_genome: resetting bad genome for jid=%s (was: %s)", jid, existing)
+        db.upsert_group_genome(
+            jid,
+            response_style=DEFAULT_GENOME["response_style"],
+            formality=DEFAULT_GENOME["formality"],
+            technical_depth=DEFAULT_GENOME["technical_depth"],
+            generation=gen,
+        )
+        log.info("reset_genome: genome reset to defaults for jid=%s (generation=%d)", jid, gen)
+    except Exception as exc:
+        log.error("reset_genome failed for jid=%s: %s", jid, exc)
+
+
 def evolve_genome_from_fitness(jid: str, fitness: float, avg_response_ms: float) -> None:
     """
     根據適應度和回應時間，自動調整群組基因組（全三維演化）。
@@ -80,6 +168,24 @@ def evolve_genome_from_fitness(jid: str, fitness: float, avg_response_ms: float)
       fitness        — 最近的適應度分數（0.0~1.0）
       avg_response_ms — 最近的平均回應時間（毫秒）
     """
+    # BUG-FIX(p18b-06): clamp fitness and avg_response_ms at the entry point.
+    # compute_fitness() already clamps its output but callers (e.g. tests, future
+    # code paths) might pass out-of-range values.  A fitness > 1.0 would satisfy
+    # both the "> 0.7" (high) AND never the "< 0.4" (low) branches, silently
+    # pushing all three genome axes in the "good" direction regardless of reality.
+    # A negative avg_response_ms is physically meaningless and would trigger the
+    # "< 5000 ms fast" branch unconditionally.
+    try:
+        fitness = max(0.0, min(1.0, float(fitness)))
+    except (TypeError, ValueError):
+        log.warning("evolve_genome_from_fitness: invalid fitness %r for %s — using 0.5", fitness, jid)
+        fitness = 0.5
+    try:
+        avg_response_ms = max(0.0, float(avg_response_ms))
+    except (TypeError, ValueError):
+        log.warning("evolve_genome_from_fitness: invalid avg_response_ms %r for %s — using 0", avg_response_ms, jid)
+        avg_response_ms = 0.0
+
     from host import db
     genome = get_genome(jid)
     generation = genome.get("generation", 0)
@@ -97,15 +203,18 @@ def evolve_genome_from_fitness(jid: str, fitness: float, avg_response_ms: float)
     else:
         new_style = response_style
 
-    # Evolve formality: nudge toward 0.5 baseline, adjust based on fitness
-    # High fitness + fast responses → slightly more formal (confidence)
-    # Low fitness → nudge toward neutral (0.5)
-    FORMALITY_STEP = 0.05
+    # Evolve formality: nudge toward target based on fitness.
+    # Fix p11d: both upward (target=0.7) and downward (target=0.5) nudges now use
+    # update_formality() which applies a proportional step with convergence-stop.
+    # Previously the upward path used a fixed +0.05 step while the downward path used
+    # a proportional step, causing asymmetric pressure that made formality creep to 1.0
+    # whenever fitness alternated around the 0.7/0.4 thresholds over many cycles.
     if fitness > 0.7 and avg_response_ms < 8000:
-        formality = min(1.0, formality + FORMALITY_STEP)
+        # Nudge toward 0.7 (confident/formal), with convergence stop
+        formality = update_formality(formality, target=0.7)
     elif fitness < 0.4:
-        # Nudge toward neutral
-        formality = formality + FORMALITY_STEP * (0.5 - formality)
+        # Nudge toward neutral (0.5), with convergence stop to prevent infinite oscillation
+        formality = update_formality(formality, target=0.5)
     formality = round(max(0.0, min(1.0, formality)), 3)
 
     # Evolve technical_depth: increase when responses are fast and successful

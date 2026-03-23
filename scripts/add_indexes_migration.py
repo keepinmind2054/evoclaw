@@ -37,7 +37,8 @@ INDEXES = [
     
     # chats 表
     ("idx_chats_jid", "chats", "jid", False),
-    ("idx_chats_last_timestamp", "chats", "last_timestamp", False),
+    # Column is named last_message_time in the schema (not last_timestamp)
+    ("idx_chats_last_message_time", "chats", "last_message_time", False),
     
     # scheduled_tasks 表
     ("idx_scheduled_tasks_status", "scheduled_tasks", "status", False),
@@ -52,11 +53,25 @@ INDEXES = [
     # immune_threats 表
     ("idx_immune_threats_sender_jid", "immune_threats", "sender_jid", False),
     ("idx_immune_threats_threat_type", "immune_threats", "threat_type", False),
-    ("idx_immune_threats_timestamp", "immune_threats", "timestamp", False),
-    ("idx_immune_threats_sender_jid_timestamp", "immune_threats", "sender_jid, timestamp", False),
-    
-    # sessions 表
-    ("idx_sessions_jid", "sessions", "jid", False),
+    # Column is named last_seen in the schema (not timestamp)
+    ("idx_immune_threats_last_seen", "immune_threats", "last_seen", False),
+    ("idx_immune_threats_sender_jid_last_seen", "immune_threats", "sender_jid, last_seen", False),
+
+    # sessions 表 — primary key column is group_folder, not jid
+    ("idx_sessions_group_folder", "sessions", "group_folder", False),
+
+    # task_run_logs 表 — index for dashboard "show all runs for task X" queries
+    ("idx_task_run_logs_task_id", "task_run_logs", "task_id", False),
+
+    # container_logs 表 — index for get_container_logs(status=...) filter
+    ("idx_container_logs_status", "container_logs", "status", False),
+
+    # dev_sessions 表 — index for filtering sessions by status
+    ("idx_dev_sessions_status", "dev_sessions", "status", False),
+
+    # immune_threats 表 — composite index for record_immune_threat() and
+    # get_recent_threat_count() which both query WHERE sender_jid=? AND pattern_hash=?
+    ("idx_immune_sender_hash", "immune_threats", "sender_jid, pattern_hash", False),
 ]
 
 

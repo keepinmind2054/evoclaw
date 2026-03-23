@@ -1,0 +1,64 @@
+# EvoClaw systemd service file
+#
+# Install:
+#   sudo cp scripts/evoclaw.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now evoclaw
+#
+# Update PROJECT_DIR and User below to match your setup.
+# The ExecStart path assumes python3 is on PATH; adjust if using a virtualenv:
+#   ExecStart=/path/to/venv/bin/python /path/to/evoclaw/run.py
+
+[Unit]
+Description=EvoClaw AI Agent
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+# Update these two lines:
+User=YOUR_USERNAME
+WorkingDirectory=/path/to/evoclaw
+
+# p15d BUG-FIX (MEDIUM): load .env file so environment variables are available
+# to the process without requiring them to be exported in the shell.
+# Remove or comment this line if you manage env vars through a different mechanism.
+EnvironmentFile=-/path/to/evoclaw/.env
+
+ExecStart=/usr/bin/python3 /path/to/evoclaw/run.py
+Restart=on-failure
+RestartSec=10s
+
+# p15d BUG-FIX (MEDIUM): KillMode=mixed sends SIGTERM to the main process only
+# (not the entire cgroup), then SIGKILL after TimeoutStopSec.  The default
+# KillMode=control-group sends SIGTERM to ALL processes in the cgroup, which
+# includes docker CLI subprocesses spawned for cleanup — killing them before the
+# Python process can run `docker kill` or `docker rm -f` for orphan cleanup.
+KillMode=mixed
+
+# p15d BUG-FIX (MEDIUM): TimeoutStopSec was 45s but the shutdown sequence needs:
+#   - up to 30s waiting for in-flight containers to finish (wait_for_active)
+#   - up to  5s for kill_all_containers (if containers are still running)
+#   - up to  5s for asyncio task cleanup gather
+#   - a few seconds for channel disconnect + leader release
+# Total worst-case is ~45s, which is right at the old limit — systemd would race
+# to send SIGKILL before cleanup finished, leaving orphan containers.
+# Raised to 90s to give the graceful shutdown sequence room to complete.
+# Docker's own container stop timeout is handled inside the process (5s docker kill),
+# so 90s is still safe — systemd will SIGKILL if Python hangs past that.
+TimeoutStopSec=90
+
+# BUG-19D-03 (MEDIUM): LimitNOFILE was not set.  The IPC watcher uses
+# inotify (on Linux) to watch many per-group directories simultaneously.
+# Each inotify watch descriptor consumes one file descriptor.  Without a
+# raised limit, deployments with many groups hit the kernel default (1024)
+# and inotify_add_watch() starts returning EMFILE, silently stopping IPC
+# event delivery.  Set a generous limit so the system can scale.
+LimitNOFILE=65536
+
+# Log to journald (view with: journalctl -u evoclaw -f)
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

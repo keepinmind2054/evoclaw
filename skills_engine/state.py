@@ -87,7 +87,25 @@ def read_state() -> SkillState:
         raise FileNotFoundError(
             ".evoclaw/state.yaml not found. Run init_skills_system() first."
         )
-    data = yaml.safe_load(state_path.read_text(encoding="utf-8"))
+    raw = state_path.read_text(encoding="utf-8")
+    # BUG-FIX: yaml.safe_load returns None on empty/truncated file (e.g. crash
+    # during atomic replace).  Fall back to the .tmp file if it exists and is
+    # valid; otherwise raise a descriptive error rather than an AttributeError.
+    data = yaml.safe_load(raw)
+    if not isinstance(data, dict):
+        # Try the temp file left by a failed atomic write
+        tmp_path = Path(str(state_path) + ".tmp")
+        if tmp_path.exists():
+            try:
+                data = yaml.safe_load(tmp_path.read_text(encoding="utf-8"))
+            except Exception:
+                data = None
+        if not isinstance(data, dict):
+            raise RuntimeError(
+                f"{state_path} is empty or corrupt. "
+                "Restore from backup or re-run init_skills_system()."
+            )
+
     state = _parse_state(data)
 
     if compare_semver(state.skills_system_version, SKILLS_SCHEMA_VERSION) > 0:
@@ -102,10 +120,16 @@ def write_state(state: SkillState) -> None:
     state_path = _get_state_path()
     state_path.parent.mkdir(parents=True, exist_ok=True)
     content = yaml.dump(_state_to_dict(state), sort_keys=True, allow_unicode=True)
-    # Atomic write via temp file
+    # Atomic write via temp file + rename
     tmp_path = Path(str(state_path) + ".tmp")
     tmp_path.write_text(content, encoding="utf-8")
     tmp_path.replace(state_path)
+    # BUG-FIX: clean up any leftover .tmp file from a previous failed write
+    # (the replace above already handles the normal case, but a previous crash
+    # might have left a stale .tmp that is now outdated — remove it).
+    # NOTE: tmp_path.replace() already moves the file so the .tmp is gone on
+    # success; this unlink is a no-op in that case but protects the crash path.
+    tmp_path.unlink(missing_ok=True)
 
 
 def record_skill_application(

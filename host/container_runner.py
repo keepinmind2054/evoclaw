@@ -75,11 +75,27 @@ _DEFAULT_HISTORY_LOOKBACK_HOURS = 4
 
 # ── Active container tracking (for dashboard) ─────────────────────────────────
 _active_containers: dict[str, dict] = {}  # container_name → info dict
-_active_lock = asyncio.Lock()  # asyncio.Lock for use in async coroutines
+# p15d BUG-FIX (MEDIUM): asyncio.Lock() created at module import time is bound to
+# the event loop that exists at import time (Python 3.10 deprecation, Python 3.12
+# may raise RuntimeError when the lock is used in a different loop).  Use None and
+# lazily initialize via _get_active_lock() once the event loop is running.
+_active_lock: asyncio.Lock | None = None  # lazily initialized; see _get_active_lock()
+
+
+def _get_active_lock() -> asyncio.Lock:
+    """Return (and lazily create) the asyncio.Lock for _active_containers.
+
+    Called from within coroutines so the running event loop always exists.
+    """
+    global _active_lock
+    if _active_lock is None:
+        _active_lock = asyncio.Lock()
+    return _active_lock
 
 # ── Docker circuit breaker ─────────────────────────────────────────────────────
-_docker_failures = 0
-_docker_failure_time: float = 0.0   # time.time() of last recorded failure (for half-open)
+# Per-group circuit breaker（每個群組獨立追蹤失敗）
+_docker_failures: dict = {}       # group_folder → int
+_docker_failure_time: dict = {}   # group_folder → float
 _docker_failure_lock = _threading.Lock()
 _DOCKER_CIRCUIT_THRESHOLD = 3   # open circuit after this many consecutive failures
 _DOCKER_HALF_OPEN_SECS = 60     # try ONE request after 60s of open circuit (half-open state)
@@ -115,46 +131,45 @@ def _get_empty_env_file() -> str | None:
             return None
 
 
-def _record_docker_success() -> None:
+def _record_docker_success(group_folder: str = "_global") -> None:
     global _docker_failures, _docker_failure_time
     with _docker_failure_lock:
-        _docker_failures = 0
-        _docker_failure_time = 0.0
+        if group_folder in _docker_failures:
+            del _docker_failures[group_folder]
+        if group_folder in _docker_failure_time:
+            del _docker_failure_time[group_folder]
 
 
-def _record_docker_failure() -> None:
+def _record_docker_failure(group_folder: str = "_global") -> None:
     global _docker_failures, _docker_failure_time
     with _docker_failure_lock:
-        _docker_failures += 1
-        _docker_failure_time = time.time()
+        _docker_failures[group_folder] = _docker_failures.get(group_folder, 0) + 1
+        _docker_failure_time[group_folder] = time.time()
+        log.warning("[%s] Docker failure recorded (count=%d)", group_folder, _docker_failures[group_folder])
 
 
-def _docker_circuit_open() -> bool:
-    """Returns True if the Docker circuit breaker is open (too many consecutive failures).
+def _docker_circuit_open(group_folder: str = "_global") -> float:
+    """Per-group circuit breaker：每個群組獨立追蹤，互不干擾。
 
-    Implements a half-open state: after _DOCKER_HALF_OPEN_SECS seconds have passed
-    since the last failure, we reset the counter to THRESHOLD-1 and allow ONE trial
-    request through. If that request succeeds, _record_docker_success() resets to 0.
-    If it fails, _record_docker_failure() pushes it back to THRESHOLD and the circuit
-    re-opens for another _DOCKER_HALF_OPEN_SECS seconds.
-
-    Without this, a permanently-open circuit can never self-heal without a process restart.
+    Returns 0.0 when the circuit is closed (requests allowed).
+    Returns the remaining cooldown seconds (> 0) when the circuit is open.
+    Callers should treat any non-zero return as "circuit open".
     """
     global _docker_failures, _docker_failure_time
     with _docker_failure_lock:
-        if _docker_failures < _DOCKER_CIRCUIT_THRESHOLD:
-            return False
-        # Circuit is open — check if it's time to enter half-open state
-        elapsed = time.time() - _docker_failure_time
+        failures = _docker_failures.get(group_folder, 0)
+        if failures < _DOCKER_CIRCUIT_THRESHOLD:
+            return 0.0
+        last_failure = _docker_failure_time.get(group_folder, 0.0)
+        elapsed = time.time() - last_failure
         if elapsed >= _DOCKER_HALF_OPEN_SECS:
-            # Half-open: allow ONE trial request by stepping back to THRESHOLD-1
-            _docker_failures = _DOCKER_CIRCUIT_THRESHOLD - 1
-            log.info(
-                "Docker circuit breaker half-open after %.0fs — allowing one trial request",
-                elapsed,
-            )
-            return False
-        return True
+            _docker_failures[group_folder] = 0  # Reset counter when half-open
+            log.info("[%s] Docker circuit half-open after %.0fs", group_folder, elapsed)
+            return 0.0
+        remaining = _DOCKER_HALF_OPEN_SECS - elapsed
+        log.warning("[%s] Docker circuit OPEN (failures=%d, retry in %.0fs)",
+                    group_folder, failures, remaining)
+        return remaining
 
 
 def get_active_containers() -> list[dict]:
@@ -191,20 +206,37 @@ def _read_secrets() -> dict:
         "ASSISTANT_NAME",
     ])
 
-def _validate_secrets(secrets: dict) -> None:
-    """Validate that at least one LLM API key is present; warn on startup for missing keys."""
+def _validate_secrets(secrets: dict) -> bool:
+    """Validate that at least one LLM API key is present; warn on startup for missing keys.
+
+    Returns True when at least one valid LLM key is present, False otherwise.
+    Emits a CRITICAL log when no LLM key is found (agent will be unable to call any LLM),
+    and an individual WARNING for each key that is set but appears malformed (too short).
+
+    p12b: now returns a bool so callers (main.py startup summary) can act on the result.
+    """
     llm_keys = ["GOOGLE_API_KEY", "NIM_API_KEY", "OPENAI_API_KEY", "CLAUDE_API_KEY"]
     has_any = any(secrets.get(k, "").strip() for k in llm_keys)
     if not has_any:
-        log.warning(
-            "Secret validation: none of the LLM API keys are set (%s). "
-            "Container agent will fail to call any LLM.",
-            ", ".join(llm_keys)
+        log.critical(
+            "STARTUP FAILURE: No LLM API key is set (%s). "
+            "Every agent invocation will fail until at least one key is added to .env. "
+            "Add one of these keys to .env and restart: %s",
+            ", ".join(llm_keys),
+            ", ".join(llm_keys),
         )
-    for key in llm_keys:
-        val = secrets.get(key, "").strip()
-        if key == "GOOGLE_API_KEY" and not val:
-            log.warning("Secret %s is missing or empty", key)
+        return False
+    else:
+        # Warn on each key that is present but suspiciously short (likely a placeholder).
+        for key in llm_keys:
+            val = secrets.get(key, "").strip()
+            if val and len(val) < 10:
+                log.warning(
+                    "Secret %s is set but appears too short (%d chars) — "
+                    "check that it is not a placeholder value.",
+                    key, len(val),
+                )
+    return True
 
 def _build_volume_mounts(group: dict) -> list[str]:
     """
@@ -225,6 +257,28 @@ def _build_volume_mounts(group: dict) -> list[str]:
     data_dir = config.DATA_DIR
     base_dir = config.BASE_DIR
     is_main = bool(group.get("is_main"))
+
+    # ── Path-traversal guard (p13d) ────────────────────────────────────────────
+    # ``folder`` is derived from config / DB, but validate that the resolved
+    # host paths stay inside the expected parent directories.  An attacker who
+    # can inject ``../`` sequences into the folder name would otherwise escape
+    # the groups / data directories and mount arbitrary host paths into the
+    # container (e.g. /etc, /root, the host's .ssh directory).
+    def _assert_within(child: Path, parent: Path, label: str) -> None:
+        try:
+            child.resolve().relative_to(parent.resolve())
+        except ValueError:
+            raise ValueError(
+                f"Security: resolved {label} path {child!r} is outside "
+                f"expected parent {parent!r} — possible path traversal in folder={folder!r}"
+            )
+
+    group_host_path = groups_dir / folder
+    _assert_within(group_host_path, groups_dir, "group")
+    session_host_path = data_dir / "sessions" / folder
+    _assert_within(session_host_path, data_dir / "sessions", "sessions")
+    ipc_host_path = data_dir / "ipc" / folder
+    _assert_within(ipc_host_path, data_dir / "ipc", "ipc")
 
     mounts = []
 
@@ -286,12 +340,25 @@ def _build_volume_mounts(group: dict) -> list[str]:
     return mounts
 
 def _safe_name(folder: str) -> str:
-    """將 folder 名稱轉換為合法的 Docker container 名稱（底線換連字號，截斷過長部分）。"""
-    return folder.replace("_", "-")[:40]
+    """Convert a folder name to a valid Docker container name segment.
+
+    Strips every character that is not alphanumeric or a hyphen so that
+    a JID or folder string containing path-traversal sequences (``../``,
+    ``/``, ``.``) cannot escape the expected naming scheme or influence
+    the volume-mount paths that embed ``folder`` directly.  The result is
+    then truncated to 40 characters so the full container name stays
+    within Docker's 63-character limit.
+    """
+    # Keep only alphanumeric chars and hyphens; replace everything else
+    # (including dots, slashes, underscores) with a hyphen.
+    safe = re.sub(r"[^a-zA-Z0-9-]", "-", folder)
+    # Collapse consecutive hyphens and strip leading/trailing hyphens.
+    safe = re.sub(r"-{2,}", "-", safe).strip("-")
+    return safe[:40] or "group"
 
 async def update_container_activity(container_name: str, activity: str) -> None:
     """Update the current_activity field for a running container (called from stderr stream)."""
-    async with _active_lock:
+    async with _get_active_lock():
         if container_name in _active_containers:
             _active_containers[container_name]["current_activity"] = activity
 
@@ -346,14 +413,20 @@ async def run_container_agent(
             except Exception as _ne:
                 log.debug("on_error callback raised: %s", _ne)
 
-    if _docker_circuit_open():
-        await _notify_error("🔌 Docker 服務暫時無法連線，請確認 Docker Desktop 是否正在執行。")
-        raise RuntimeError(
-            f"Docker circuit breaker open: {_docker_failures} consecutive failures. "
-            "Check Docker daemon status."
-        )
-
     folder = group["folder"]
+
+    _circuit_remaining = _docker_circuit_open(folder)
+    if _circuit_remaining:
+        _wait_secs = int(_circuit_remaining) + 1  # round up so user isn't surprised by early retry
+        # Fix: prefix with URGENT marker so main.py's on_error rate-limiter bypasses
+        # the 5-minute cooldown.  Circuit breaker messages are rare (fired only after
+        # _DOCKER_CIRCUIT_THRESHOLD consecutive failures) and must always reach the
+        # user so they know when to retry; suppressing them causes silent hangs.
+        await _notify_error(
+            f"|||URGENT|||⚠️ 此群組 Docker 暫時受阻（連續失敗 {_DOCKER_CIRCUIT_THRESHOLD} 次），"
+            f"請等待約 {_wait_secs} 秒後再試，屆時將自動恢復。其他群組不受影響。"
+        )
+        return {"status": "error", "error": f"Docker circuit breaker open for {folder}"}
     jid = group["jid"]
     # 用時間戳記讓 container 名稱唯一，方便 debug 與孤兒清理
     run_id = str(uuid.uuid4())
@@ -383,6 +456,20 @@ async def run_container_agent(
     history_lookback = group.get("history_lookback_hours", _DEFAULT_HISTORY_LOOKBACK_HOURS) * 3600
     history_cutoff = int((time.time() - history_lookback) * 1000)
     history_msgs = db.get_messages_since(jid, history_cutoff, limit=50)
+
+    # 防止對話歷史超過 token 上限（粗略估算：1 token ≈ 4 字符）
+    _MAX_HISTORY_CHARS = 20_000  # 約 5000 token
+    _total_chars = 0
+    _trimmed_history = []
+    for _msg in reversed(history_msgs):  # 從最新開始保留
+        _msg_chars = len(str(_msg.get("content", "")))
+        if _total_chars + _msg_chars > _MAX_HISTORY_CHARS:
+            log.warning("Trimming conversation history for %s: %d messages dropped", jid, len(history_msgs) - len(_trimmed_history))
+            break
+        _trimmed_history.append(_msg)
+        _total_chars += _msg_chars
+    history_msgs = list(reversed(_trimmed_history))
+
     conv_history = []
     for m in history_msgs:
         role = "assistant" if m.get("is_bot_message") else "user"
@@ -422,7 +509,7 @@ async def run_container_agent(
     input_json = json.dumps(input_data, ensure_ascii=True)
     # 記錄 container 啟動時間，用於計算回應時間（適應度追蹤）
     t0 = time.time()
-    async with _active_lock:
+    async with _get_active_lock():
         _active_containers[container_name] = {
             "name": container_name,
             "folder": folder,
@@ -446,6 +533,21 @@ async def run_container_agent(
         "--name", container_name,
         "-e", f"TZ={config.TIMEZONE}",  # 時區設定，確保 agent 顯示正確時間
         "-e", "PYTHONUNBUFFERED=1",  # 強制 Python stdout 立即 flush，讓 Docker Desktop 日誌即時顯示
+        # ── Network isolation (p13d) ───────────────────────────────────────────
+        # Agent containers must not make arbitrary outbound network calls.
+        # LLM API calls are initiated by the host, not the container.
+        "--network", "none",
+        # ── Capability hardening (p13d) ────────────────────────────────────────
+        # Drop all Linux capabilities; grant none back.  The agent only needs to
+        # read/write files in mounted volumes — no raw sockets, no mknod, etc.
+        "--cap-drop", "ALL",
+        # ── Privilege escalation prevention (p13d) ─────────────────────────────
+        # Prevent setuid/setgid binaries inside the container from gaining new
+        # privileges (e.g. sudo, ping).
+        "--security-opt", "no-new-privileges:true",
+        # ── PID limit (p13d) ───────────────────────────────────────────────────
+        # Prevent fork bombs: cap the number of processes the container can spawn.
+        "--pids-limit", str(config.CONTAINER_PIDS_LIMIT),
     ]
     # ── Per-container resource limits (Issue #61) ──────────────────────────────
     # Prevent a runaway agent from OOM-killing the host process.
@@ -454,6 +556,21 @@ async def run_container_agent(
         cmd += ["--memory", config.CONTAINER_MEMORY, "--memory-swap", config.CONTAINER_MEMORY]
     if config.CONTAINER_CPUS:
         cmd += ["--cpus", config.CONTAINER_CPUS]
+    # ── Container log size limit (BUG-19B-01) ─────────────────────────────────
+    # Without --log-opt max-size Docker accumulates container log files on the
+    # host indefinitely.  A long-running or verbose container (especially one
+    # calling tool_write in a loop) can fill the host disk via the Docker
+    # json-file log driver.  Cap at 10 MB per container with a single rotation
+    # file so operators can still read the last chunk of output while disk usage
+    # is bounded.
+    cmd += ["--log-opt", f"max-size={config.CONTAINER_LOG_MAX_SIZE}",
+            "--log-opt", f"max-file={config.CONTAINER_LOG_MAX_FILES}"]
+    # ── Writable /tmp bounded via tmpfs (BUG-19B-02) ──────────────────────────
+    # The container writes /tmp/input.json at startup (entrypoint.sh) and may
+    # accumulate other temporary files during a run.  Without a size cap a
+    # runaway agent can fill the host's overlay storage via the container layer.
+    # Mount a dedicated tmpfs so /tmp is memory-backed and size-limited.
+    cmd += ["--tmpfs", f"/tmp:size={config.CONTAINER_TMPFS_SIZE},mode=1777"]
     if uid is not None and gid is not None:
         cmd += ["--user", f"{uid}:{gid}"]
     cmd += [
@@ -461,13 +578,21 @@ async def run_container_agent(
         config.CONTAINER_IMAGE,
     ]
 
-    log.info(f"Starting container {container_name} for group {folder} (run_id={run_id})")
+    log.info("Starting container %s for group %s (run_id=%s)", container_name, folder, run_id)
     _started_at = time.monotonic()
     db.log_container_start(run_id, jid, folder, container_name, time.time())
 
     input_bytes = input_json.encode("utf-8")
 
     proc = None  # asyncio subprocess reference — used for direct kill on CancelledError
+    # p16c BUG-FIX (CRITICAL): stderr_lines must be initialised at function scope
+    # before the platform branch.  On Windows the subprocess is run via
+    # asyncio.to_thread(), so the Linux-only _stream_stderr() closure that
+    # populates this list is never executed.  When no output markers are found
+    # the error-reporting block at the bottom of the try references stderr_lines,
+    # causing an unhandled NameError on Windows that masks the real failure and
+    # prevents the on_error notification from being delivered.
+    stderr_lines: list[str] = []
     try:
         if sys.platform == "win32":
             # On Windows, asyncio subprocess pipes can deadlock with Docker.
@@ -483,9 +608,17 @@ async def run_container_agent(
                 )
                 return r.stdout, r.stderr
 
-            log.debug(f"[DEBUG] Running docker in thread (Windows mode)...")
-            stdout_data, stderr_data = await asyncio.to_thread(_sync_docker_run)
-            log.debug(f"[DEBUG] Docker thread returned. stdout={len(stdout_data)}b stderr={len(stderr_data)}b")
+            log.debug("[DEBUG] Running docker in thread (Windows mode)...")
+            try:
+                stdout_data, stderr_data = await asyncio.to_thread(_sync_docker_run)
+            except _subprocess.TimeoutExpired:
+                # Fix: Windows subprocess.TimeoutExpired is NOT asyncio.TimeoutError,
+                # so it would fall through to the generic Exception handler and produce
+                # a confusing error message.  Re-raise as asyncio.TimeoutError so the
+                # timeout handler below fires with the correct Chinese message.
+                log.error("Container %s timed out after %ds (Windows)", folder, config.CONTAINER_TIMEOUT)
+                raise asyncio.TimeoutError()
+            log.debug("[DEBUG] Docker thread returned. stdout=%db stderr=%db", len(stdout_data), len(stderr_data))
         else:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -500,7 +633,7 @@ async def run_container_agent(
             await proc.stdin.drain()
             proc.stdin.close()
 
-            stderr_lines: list[str] = []
+            # stderr_lines already declared at function scope above (p16c fix); reuse it.
             _MAX_STDERR_LINES = 5000  # Cap to prevent unbounded memory growth
 
             async def _stream_stderr() -> None:
@@ -528,12 +661,38 @@ async def run_container_agent(
                             log.info("[%s] %s", container_name, safe_line)
                         else:
                             log.debug("[%s] %s", container_name, safe_line)
-                        async with _active_lock:
+                        async with _get_active_lock():
                             if container_name in _active_containers:
                                 _active_containers[container_name]["current_activity"] = safe_line
 
             async def _collect() -> tuple[bytes, bytes]:
-                stdout_task = asyncio.create_task(proc.stdout.read())
+                # Read stdout in chunks up to _MAX_OUTPUT_SIZE to prevent host OOM.
+                # proc.stdout.read() with no limit would buffer the entire container
+                # output — a runaway or malicious container emitting gigabytes of data
+                # would exhaust host memory before the outer wait_for timeout fires.
+                async def _read_stdout_bounded() -> bytes:
+                    chunks: list[bytes] = []
+                    total = 0
+                    assert proc.stdout is not None
+                    while True:
+                        chunk = await proc.stdout.read(65536)  # 64 KiB at a time
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > _MAX_OUTPUT_SIZE:
+                            log.warning(
+                                "Container %s stdout exceeded %d bytes — truncating",
+                                container_name, _MAX_OUTPUT_SIZE,
+                            )
+                            chunks.append(chunk[:_MAX_OUTPUT_SIZE - (total - len(chunk))])
+                            # Drain the rest without buffering to let the container exit
+                            while await proc.stdout.read(65536):
+                                pass
+                            break
+                        chunks.append(chunk)
+                    return b"".join(chunks)
+
+                stdout_task = asyncio.create_task(_read_stdout_bounded())
                 stderr_task = asyncio.create_task(_stream_stderr())
                 stdout_data, _ = await asyncio.gather(stdout_task, stderr_task)
                 return stdout_data, b"\n".join(l.encode() for l in stderr_lines)
@@ -546,49 +705,116 @@ async def run_container_agent(
         stdout = stdout_data.decode(errors="replace")
         stderr = stderr_data.decode(errors="replace")
 
-        log.debug(f"[DEBUG] Container stdout preview: {stdout[:200]!r}")
+        log.debug("[DEBUG] Container stdout preview: %r", stdout[:200])
         if stderr:
-            log.debug(f"[DEBUG] Container stderr: {_redact_secrets(stderr[:500])}")
+            log.debug("[DEBUG] Container stderr: %s", _redact_secrets(stderr[:500]))
 
         # 從 stdout 中尋找輸出標記，截取 JSON 結果
-        # agent 可能在標記前後有其他 debug 輸出，只取標記之間的部分
-        start_idx = stdout.find(OUTPUT_START)
-        end_idx = stdout.find(OUTPUT_END)
+        # agent 可能在標記前後有其他 debug 輸出，只取標記之間的部分。
+        # Fix: use rfind for OUTPUT_START so that if the agent emits multiple
+        # output sections (e.g. partial output followed by a retry), only the
+        # last (most complete) section is used.  OUTPUT_END is searched forward
+        # from that last START position so we always get the matching pair.
+        start_idx = stdout.rfind(OUTPUT_START)
+        end_idx = stdout.find(OUTPUT_END, start_idx + len(OUTPUT_START)) if start_idx != -1 else -1
 
         if start_idx == -1 or end_idx == -1 or end_idx <= start_idx:
+            # 找不到標記代表 container 在輸出結果前就結束了。
+            # Fix: if the START marker was found but END was not, stdout was likely
+            # truncated at the 2MB limit mid-output.  Emit a more specific error so
+            # operators understand the root cause (output too large) vs a crash.
+            if start_idx != -1 and end_idx == -1:
+                log.error(
+                    "Container %s: OUTPUT_START found but OUTPUT_END missing — "
+                    "stdout was likely truncated at the %d-byte limit. "
+                    "The agent's JSON output is too large; consider reducing response size.",
+                    container_name, _MAX_OUTPUT_SIZE,
+                )
+                await _notify_error(
+                    "⚠️ AI 回應內容超過大小限制，輸出不完整，請嘗試縮短請求。"
+                )
+                response_ms = int((time.time() - t0) * 1000)
+                record_run(jid, run_id, response_ms, retry_count=0, success=False)
+                db.log_container_finish(run_id, time.time(), "error", _redact_secrets(stderr) if stderr else "", stdout[:200] if stdout else "", response_ms)
+                _record_docker_success(folder)  # Docker ran fine; the agent's output was too big
+                return {"status": "error", "error": "output truncated (too large)", "messages": []}
+
             # 找不到標記代表 container 在輸出結果前就結束了
-            stderr_lines = stderr.splitlines() if stderr else []
-            if stderr_lines:
+            # Fix: avoid shadowing the outer `stderr_lines` list collected from
+            # streaming stderr; use a distinct local name for the split lines
+            # so the context bundled into the monitor error message is correct.
+            _stderr_split_lines = stderr.splitlines() if stderr else []
+            if _stderr_split_lines:
                 log.warning(
                     "Container %s stderr (last 5 lines):\n%s",
                     container_name,
-                    "\n".join(_redact_secrets(l) for l in stderr_lines[-5:])
+                    "\n".join(_redact_secrets(l) for l in _stderr_split_lines[-5:])
                 )
             log.warning("No valid output markers in container stdout")
             response_ms = int((time.time() - t0) * 1000)
             record_run(jid, run_id, response_ms, retry_count=0, success=False)
             db.log_container_finish(run_id, time.time(), "error", _redact_secrets(stderr) if stderr else "", stdout[:200] if stdout else "", response_ms)
             # ── 區分「Docker daemon 失敗」vs「container agent 崩潰」────────────
-            # 若 stderr 有實質內容（> 200 chars），代表 Docker 成功啟動了 container，
-            # 只是 agent process 在 emit() 前崩潰（OOM、unhandled exception 等）。
-            # 這種情況 Docker 本身是正常的 → 呼叫 _record_docker_success() 歸零 circuit。
-            # 若 stderr 幾乎為空，才代表 Docker daemon 層面的失敗 → 計入 circuit breaker。
-            _container_ran = bool(stderr and len(stderr.strip()) > _STDERR_DOCKER_OK_THRESHOLD)
+            # Use exit code to determine failure type (not stderr heuristic).
+            # Docker exit codes:
+            #   0   = success (agent ran and exited cleanly)
+            #   124 = timeout (agent ran but timed out — agent issue)
+            #   137 = OOM killed (agent issue)
+            #   143 = SIGTERM (agent issue)
+            #   125, 126, 127 = Docker itself failed (image not found, permission, etc.)
+            #   other non-zero = likely Docker/container issue
+            _AGENT_EXIT_CODES = {0, 124, 137, 143}  # exit codes where container itself ran fine
+            # Guard against proc being None (Docker failed to spawn at OS level)
+            _container_ran = proc is not None and proc.returncode in _AGENT_EXIT_CODES
+
+            # p16c BUG-FIX (MEDIUM): distinguish OOM (exit 137) in the user-facing
+            # on_error notification.  Previously the OOM path emitted the same generic
+            # Chinese message as any other crash, leaving operators and users with no
+            # indication that the memory limit was breached and should be raised.
+            # We now emit a specific OOM message for exit 137 and keep the generic
+            # message for all other non-zero exits.
+            _exit_code = proc.returncode if proc is not None else None
             if _container_ran:
-                log.info("Container %s crashed before emit() but Docker is healthy — resetting circuit breaker", container_name)
-                _record_docker_success()
+                # Log OOM explicitly so operators can act (raise --memory limit)
+                if _exit_code == 137:
+                    log.error(
+                        "Container %s was OOM-killed (exit 137). "
+                        "Consider raising CONTAINER_MEMORY in config (currently %r). "
+                        "Circuit breaker NOT tripped — Docker daemon is healthy.",
+                        container_name, config.CONTAINER_MEMORY,
+                    )
+                    # p16d: inform the user that the task was killed due to memory limits
+                    # so they can simplify their request rather than wondering about silence.
+                    await _notify_error(
+                        "⚠️ AI 執行時記憶體不足（已被系統終止），請嘗試縮短或簡化您的請求，系統將自動重試。"
+                    )
+                else:
+                    log.info("Container %s crashed before emit() but Docker is healthy — resetting circuit breaker", container_name)
+                _record_docker_success(folder)
             else:
-                log.warning("Container %s produced no stderr — possible Docker daemon issue — incrementing circuit breaker", container_name)
-                _record_docker_failure()
+                # Exit code indicates Docker itself failed (not an agent-level issue)
+                log.warning("Container exit code %s indicates Docker daemon issue — recording failure", _exit_code if _exit_code is not None else '?')
+                _record_docker_failure(folder)
             # Bundle stderr context for monitor channel (separator parsed by on_error in main.py)
-            _stderr_ctx_lines = [_redact_secrets(l) for l in (stderr_lines or [])[-15:]]
+            # Use the streaming-collected stderr_lines when available (non-Windows path),
+            # fall back to split lines otherwise.
+            _ctx_source = stderr_lines if stderr_lines else _stderr_split_lines
+            _stderr_ctx_lines = [_redact_secrets(l) for l in (_ctx_source or [])[-15:]]
             _stderr_ctx = (
                 f"container: {container_name}\n"
-                f"exit_code: {proc.returncode if proc else '?'}\n"
+                f"exit_code: {_exit_code if _exit_code is not None else '?'}\n"
                 f"stderr (last {len(_stderr_ctx_lines)} lines):\n" +
                 ("\n".join(_stderr_ctx_lines) if _stderr_ctx_lines else "(empty)")
             )
-            await _notify_error("⚠️ 系統暫時發生問題，請稍後再傳訊息，會自動重試。|||MONITOR_CONTEXT|||" + _stderr_ctx)
+            # User-visible message: OOM gets a specific hint; other failures get the generic message.
+            if _exit_code == 137:
+                _user_msg = (
+                    "⚠️ 系統記憶體不足（容器被強制終止），請稍後再試。"
+                    "如果問題持續請通知管理員調高記憶體上限。"
+                )
+            else:
+                _user_msg = "⚠️ 系統暫時發生問題，請稍後再傳訊息，會自動重試。"
+            await _notify_error(_user_msg + "|||MONITOR_CONTEXT|||" + _stderr_ctx)
             return {"status": "error", "error": "no output markers", "messages": []}
 
         # 截取兩個標記之間的內容並解析為 JSON
@@ -605,7 +831,7 @@ async def run_container_agent(
             response_ms = int((time.time() - t0) * 1000)
             record_run(jid, run_id, response_ms, retry_count=0, success=False)
             db.log_container_finish(run_id, time.time(), "error", _redact_secrets(stderr) if stderr else "", stdout[:200] if stdout else "", response_ms)
-            _record_docker_failure()
+            _record_docker_failure(folder)
             _json_ctx = (
                 f"container: {container_name}\n"
                 f"json_error: {e}\n"
@@ -616,19 +842,55 @@ async def run_container_agent(
             await _notify_error("⚠️ 系統暫時發生問題，請稍後再傳訊息，會自動重試。|||MONITOR_CONTEXT|||" + _json_ctx)
             return {"status": "error", "error": f"JSON parse error: {e}", "messages": []}
 
-        # 若 container 有產生回覆文字，透過 on_output callback 發送到聊天室
-        result_text = result.get("result")
-        if on_output and result_text:
-            await on_output(result_text)
+        # Fix: validate that the parsed JSON is a dict (not a list/scalar) so
+        # downstream code calling result.get() never raises AttributeError.
+        # A non-dict payload indicates a schema mismatch — treat it as an error
+        # so GroupQueue retries rather than silently delivering broken output.
+        if not isinstance(result, dict):
+            log.error(
+                "Container output schema mismatch: expected dict, got %s | raw=%r",
+                type(result).__name__, raw[:200],
+            )
+            response_ms = int((time.time() - t0) * 1000)
+            record_run(jid, run_id, response_ms, retry_count=0, success=False)
+            db.log_container_finish(run_id, time.time(), "error", _redact_secrets(stderr) if stderr else "", stdout[:200] if stdout else "", response_ms)
+            _record_docker_failure(folder)
+            _schema_ctx = (
+                f"container: {container_name}\n"
+                f"schema_error: expected dict, got {type(result).__name__}\n"
+                f"stdout_raw (first 300):\n{_redact_secrets(raw[:300]) if raw else '(empty)'}"
+            )
+            await _notify_error("⚠️ AI 回應格式異常，將自動重試，無需任何操作。|||MONITOR_CONTEXT|||" + _schema_ctx)
+            return {"status": "error", "error": "schema mismatch: result is not a dict", "messages": []}
+
 
         # 三層記憶系統：container 可透過 memory_patch 欄位更新熱記憶
         # agent 在回覆中附上新的記憶內容，host 自動寫入熱記憶供下次對話使用
-        if isinstance(result, dict) and result.get("memory_patch"):
-            try:
-                update_hot_memory(jid, result["memory_patch"])
-                log.debug("hot_memory: updated via memory_patch for jid=%s", jid)
-            except Exception as _mem_exc:
-                log.warning("hot_memory: failed to apply memory_patch for jid=%s: %s", jid, _mem_exc)
+        # p16c NOTE (LOW): as of the current agent.py, emit() never includes
+        # "memory_patch" — this field was planned but not yet wired up on the
+        # container side, so this branch is dead code for now.  When the agent
+        # is extended to produce memory patches, include this field in the
+        # emit({...}) call in container/agent-runner/agent.py.
+        # p16c BUG-FIX (MEDIUM): validate that memory_patch is a non-empty string
+        # before calling update_hot_memory().  A non-string value (e.g. dict, list)
+        # would propagate to content.encode("utf-8") in hot.py and raise AttributeError,
+        # which was silently swallowed — the bad patch was never applied but the
+        # failure reason was obscured.  Explicit type + emptiness guard makes the
+        # error immediately visible and prevents future regressions if update_hot_memory
+        # ever removes its own try/except.
+        _memory_patch = result.get("memory_patch") if isinstance(result, dict) else None
+        if _memory_patch:
+            if not isinstance(_memory_patch, str):
+                log.warning(
+                    "hot_memory: memory_patch for jid=%s has unexpected type %s — skipping update",
+                    jid, type(_memory_patch).__name__,
+                )
+            else:
+                try:
+                    update_hot_memory(jid, _memory_patch)
+                    log.debug("hot_memory: updated via memory_patch for jid=%s", jid)
+                except Exception as _mem_exc:
+                    log.warning("hot_memory: failed to apply memory_patch for jid=%s: %s", jid, _mem_exc)
 
         # 更新 session ID：agent 執行後可能建立新的 session，存入 DB 供下次使用
         if result.get("newSessionId"):
@@ -642,7 +904,7 @@ async def run_container_agent(
         safe_stderr = _redact_secrets(stderr) if stderr else ""
         stdout_preview = stdout[:200] if stdout else ""
         db.log_container_finish(run_id, time.time(), "success", safe_stderr, stdout_preview, response_ms)
-        _record_docker_success()
+        _record_docker_success(folder)
 
         # ── Host Auto-Write Fallback：確保 MEMORY.md 每次 session 都有記錄 ────
         # 若 agent 在本次執行中沒有更新 MEMORY.md（mtime < t0），
@@ -656,29 +918,56 @@ async def run_container_agent(
                 _date_str = _dt.datetime.now().strftime("%Y-%m-%d")
                 _prompt_preview = (prompt or "")[:80].replace("\n", " ") if prompt else "(no prompt)"
                 _auto_entry = f"\n[{_date_str}] [auto] Task: {_prompt_preview}. Result: success.\n"
-                with open(_host_memory_path, "a", encoding="utf-8") as _mf:
-                    _mf.write(_auto_entry)
+                # p17c BUG-FIX (LOW): open() + write() are blocking syscalls that
+                # can stall the event loop on a slow filesystem (NFS, overlayfs,
+                # disk pressure).  Run in an executor so other coroutines are not
+                # blocked while this small write completes.
+                def _write_mem():
+                    with open(_host_memory_path, "a", encoding="utf-8") as _mf:
+                        _mf.write(_auto_entry)
+                await asyncio.get_running_loop().run_in_executor(None, _write_mem)
                 log.info("host auto-wrote MEMORY.md fallback entry for %s", folder)
             else:
                 log.debug("MEMORY.md already updated by agent for %s", folder)
         except Exception as _auto_mem_exc:
             log.warning("host auto-write MEMORY.md failed for %s: %s", folder, _auto_mem_exc)
 
+        # p15b-fix: advance the cursor (on_success) BEFORE delivering the reply
+        # to the user (on_output).  Previously on_output fired first — if
+        # on_success then raised (e.g. DB error), the cursor was never advanced,
+        # the message loop retried, and the user received a duplicate reply.
+        # Advancing the cursor first is safe: if on_output then fails, the user
+        # simply does not see the reply for this run; the message will NOT be
+        # retried (cursor already advanced) but the silent drop is far less
+        # disruptive than a duplicate.  Operators will see the on_output error
+        # in logs and can investigate.
         if on_success:
             await on_success()
+
+        # 若 container 有產生回覆文字，透過 on_output callback 發送到聊天室
+        result_text = result.get("result")
+        if on_output and result_text:
+            await on_output(result_text)
 
         return result
 
     except asyncio.TimeoutError:
         # 超時：強制停止 container，避免佔用資源；不呼叫 on_success
-        log.error(f"Container {folder} timed out after {config.CONTAINER_TIMEOUT}s")
+        log.error("Container %s timed out after %ds", folder, config.CONTAINER_TIMEOUT)
         await _stop_container(container_name)
         # 記錄超時失敗數據（適應度扣分）
         _timeout_ms = int(config.CONTAINER_TIMEOUT * 1000)
         record_run(jid, run_id, _timeout_ms, retry_count=0, success=False)
         db.log_container_finish(run_id, time.time(), "timeout", "Container timed out", "", _timeout_ms)
-        _record_docker_failure()
-        await _notify_error(f"⏱️ 這個請求超過 {config.CONTAINER_TIMEOUT}s 未完成，會在下次自動重試。")
+        _record_docker_failure(folder)
+        # Fix: show a human-readable timeout limit (minutes if ≥ 60s) so the
+        # user understands this was a timeout (not another kind of error) and
+        # roughly how long the system waited before giving up.
+        _to_secs = int(config.CONTAINER_TIMEOUT)
+        _to_display = f"{_to_secs // 60} 分鐘" if _to_secs >= 60 else f"{_to_secs} 秒"
+        await _notify_error(
+            f"⏱️ 這個請求超過 {_to_display} 仍未完成（逾時），系統將自動重試，請稍候。"
+        )
         return {"status": "error", "result": None, "error": "Container timed out"}
     except asyncio.CancelledError:
         # task.cancel() 從 shutdown 觸發 — 立即 kill container，不等待 grace period
@@ -696,12 +985,12 @@ async def run_container_agent(
             pass
         raise  # Must re-raise CancelledError
     except Exception as e:
-        log.error(f"Container {folder} error: {e}")
+        log.error("Container %s error: %s", folder, e)
         response_ms = int((time.time() - t0) * 1000)
         # 記錄異常失敗數據
         record_run(jid, run_id, response_ms, retry_count=0, success=False)
         db.log_container_finish(run_id, time.time(), "error", str(e), "", response_ms)
-        _record_docker_failure()
+        _record_docker_failure(folder)
         _exc_ctx = (
             f"container: {container_name}\n"
             f"exception: {type(e).__name__}: {e}"
@@ -709,30 +998,60 @@ async def run_container_agent(
         await _notify_error(f"⚠️ 執行時發生錯誤（{type(e).__name__}），請稍後再試。|||MONITOR_CONTEXT|||{_exc_ctx}")
         return {"status": "error", "result": None, "error": str(e)}
     finally:
-        async with _active_lock:
+        async with _get_active_lock():
             _active_containers.pop(container_name, None)
 
 async def _stop_container(name: str) -> None:
-    """發送 docker kill 指令立即停止指定 container（超時時呼叫）。
-    使用 docker kill（SIGKILL）而非 docker stop --time 10（先 SIGTERM 再等 10s），
-    以確保 shutdown 時不額外阻塞 10 秒。
+    """Stop a container on timeout using a two-phase SIGTERM → SIGKILL sequence.
+
+    BUG-19B-03 FIX: previously this function issued docker kill (SIGKILL)
+    immediately, giving the agent process no opportunity to flush its output
+    buffers, close open files, or write a partial result to the IPC results
+    directory.  A sudden SIGKILL can corrupt in-progress writes to the shared
+    workspace volume.
+
+    New behaviour:
+      1. docker stop --time <grace> sends SIGTERM and waits up to
+         CONTAINER_STOP_GRACE_SECS for a clean exit.
+      2. If the container has not exited within the grace period Docker sends
+         SIGKILL automatically — no second command is needed.
+      3. If docker stop itself fails (container already gone, daemon hiccup)
+         we fall back to docker rm -f to free the name slot.
+
+    The grace period is intentionally short (default 5 s) so a timed-out
+    container does not delay shutdown by more than 5 extra seconds.
     """
+    _stop_grace = str(config.CONTAINER_STOP_GRACE_SECS)
+    _stop_ok = False
     try:
         proc = await asyncio.create_subprocess_exec(
-            "docker", "kill", name,
+            "docker", "stop", "--time", _stop_grace, name,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        await asyncio.wait_for(proc.wait(), timeout=5.0)
-    except Exception:
-        pass
+        # Wait slightly longer than the grace period so the SIGKILL has time to fire.
+        await asyncio.wait_for(proc.wait(), timeout=int(_stop_grace) + 3.0)
+        _stop_ok = (proc.returncode == 0)
+    except Exception as _ke:
+        log.debug("docker stop %s failed (%s) — attempting docker rm -f fallback", name, _ke)
+    if not _stop_ok:
+        # Fallback: force-remove the container so the name slot and resources are freed.
+        try:
+            rm_proc = await asyncio.create_subprocess_exec(
+                "docker", "rm", "-f", name,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(rm_proc.wait(), timeout=5.0)
+        except Exception as _rme:
+            log.debug("docker rm -f %s also failed: %s", name, _rme)
 
 
 async def kill_all_containers() -> None:
     """強制 kill 所有正在追蹤的 container（shutdown 時呼叫）。
     使用 docker kill（SIGKILL）確保即時終止，不等待 grace period。
     """
-    async with _active_lock:
+    async with _get_active_lock():
         names = list(_active_containers.keys())
     if not names:
         return
@@ -753,20 +1072,33 @@ async def cleanup_orphans() -> None:
 
     用 --filter name=evoclaw- 找出所有屬於本系統的 container，
     強制刪除（-f）避免名稱衝突或資源洩漏。
+
+    p15d BUG-FIX (HIGH): previously used `docker ps` (only RUNNING containers).
+    After a SIGKILL the Python process dies before Docker's --rm cleanup runs,
+    leaving containers in the "Exited" state that `docker ps` (without -a) does
+    NOT list.  These stopped-but-not-removed containers block future runs with
+    the same name and waste storage.  Use `docker ps -a` to catch all states.
     """
     try:
+        # -a: include stopped containers (Exited, Created, etc.) not just running ones.
+        # This is critical for post-SIGKILL recovery where --rm never fired.
         proc = await asyncio.create_subprocess_exec(
-            "docker", "ps", "-q", "--filter", "name=evoclaw-",
+            "docker", "ps", "-a", "-q", "--filter", "name=evoclaw-",
             stdout=asyncio.subprocess.PIPE,
         )
-        out, _ = await proc.communicate()
-        ids = out.decode().split()
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+        ids = [i for i in out.decode().split() if i]
         if ids:
-            rm_proc = await asyncio.create_subprocess_exec("docker", "rm", "-f", *ids,
+            rm_proc = await asyncio.create_subprocess_exec(
+                "docker", "rm", "-f", *ids,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            await rm_proc.wait()
-            log.info("Cleaned up %d orphan containers", len(ids))
+            await asyncio.wait_for(rm_proc.wait(), timeout=15.0)
+            log.info("Cleaned up %d orphan container(s) (running + stopped)", len(ids))
+        else:
+            log.debug("No orphan containers found at startup")
+    except asyncio.TimeoutError:
+        log.warning("cleanup_orphans timed out — Docker may be slow; orphans may remain")
     except Exception as e:
-        log.warning(f"Orphan cleanup failed: {e}")
+        log.warning("Orphan cleanup failed: %s", e)

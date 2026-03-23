@@ -77,8 +77,11 @@ def compute_fitness(jid: str, window_days: int = 7) -> float:
 
     n = len(rows)
 
-    # 成功率：失敗的 run 會拉低分數
-    success_rate = sum(1 for r in rows if r.get("success", 1)) / n
+    # BUG-FIX: default for missing "success" key was 1 (truthy), meaning runs
+    # without an explicit success field were counted as successes, inflating the
+    # fitness score and hiding real failures.  Default to False (0) instead —
+    # a missing success flag is ambiguous and should not be treated as success.
+    success_rate = sum(1 for r in rows if r.get("success", False)) / n
 
     # 速度分數：線性映射，目標 5 秒 = 1.0，30 秒以上 = 0.0
     # Only include successful runs with positive response times.
@@ -101,7 +104,12 @@ def compute_fitness(jid: str, window_days: int = 7) -> float:
     reliability = 1.0 / (1.0 + avg_retries)
 
     fitness = success_rate * 0.5 + speed_score * 0.3 + reliability * 0.2
-    return round(fitness, 4)
+    # Fix p14c: clamp the final score to [0.0, 1.0] as a safety net.
+    # Under normal conditions each component is already bounded, but a corrupted
+    # DB row with a negative retry_count could push reliability above 1.0 and
+    # therefore push the composite score above 1.0.  Downstream callers (genome
+    # evolution, fitness reporter) assume the score is always in [0, 1].
+    return round(max(0.0, min(1.0, fitness)), 4)
 
 
 def get_system_load() -> float:

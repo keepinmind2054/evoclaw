@@ -80,6 +80,18 @@ def _create_tables(db: sqlite3.Connection) -> None:
     - registered_groups：已登記的群組設定，包含 JID、folder、觸發關鍵字等
     """
     db.executescript("""
+    -- ── Schema version tracking ───────────────────────────────────────────────
+    -- schema_migrations tracks which migrations have been applied so that
+    -- run_migrations.py can detect the current schema version and apply only
+    -- new migrations.  Without this table every restart blindly re-runs
+    -- init_database() with no record of what was already applied, making
+    -- incremental migrations impossible.
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+        version     INTEGER PRIMARY KEY,
+        applied_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        description TEXT NOT NULL DEFAULT ''
+    );
+
     CREATE TABLE IF NOT EXISTS chats (
         jid TEXT PRIMARY KEY,
         name TEXT,
@@ -115,15 +127,26 @@ def _create_tables(db: sqlite3.Connection) -> None:
         context_mode TEXT DEFAULT 'group'
     );
 
+    -- BUG-19C-06 FIX: status column is NOT NULL with DEFAULT 'unknown'.
+    --   The previous definition allowed NULL in status.  The scheduler marks runs as
+    --   'success', 'error', or 'timeout' — a NULL status is meaningless and causes
+    --   the consecutive-failure counter in task_scheduler.py to skip the row (it
+    --   checks for "error"/"timeout" explicitly), masking repeated silent failures.
     CREATE TABLE IF NOT EXISTS task_run_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         task_id TEXT NOT NULL,
         run_at INTEGER NOT NULL,
         duration_ms INTEGER,
-        status TEXT,
+        status TEXT NOT NULL DEFAULT 'unknown',
         result TEXT,
         error TEXT
     );
+    -- Index for dashboard queries: "show all runs for task X" scans by task_id.
+    -- Without this index those queries perform a full table scan of task_run_logs.
+    CREATE INDEX IF NOT EXISTS idx_task_run_logs_task_id ON task_run_logs(task_id);
+    -- Index for get_due_tasks(): filters on status + next_run on every scheduler tick.
+    -- Without this index, each tick performs a full table scan of scheduled_tasks.
+    CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_status_next_run ON scheduled_tasks(status, next_run);
 
     CREATE TABLE IF NOT EXISTS router_state (
         key TEXT PRIMARY KEY,
@@ -135,22 +158,34 @@ def _create_tables(db: sqlite3.Connection) -> None:
         session_id TEXT NOT NULL
     );
 
+    -- BUG-19C-03 FIX: added UNIQUE(folder) to registered_groups.
+    --   Each group maps to a unique filesystem folder (groups/<folder>/).  If two
+    --   groups shared the same folder they would read/write each other's MEMORY.md,
+    --   CLAUDE.md, and skill files, causing silent data corruption and security
+    --   cross-contamination.  The UNIQUE constraint prevents this at the DB level.
     CREATE TABLE IF NOT EXISTS registered_groups (
         jid TEXT PRIMARY KEY,
         name TEXT NOT NULL,
-        folder TEXT NOT NULL,
+        folder TEXT NOT NULL UNIQUE,
         trigger_pattern TEXT,
         added_at INTEGER NOT NULL,
         container_config TEXT,
-        requires_trigger INTEGER DEFAULT 1,
-        is_main INTEGER DEFAULT 0
+        requires_trigger INTEGER NOT NULL DEFAULT 1,
+        is_main INTEGER NOT NULL DEFAULT 0
     );
 
     -- ── Container Logs 資料表 ──────────────────────────────────────────────────
     -- container_logs：記錄每次 container 執行的 stderr/stdout，供 Dashboard 查看
+    --
+    -- BUG-19C-04 FIX: added UNIQUE(run_id) to container_logs.
+    --   run_id is a UUID generated once per container invocation in container_runner
+    --   and passed to both log_container_start() and log_container_finish().  Without
+    --   a UNIQUE constraint a crash-and-retry path could create two "start" rows for
+    --   the same run_id, making log_container_finish()'s UPDATE match multiple rows
+    --   and leaving ghost "running" rows that trigger false stuck-container alerts.
     CREATE TABLE IF NOT EXISTS container_logs (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        run_id      TEXT NOT NULL,
+        run_id      TEXT NOT NULL UNIQUE,
         jid         TEXT NOT NULL,
         folder      TEXT NOT NULL DEFAULT '',
         container_name TEXT NOT NULL DEFAULT '',
@@ -163,31 +198,60 @@ def _create_tables(db: sqlite3.Connection) -> None:
     );
     CREATE INDEX IF NOT EXISTS idx_container_logs_jid ON container_logs(jid, started_at DESC);
     CREATE INDEX IF NOT EXISTS idx_container_logs_run_id ON container_logs(run_id);
+    -- Index for get_container_logs(status=...) filter which otherwise performs
+    -- a full table scan when filtering by status (e.g. "running" to find stuck containers).
+    CREATE INDEX IF NOT EXISTS idx_container_logs_status ON container_logs(status);
 
     -- ── 演化引擎資料表 ──────────────────────────────────────────────────────
     -- evolution_runs：記錄每次 container 執行的效能數據，是適應度計算的原始資料
+    --
+    -- BUG-19C-01 FIX: success DEFAULT changed from 1 → 0.
+    --   The original DEFAULT 1 meant that any row inserted without an explicit
+    --   success value was treated as a successful run, silently inflating fitness
+    --   scores.  A missing/unknown success flag is ambiguous and must not be
+    --   assumed successful; DEFAULT 0 (fail-safe) matches the compute_fitness()
+    --   fix already applied in host/evolution/fitness.py.
+    --
+    -- BUG-19C-02 FIX: added UNIQUE(jid, run_id).
+    --   Without this constraint the same container run_id could be inserted more
+    --   than once (e.g. a retry that re-calls record_evolution_run()), producing
+    --   duplicate rows that double-count a single execution in success_rate and
+    --   speed_score calculations.  The constraint lets callers use INSERT OR IGNORE
+    --   to remain idempotent without explicit duplicate checks.
     CREATE TABLE IF NOT EXISTS evolution_runs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         jid TEXT NOT NULL,
         run_id TEXT NOT NULL,
         response_ms INTEGER,
-        retry_count INTEGER DEFAULT 0,
-        success INTEGER DEFAULT 1,
-        timestamp TEXT DEFAULT (datetime('now'))
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        success INTEGER NOT NULL DEFAULT 0,
+        timestamp TEXT DEFAULT (datetime('now')),
+        UNIQUE(jid, run_id)
     );
     CREATE INDEX IF NOT EXISTS idx_evolution_jid_ts ON evolution_runs(jid, timestamp);
 
     -- group_genome：每個群組的行為基因組，記錄演化出的回應風格偏好
+    --
+    -- BUG-19C-05 FIX: added CHECK constraints on formality and technical_depth.
+    --   Both fields are documented as 0.0–1.0 floats.  Without CHECK constraints
+    --   a corrupt DB write or a future code regression can store out-of-range values
+    --   (e.g. 1.2 or -0.1) that silently produce nonsensical prompt generation and
+    --   break the genome evolution math which assumes values in [0, 1].
     CREATE TABLE IF NOT EXISTS group_genome (
         jid TEXT PRIMARY KEY,
-        response_style TEXT DEFAULT 'balanced',
-        formality REAL DEFAULT 0.5,
-        technical_depth REAL DEFAULT 0.5,
-        generation INTEGER DEFAULT 0,
-        updated_at TEXT DEFAULT (datetime('now'))
+        response_style TEXT NOT NULL DEFAULT 'balanced',
+        formality REAL NOT NULL DEFAULT 0.5 CHECK(formality >= 0.0 AND formality <= 1.0),
+        technical_depth REAL NOT NULL DEFAULT 0.5 CHECK(technical_depth >= 0.0 AND technical_depth <= 1.0),
+        generation INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
     -- immune_threats：免疫系統的威脅記錄，形成「抗體」記憶防止重複攻擊
+    -- UNIQUE(sender_jid, pattern_hash) enforces the one-row-per-sender-per-pattern
+    -- invariant at the DB level so that record_immune_threat() can use a safe
+    -- INSERT … ON CONFLICT DO UPDATE instead of a racy SELECT-then-INSERT/UPDATE.
+    -- Without this constraint duplicate rows could accumulate on migration or if the
+    -- application-level lock were ever bypassed.
     CREATE TABLE IF NOT EXISTS immune_threats (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         sender_jid TEXT NOT NULL,
@@ -196,9 +260,13 @@ def _create_tables(db: sqlite3.Connection) -> None:
         count INTEGER DEFAULT 1,
         blocked INTEGER DEFAULT 0,
         first_seen TEXT DEFAULT (datetime('now')),
-        last_seen TEXT DEFAULT (datetime('now'))
+        last_seen TEXT DEFAULT (datetime('now')),
+        UNIQUE(sender_jid, pattern_hash)
     );
     CREATE INDEX IF NOT EXISTS idx_immune_sender ON immune_threats(sender_jid);
+    -- Composite index for the WHERE sender_jid=? AND pattern_hash=? lookup in
+    -- record_immune_threat() and get_recent_threat_count().
+    CREATE INDEX IF NOT EXISTS idx_immune_sender_hash ON immune_threats(sender_jid, pattern_hash);
 
     CREATE TABLE IF NOT EXISTS evolution_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -231,6 +299,9 @@ CREATE TABLE IF NOT EXISTS dev_sessions (
     updated_at   REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_dev_sessions_jid ON dev_sessions(jid, created_at);
+-- Index for filtering active/pending/complete sessions by status.
+-- Without this, "show all active dev sessions" requires a full table scan.
+CREATE INDEX IF NOT EXISTS idx_dev_sessions_status ON dev_sessions(status);
 
 -- dev_events：記錄 7 階段開發流程的事件（保留供向後相容）
 CREATE TABLE IF NOT EXISTS dev_events (
@@ -271,6 +342,16 @@ CREATE VIRTUAL TABLE IF NOT EXISTS group_warm_logs_fts USING fts5(
     content='group_warm_logs',
     content_rowid='id'
 );
+-- BUG-19C-12 FIX: add DELETE trigger for group_warm_logs_fts.
+--   append_warm_log() manually inserts into the FTS table after each INSERT.
+--   However delete_warm_logs_before() must also remove FTS rows to prevent
+--   stale index entries that return deleted content in memory_fts_search().
+--   The trigger provides a DB-level safety net for any delete path that forgets
+--   to clean the FTS index (e.g. direct SQL deletes during pruning).
+CREATE TRIGGER IF NOT EXISTS warm_logs_ad AFTER DELETE ON group_warm_logs BEGIN
+    INSERT INTO group_warm_logs_fts(group_warm_logs_fts, rowid, jid, log_date, content)
+        VALUES('delete', old.id, old.jid, old.log_date, old.content);
+END;
 
 -- Cold memory: longer-form archives
 CREATE TABLE IF NOT EXISTS group_cold_memory (
@@ -289,6 +370,18 @@ CREATE VIRTUAL TABLE IF NOT EXISTS group_cold_memory_fts USING fts5(
     content='group_cold_memory',
     content_rowid='id'
 );
+-- BUG-19C-12 (continued): add INSERT/DELETE triggers for group_cold_memory_fts
+--   so cold memory entries are automatically indexed on insert and removed from
+--   the FTS index on delete.  Without these triggers cold memory is written but
+--   never appears in memory_fts_search() results — a silent read-gap bug.
+CREATE TRIGGER IF NOT EXISTS cold_memory_ai AFTER INSERT ON group_cold_memory BEGIN
+    INSERT INTO group_cold_memory_fts(rowid, jid, title, content, tags)
+        VALUES(new.id, new.jid, new.title, new.content, new.tags);
+END;
+CREATE TRIGGER IF NOT EXISTS cold_memory_ad AFTER DELETE ON group_cold_memory BEGIN
+    INSERT INTO group_cold_memory_fts(group_cold_memory_fts, rowid, jid, title, content, tags)
+        VALUES('delete', old.id, old.jid, old.title, old.content, old.tags);
+END;
 
 -- Memory sync tracking
 CREATE TABLE IF NOT EXISTS group_memory_sync (
@@ -316,11 +409,15 @@ def store_message(msg_id: str, chat_jid: str, sender: str, sender_name: str,
     """
     with _db_lock:
         db = get_db()
-        db.execute("""
-            INSERT OR IGNORE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (msg_id, chat_jid, sender, sender_name, content, timestamp, int(is_from_me), int(is_bot_message)))
-        db.commit()
+        try:
+            db.execute("""
+                INSERT OR IGNORE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (msg_id, chat_jid, sender, sender_name, content, timestamp, int(is_from_me), int(is_bot_message)))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
 def get_new_messages(jids: list[str], last_timestamp: int) -> list[dict]:
     """
@@ -391,12 +488,16 @@ def store_chat_metadata(jid: str, name: str, timestamp: int, channel: str, is_gr
     """
     with _db_lock:
         db = get_db()
-        db.execute("""
-            INSERT INTO chats (jid, name, last_message_time, channel, is_group)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(jid) DO UPDATE SET name=excluded.name, last_message_time=excluded.last_message_time
-        """, (jid, name, timestamp, channel, int(is_group)))
-        db.commit()
+        try:
+            db.execute("""
+                INSERT INTO chats (jid, name, last_message_time, channel, is_group)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(jid) DO UPDATE SET name=excluded.name, last_message_time=excluded.last_message_time
+            """, (jid, name, timestamp, channel, int(is_group)))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
 # ── Router state ──────────────────────────────────────────────────────────────
 
@@ -412,8 +513,12 @@ def set_state(key: str, value: str) -> None:
     """寫入或更新 router_state 表中的 key-value 狀態。"""
     with _db_lock:
         db = get_db()
-        db.execute("INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)", (key, value))
-        db.commit()
+        try:
+            db.execute("INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)", (key, value))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
 # ── Sessions ──────────────────────────────────────────────────────────────────
 
@@ -430,8 +535,12 @@ def set_session(group_folder: str, session_id: str) -> None:
     """儲存或更新某群組的 Claude session ID（container 每次執行後可能產生新 session）。"""
     with _db_lock:
         db = get_db()
-        db.execute("INSERT OR REPLACE INTO sessions (group_folder, session_id) VALUES (?, ?)", (group_folder, session_id))
-        db.commit()
+        try:
+            db.execute("INSERT OR REPLACE INTO sessions (group_folder, session_id) VALUES (?, ?)", (group_folder, session_id))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
 # ── Registered groups ─────────────────────────────────────────────────────────
 
@@ -476,17 +585,33 @@ def set_registered_group(jid: str, name: str, folder: str, trigger_pattern: Opti
     _validate_folder(folder)
     with _db_lock:
         db = get_db()
-        if is_main:
-            # Enforce single main group invariant — demote all other groups
-            db.execute("UPDATE registered_groups SET is_main = 0 WHERE jid != ?", (jid,))
-        db.execute("""
-            INSERT OR REPLACE INTO registered_groups
-            (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (jid, name, folder, trigger_pattern, int(time.time() * 1000),
-              json.dumps(container_config) if container_config else None,
-              int(requires_trigger), int(is_main)))
-        db.commit()
+        try:
+            if is_main:
+                # Enforce single main group invariant — demote all other groups
+                db.execute("UPDATE registered_groups SET is_main = 0 WHERE jid != ?", (jid,))
+            # Use INSERT … ON CONFLICT DO UPDATE instead of INSERT OR REPLACE so
+            # that the original added_at timestamp is preserved when updating an
+            # existing group.  INSERT OR REPLACE silently DELETEs + re-INSERTs the
+            # row, which always overwrites added_at with the current time and loses
+            # the original registration timestamp.
+            db.execute("""
+                INSERT INTO registered_groups
+                (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(jid) DO UPDATE SET
+                    name              = excluded.name,
+                    folder            = excluded.folder,
+                    trigger_pattern   = excluded.trigger_pattern,
+                    container_config  = excluded.container_config,
+                    requires_trigger  = excluded.requires_trigger,
+                    is_main           = excluded.is_main
+            """, (jid, name, folder, trigger_pattern, int(time.time() * 1000),
+                  json.dumps(container_config) if container_config else None,
+                  int(requires_trigger), int(is_main)))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
 # ── Scheduled tasks ───────────────────────────────────────────────────────────
 
@@ -502,13 +627,17 @@ def create_task(task_id: str, group_folder: str, chat_jid: str, prompt: str,
     """
     with _db_lock:
         db = get_db()
-        db.execute("""
-            INSERT INTO scheduled_tasks
-            (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, next_run, created_at, context_mode)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (task_id, group_folder, chat_jid, prompt, schedule_type, schedule_value,
-              next_run, int(time.time() * 1000), context_mode))
-        db.commit()
+        try:
+            db.execute("""
+                INSERT INTO scheduled_tasks
+                (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, next_run, created_at, context_mode)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (task_id, group_folder, chat_jid, prompt, schedule_type, schedule_value,
+                  next_run, int(time.time() * 1000), context_mode))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
 def get_all_tasks(group_folder: Optional[str] = None) -> list[dict]:
     """取得所有排程任務（可選擇性地過濾特定群組）。
@@ -549,15 +678,23 @@ def update_task(task_id: str, **kwargs) -> None:
     set_clause = ", ".join(f"{k}=?" for k in fields)
     with _db_lock:
         db = get_db()
-        db.execute(f"UPDATE scheduled_tasks SET {set_clause} WHERE id=?", (*fields.values(), task_id))
-        db.commit()
+        try:
+            db.execute(f"UPDATE scheduled_tasks SET {set_clause} WHERE id=?", (*fields.values(), task_id))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
 def delete_task(task_id: str) -> None:
     """永久刪除排程任務（cancel 操作）。"""
     with _db_lock:
         db = get_db()
-        db.execute("DELETE FROM scheduled_tasks WHERE id=?", (task_id,))
-        db.commit()
+        try:
+            db.execute("DELETE FROM scheduled_tasks WHERE id=?", (task_id,))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
 def log_task_run(task_id: str, run_at: int, duration_ms: int, status: str,
                  result: Optional[str], error: Optional[str]) -> None:
@@ -570,11 +707,15 @@ def log_task_run(task_id: str, run_at: int, duration_ms: int, status: str,
     """
     with _db_lock:
         db = get_db()
-        db.execute("""
-            INSERT INTO task_run_logs (task_id, run_at, duration_ms, status, result, error)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (task_id, run_at, duration_ms, status, result, error))
-        db.commit()
+        try:
+            db.execute("""
+                INSERT INTO task_run_logs (task_id, run_at, duration_ms, status, result, error)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (task_id, run_at, duration_ms, status, result, error))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
 
 # ── Evolution Engine ───────────────────────────────────────────────────────────
@@ -589,11 +730,19 @@ def record_evolution_run(jid: str, run_id: str, response_ms: int,
     """
     with _db_lock:
         db = get_db()
-        db.execute("""
-            INSERT INTO evolution_runs (jid, run_id, response_ms, retry_count, success)
-            VALUES (?, ?, ?, ?, ?)
-        """, (jid, run_id, response_ms, retry_count, int(success)))
-        db.commit()
+        try:
+            # INSERT OR IGNORE: the UNIQUE(jid, run_id) constraint added in
+            # BUG-19C-02 prevents duplicate rows for the same run.  Using
+            # OR IGNORE rather than OR REPLACE preserves the original timestamp
+            # and avoids inflating retry metrics on duplicate calls.
+            db.execute("""
+                INSERT OR IGNORE INTO evolution_runs (jid, run_id, response_ms, retry_count, success)
+                VALUES (?, ?, ?, ?, ?)
+            """, (jid, run_id, response_ms, retry_count, int(success)))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
 
 def get_evolution_runs(jid: str, days: int = 7) -> list[dict]:
@@ -685,23 +834,27 @@ def upsert_group_genome(jid: str, **kwargs) -> None:
 
     with _db_lock:
         db = get_db()
-        # 先確保記錄存在（INSERT OR IGNORE 建立預設值）
-        db.execute("""
-            INSERT OR IGNORE INTO group_genome (jid) VALUES (?)
-        """, (jid,))
+        try:
+            # 先確保記錄存在（INSERT OR IGNORE 建立預設值）
+            db.execute("""
+                INSERT OR IGNORE INTO group_genome (jid) VALUES (?)
+            """, (jid,))
 
-        if fields:
-            # updated_at 用 SQL 函式，需特殊處理
-            set_parts = []
-            values = []
-            for k, v in fields.items():
-                set_parts.append(f"{k} = ?")
-                values.append(v)
-            set_parts.append("updated_at = datetime('now')")
-            set_clause = ", ".join(set_parts)
-            db.execute(f"UPDATE group_genome SET {set_clause} WHERE jid = ?",
-                       (*values, jid))
-        db.commit()
+            if fields:
+                # updated_at 用 SQL 函式，需特殊處理
+                set_parts = []
+                values = []
+                for k, v in fields.items():
+                    set_parts.append(f"{k} = ?")
+                    values.append(v)
+                set_parts.append("updated_at = datetime('now')")
+                set_clause = ", ".join(set_parts)
+                db.execute(f"UPDATE group_genome SET {set_clause} WHERE jid = ?",
+                           (*values, jid))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
 
 def record_immune_threat(sender_jid: str, pattern_hash: str, threat_type: str) -> int:
@@ -719,31 +872,30 @@ def record_immune_threat(sender_jid: str, pattern_hash: str, threat_type: str) -
     """
     with _db_lock:
         db = get_db()
-        existing = db.execute("""
-            SELECT id, count FROM immune_threats
-            WHERE sender_jid = ? AND pattern_hash = ?
-        """, (sender_jid, pattern_hash)).fetchone()
-
-        if existing:
-            new_count = existing["count"] + 1
+        try:
+            # Atomic upsert: the UNIQUE(sender_jid, pattern_hash) constraint
+            # allows a single statement to either insert a new threat or increment
+            # the counter on an existing one, eliminating the previous racy
+            # SELECT-then-INSERT/UPDATE pattern.  The lock is still held to keep
+            # the follow-up SUM query consistent with the write.
             db.execute("""
-                UPDATE immune_threats SET count = ?, last_seen = datetime('now')
-                WHERE id = ?
-            """, (new_count, existing["id"]))
-        else:
-            db.execute("""
-                INSERT INTO immune_threats (sender_jid, pattern_hash, threat_type)
-                VALUES (?, ?, ?)
+                INSERT INTO immune_threats (sender_jid, pattern_hash, threat_type, count,
+                                           first_seen, last_seen)
+                VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))
+                ON CONFLICT(sender_jid, pattern_hash) DO UPDATE SET
+                    count    = count + 1,
+                    last_seen = datetime('now')
             """, (sender_jid, pattern_hash, threat_type))
-            new_count = 1
-
-        db.commit()
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
         # 回傳此發送者的所有威脅記錄總數（跨不同 pattern）
         total = db.execute("""
             SELECT SUM(count) as total FROM immune_threats WHERE sender_jid = ?
         """, (sender_jid,)).fetchone()
-        return total["total"] if total else new_count
+        return int(total["total"]) if total and total["total"] is not None else 1
 
 
 def is_sender_blocked(sender_jid: str) -> bool:
@@ -764,8 +916,12 @@ def block_sender(sender_jid: str) -> None:
     """將指定發送者的所有威脅記錄標記為已封鎖（blocked = 1）。"""
     with _db_lock:
         db = get_db()
-        db.execute("UPDATE immune_threats SET blocked = 1 WHERE sender_jid = ?", (sender_jid,))
-        db.commit()
+        try:
+            db.execute("UPDATE immune_threats SET blocked = 1 WHERE sender_jid = ?", (sender_jid,))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
 
 def get_recent_threat_count(sender_jid: str, pattern_hash: str, hours: int = 1) -> int:
@@ -822,8 +978,12 @@ def log_evolution_event(jid: str, event_type: str, **kwargs) -> None:
     values = [jid, event_type] + list(fields.values())
     with _db_lock:
         db = get_db()
-        db.execute(f"INSERT INTO evolution_log ({cols}) VALUES ({placeholders})", values)
-        db.commit()
+        try:
+            db.execute(f"INSERT INTO evolution_log ({cols}) VALUES ({placeholders})", values)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
 
 def get_evolution_log(jid: str = None, limit: int = 100, event_type: str = None) -> list:
@@ -862,11 +1022,15 @@ def log_dev_event(jid: str, event_type: str, stage: str, notes: str) -> None:
     """
     with _db_lock:
         db = get_db()
-        db.execute("""
-            INSERT INTO dev_events (jid, event_type, stage, notes)
-            VALUES (?, ?, ?, ?)
-        """, (jid, event_type, stage, notes))
-        db.commit()
+        try:
+            db.execute("""
+                INSERT INTO dev_events (jid, event_type, stage, notes)
+                VALUES (?, ?, ?, ?)
+            """, (jid, event_type, stage, notes))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
 def get_dev_events(jid: str = None, limit: int = 100, stage: str = None) -> list:
     """
@@ -910,13 +1074,17 @@ def set_hot_memory(jid: str, content: str) -> None:
     import time as _time
     with _db_lock:
         db = get_db()
-        db.execute(
-            """INSERT INTO group_hot_memory(jid, content, updated_at)
-               VALUES(?, ?, ?)
-               ON CONFLICT(jid) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at""",
-            (jid, content, _time.time()),
-        )
-        db.commit()
+        try:
+            db.execute(
+                """INSERT INTO group_hot_memory(jid, content, updated_at)
+                   VALUES(?, ?, ?)
+                   ON CONFLICT(jid) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at""",
+                (jid, content, _time.time()),
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
 
 # ── Warm Memory ─────────────────────────────────────────────────────────────
@@ -925,14 +1093,19 @@ def append_warm_log(jid: str, log_date: str, content: str) -> None:
     import time as _time
     with _db_lock:
         db = get_db()
-        db.execute(
-            "INSERT INTO group_warm_logs(jid, log_date, content, created_at) VALUES(?, ?, ?, ?)",
-            (jid, log_date, content, _time.time()),
-        )
-        # Keep FTS in sync
-        db.execute("INSERT INTO group_warm_logs_fts(rowid, jid, log_date, content) VALUES(last_insert_rowid(), ?, ?, ?)",
-                    (jid, log_date, content))
-        db.commit()
+        try:
+            db.execute(
+                "INSERT INTO group_warm_logs(jid, log_date, content, created_at) VALUES(?, ?, ?, ?)",
+                (jid, log_date, content, _time.time()),
+            )
+            # Keep FTS in sync — must be in the same transaction so a crash
+            # between the two INSERTs cannot leave the FTS index out of sync.
+            db.execute("INSERT INTO group_warm_logs_fts(rowid, jid, log_date, content) VALUES(last_insert_rowid(), ?, ?, ?)",
+                        (jid, log_date, content))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
 
 def get_warm_logs_recent(jid: str, days: int = 1) -> list[dict]:
@@ -947,28 +1120,105 @@ def get_warm_logs_recent(jid: str, days: int = 1) -> list[dict]:
     return [{"id": r[0], "log_date": r[1], "content": r[2], "created_at": r[3]} for r in rows]
 
 
+def get_warm_logs_for_date(jid: str, log_date: str) -> list[dict]:
+    """Return all warm log entries for a specific date (YYYY-MM-DD).
+
+    Added for p14b-4: daily wrapup needs yesterday's logs specifically;
+    ``get_warm_logs_recent(days=1)`` returns the last 24 h of wall-clock
+    time which is almost empty when called at midnight.
+    """
+    with _db_lock:
+        db = get_db()
+        rows = db.execute(
+            "SELECT id, log_date, content, created_at FROM group_warm_logs "
+            "WHERE jid=? AND log_date=? ORDER BY created_at ASC",
+            (jid, log_date),
+        ).fetchall()
+    return [{"id": r[0], "log_date": r[1], "content": r[2], "created_at": r[3]} for r in rows]
+
+
 def delete_warm_logs_before(jid: str, cutoff_ts: float) -> int:
     with _db_lock:
         db = get_db()
-        # Delete matching FTS rows first (before the source rows disappear)
-        db.execute(
-            "DELETE FROM group_warm_logs_fts WHERE rowid IN "
-            "(SELECT id FROM group_warm_logs WHERE jid=? AND created_at<?)",
-            (jid, cutoff_ts),
-        )
-        cur = db.execute(
-            "DELETE FROM group_warm_logs WHERE jid=? AND created_at<?", (jid, cutoff_ts)
-        )
-        db.commit()
+        try:
+            # Delete matching FTS rows first (before the source rows disappear).
+            # Both deletes must be in the same transaction — a crash between them
+            # would leave orphaned FTS entries causing stale search results.
+            db.execute(
+                "DELETE FROM group_warm_logs_fts WHERE rowid IN "
+                "(SELECT id FROM group_warm_logs WHERE jid=? AND created_at<?)",
+                (jid, cutoff_ts),
+            )
+            cur = db.execute(
+                "DELETE FROM group_warm_logs WHERE jid=? AND created_at<?", (jid, cutoff_ts)
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        return cur.rowcount
+
+
+def append_cold_memory(jid: str, title: str, content: str, tags: str = "") -> int:
+    """Insert a long-form archive entry into group_cold_memory.
+
+    BUG-19C-09 FIX: group_cold_memory had a schema, FTS table, and read path
+    (memory_fts_search) but no write function in db.py.  Any code that stored
+    cold memories was using raw SQL bypassing the DB lock and FTS sync.  This
+    function provides the canonical write path.
+
+    The FTS index is kept in sync via the cold_memory_ai trigger added in the
+    schema fix (BUG-19C-12), so no manual FTS INSERT is required here.
+
+    Returns the rowid of the inserted row.
+    """
+    import time as _time
+    with _db_lock:
+        db = get_db()
+        try:
+            cur = db.execute(
+                "INSERT INTO group_cold_memory(jid, title, content, tags, created_at) VALUES(?, ?, ?, ?, ?)",
+                (jid, title, content, tags, _time.time()),
+            )
+            db.commit()
+            return cur.lastrowid
+        except Exception:
+            db.rollback()
+            raise
+
+
+def delete_cold_memory_before(jid: str, cutoff_ts: float) -> int:
+    """Delete old cold memory entries for a group.
+
+    The FTS index is kept in sync via the cold_memory_ad trigger added in the
+    schema fix (BUG-19C-12).
+    """
+    with _db_lock:
+        db = get_db()
+        try:
+            cur = db.execute(
+                "DELETE FROM group_cold_memory WHERE jid=? AND created_at<?",
+                (jid, cutoff_ts),
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
         return cur.rowcount
 
 
 def memory_fts_search(jid: str, query: str, limit: int = 10) -> list[dict]:
-    """Hybrid search across warm and cold memory using FTS5."""
+    """Hybrid search across warm and cold memory using FTS5.
+
+    Searches both group_warm_logs_fts and group_cold_memory_fts and returns
+    up to *limit* combined results sorted by relevance (best match first).
+    Previously only warm memory was searched; this was a silent data-loss bug
+    that caused agents to miss relevant cold-memory archives.
+    """
     results = []
     with _db_lock:
         db = get_db()
-        # Warm memory FTS search
+        # ── Warm memory FTS search ────────────────────────────────────────────
         try:
             rows = db.execute(
                 """SELECT w.id, w.log_date, w.content, w.created_at,
@@ -990,33 +1240,89 @@ def memory_fts_search(jid: str, query: str, limit: int = 10) -> list[dict]:
                 })
         except Exception:
             pass
-    return results
+
+        # ── Cold memory FTS search ────────────────────────────────────────────
+        # The docstring promised hybrid search but cold memory was never queried.
+        # Added here to fulfil the contract and prevent agents from missing
+        # long-term archived information stored in group_cold_memory.
+        try:
+            rows = db.execute(
+                """SELECT c.id, c.title, c.content, c.tags, c.created_at,
+                          bm25(group_cold_memory_fts) as fts_score
+                   FROM group_cold_memory_fts f
+                   JOIN group_cold_memory c ON c.id = f.rowid
+                   WHERE f.jid=? AND group_cold_memory_fts MATCH ?
+                   ORDER BY fts_score
+                   LIMIT ?""",
+                (jid, query, limit),
+            ).fetchall()
+            for r in rows:
+                results.append({
+                    "source": "cold",
+                    "date": r[1],          # title used as date-like label
+                    "content": r[2][:500],
+                    "tags": r[3],
+                    "created_at": r[4],
+                    "fts_score": abs(r[5]) if r[5] else 0.0,
+                })
+        except Exception:
+            pass
+
+    # Re-sort combined results by relevance descending (highest score = best match)
+    results.sort(key=lambda x: x["fts_score"], reverse=True)
+    return results[:limit]
 
 
 def record_micro_sync(jid: str) -> None:
     import time as _time
     with _db_lock:
         db = get_db()
-        db.execute(
-            """INSERT INTO group_memory_sync(jid, last_micro_sync)
-               VALUES(?, ?)
-               ON CONFLICT(jid) DO UPDATE SET last_micro_sync=excluded.last_micro_sync""",
-            (jid, _time.time()),
-        )
-        db.commit()
+        try:
+            db.execute(
+                """INSERT INTO group_memory_sync(jid, last_micro_sync)
+                   VALUES(?, ?)
+                   ON CONFLICT(jid) DO UPDATE SET last_micro_sync=excluded.last_micro_sync""",
+                (jid, _time.time()),
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+
+def record_daily_wrapup(jid: str) -> None:
+    """Record the timestamp of the last daily wrapup for a group."""
+    import time as _time
+    with _db_lock:
+        db = get_db()
+        try:
+            db.execute(
+                """INSERT INTO group_memory_sync(jid, last_daily_wrapup)
+                   VALUES(?, ?)
+                   ON CONFLICT(jid) DO UPDATE SET last_daily_wrapup=excluded.last_daily_wrapup""",
+                (jid, _time.time()),
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
 
 def record_weekly_compound(jid: str) -> None:
     import time as _time
     with _db_lock:
         db = get_db()
-        db.execute(
-            """INSERT INTO group_memory_sync(jid, last_weekly_compound)
-               VALUES(?, ?)
-               ON CONFLICT(jid) DO UPDATE SET last_weekly_compound=excluded.last_weekly_compound""",
-            (jid, _time.time()),
-        )
-        db.commit()
+        try:
+            db.execute(
+                """INSERT INTO group_memory_sync(jid, last_weekly_compound)
+                   VALUES(?, ?)
+                   ON CONFLICT(jid) DO UPDATE SET last_weekly_compound=excluded.last_weekly_compound""",
+                (jid, _time.time()),
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
 
 # ── Maintenance ────────────────────────────────────────────────────────────────
@@ -1080,42 +1386,46 @@ def prune_old_logs(days: int = 30) -> None:
     """
     with _db_lock:
         db = get_db()
-        # task_run_logs.run_at is stored as ms epoch integer
-        cutoff_ms = int((time.time() - days * 86400) * 1000)
-        db.execute("DELETE FROM task_run_logs WHERE run_at < ?", (cutoff_ms,))
-        # evolution_runs.timestamp is a TEXT field in SQLite datetime format
-        db.execute(
-            "DELETE FROM evolution_runs WHERE timestamp < datetime('now', ?)",
-            (f"-{days} days",),
-        )
-        # evolution_log: same TEXT timestamp format
-        db.execute(
-            "DELETE FROM evolution_log WHERE timestamp < datetime('now', ?)",
-            (f"-{days} days",),
-        )
-        # messages: timestamp is ms epoch integer (same cutoff as task_run_logs)
-        db.execute("DELETE FROM messages WHERE timestamp < ?", (cutoff_ms,))
-        # immune_threats: keep blocked senders and recurring threats indefinitely;
-        # prune one-shot noise entries (count=1) older than 90 days.
-        # immune_threats.last_seen is stored as TEXT datetime, so use SQLite datetime()
-        # for the comparison.  The 90-day retention is intentionally longer than the
-        # configurable `days` parameter to preserve threat history for audit purposes.
-        # (Issue #63: removed unused integer immune_cutoff_ms variable)
-        db.execute(
-            "DELETE FROM immune_threats WHERE count = 1 AND blocked = 0 "
-            "AND last_seen < datetime('now', '-90 days')",
-        )
-        # dev_events: TEXT timestamp
-        db.execute(
-            "DELETE FROM dev_events WHERE timestamp < datetime('now', ?)",
-            (f"-{days} days",),
-        )
-        # dev_sessions: created_at is stored as REAL (Unix seconds)
-        cutoff_secs = time.time() - days * 86400
-        db.execute("DELETE FROM dev_sessions WHERE created_at < ?", (cutoff_secs,))
-        # container_logs: started_at is stored as REAL (Unix seconds)
-        db.execute("DELETE FROM container_logs WHERE started_at < ?", (cutoff_secs,))
-        db.commit()
+        try:
+            # task_run_logs.run_at is stored as ms epoch integer
+            cutoff_ms = int((time.time() - days * 86400) * 1000)
+            db.execute("DELETE FROM task_run_logs WHERE run_at < ?", (cutoff_ms,))
+            # evolution_runs.timestamp is a TEXT field in SQLite datetime format
+            db.execute(
+                "DELETE FROM evolution_runs WHERE timestamp < datetime('now', ?)",
+                (f"-{days} days",),
+            )
+            # evolution_log: same TEXT timestamp format
+            db.execute(
+                "DELETE FROM evolution_log WHERE timestamp < datetime('now', ?)",
+                (f"-{days} days",),
+            )
+            # messages: timestamp is ms epoch integer (same cutoff as task_run_logs)
+            db.execute("DELETE FROM messages WHERE timestamp < ?", (cutoff_ms,))
+            # immune_threats: keep blocked senders and recurring threats indefinitely;
+            # prune one-shot noise entries (count=1) older than 90 days.
+            # immune_threats.last_seen is stored as TEXT datetime, so use SQLite datetime()
+            # for the comparison.  The 90-day retention is intentionally longer than the
+            # configurable `days` parameter to preserve threat history for audit purposes.
+            # (Issue #63: removed unused integer immune_cutoff_ms variable)
+            db.execute(
+                "DELETE FROM immune_threats WHERE count = 1 AND blocked = 0 "
+                "AND last_seen < datetime('now', '-90 days')",
+            )
+            # dev_events: TEXT timestamp
+            db.execute(
+                "DELETE FROM dev_events WHERE timestamp < datetime('now', ?)",
+                (f"-{days} days",),
+            )
+            # dev_sessions: created_at is stored as REAL (Unix seconds)
+            cutoff_secs = time.time() - days * 86400
+            db.execute("DELETE FROM dev_sessions WHERE created_at < ?", (cutoff_secs,))
+            # container_logs: started_at is stored as REAL (Unix seconds)
+            db.execute("DELETE FROM container_logs WHERE started_at < ?", (cutoff_secs,))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
     log.info(
         "Pruned logs older than %d days "
         "(task_run_logs, evolution_runs, evolution_log, messages, dev_events, dev_sessions, container_logs) "
@@ -1127,15 +1437,23 @@ def prune_old_logs(days: int = 30) -> None:
 # ── Container Logs ─────────────────────────────────────────────────────────────
 
 def log_container_start(run_id: str, jid: str, folder: str, container_name: str, started_at: float) -> None:
-    """Insert a 'running' row when a container starts."""
+    """Insert a 'running' row when a container starts.
+
+    Uses INSERT OR IGNORE so that a crash-and-retry that re-calls this function
+    with the same run_id does not create a duplicate row (BUG-19C-04 fix).
+    """
     with _db_lock:
         db = get_db()
-        db.execute(
-            "INSERT INTO container_logs (run_id, jid, folder, container_name, started_at, status)"
-            " VALUES (?, ?, ?, ?, ?, 'running')",
-            (run_id, jid, folder, container_name, started_at),
-        )
-        db.commit()
+        try:
+            db.execute(
+                "INSERT OR IGNORE INTO container_logs (run_id, jid, folder, container_name, started_at, status)"
+                " VALUES (?, ?, ?, ?, ?, 'running')",
+                (run_id, jid, folder, container_name, started_at),
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
 
 def log_container_finish(
@@ -1149,12 +1467,16 @@ def log_container_finish(
     """Update the container_logs row when a container finishes."""
     with _db_lock:
         db = get_db()
-        db.execute(
-            "UPDATE container_logs SET finished_at=?, status=?, stderr=?, stdout_preview=?, response_ms=?"
-            " WHERE run_id=?",
-            (finished_at, status, stderr[:32768] if stderr else "", stdout_preview[:2048] if stdout_preview else "", response_ms, run_id),
-        )
-        db.commit()
+        try:
+            db.execute(
+                "UPDATE container_logs SET finished_at=?, status=?, stderr=?, stdout_preview=?, response_ms=?"
+                " WHERE run_id=?",
+                (finished_at, status, stderr[:32768] if stderr else "", stdout_preview[:2048] if stdout_preview else "", response_ms, run_id),
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
 
 def get_container_logs(jid: str = "", limit: int = 50, status: str = "") -> list[dict]:

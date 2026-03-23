@@ -90,6 +90,7 @@ class GroupQueue:
         self._waiting_groups: list[str] = []        # 等待 concurrency 槽位的群組 JID 清單（FIFO）
         self._process_messages_fn: Optional[Callable[[str], Awaitable[bool]]] = None
         self._shutting_down: bool = False
+        self._retry_tasks: set = set()
 
     def set_process_messages_fn(self, fn: Callable[[str], Awaitable[bool]]) -> None:
         """
@@ -188,6 +189,21 @@ class GroupQueue:
                     "[%s] pending_tasks full (%d/%d), dropping task %s",
                     group_jid, len(state.pending_tasks), MAX_PENDING_TASKS_PER_GROUP, task_id,
                 )
+                try:
+                    from . import main as _main_mod
+                    _route = getattr(_main_mod, "route_outbound", None)
+                    if _route:
+                        # p16a-fix: drop deprecated get_event_loop().is_running() check.
+                        # create_task() raises RuntimeError when no loop is running;
+                        # catch that instead of pre-checking.
+                        asyncio.create_task(
+                            _route(group_jid, "⚠️ 排程任務佇列已滿，此任務無法執行，請稍後再試。"),
+                            name=f"task-queue-full-notify-{group_jid}"
+                        )
+                except RuntimeError:
+                    pass  # No running event loop — skip notification silently
+                except Exception as _ne:
+                    log.warning("Failed to send task-queue-full notification to %s: %s", group_jid, _ne)
                 return
             state.pending_tasks.append(task)
             log.debug(f"[{group_jid}] Container active — task {task_id} queued")
@@ -286,8 +302,26 @@ class GroupQueue:
         """
         state.retry_count += 1
         if state.retry_count > MAX_RETRIES:
-            log.error(f"[{group_jid}] Max retries exceeded — dropping (will retry on next message)")
+            log.error(f"[{group_jid}] Max retries exceeded — dropping message (will retry on next new message)")
             state.retry_count = 0
+            # Notify user so they are not left with a silent non-response
+            try:
+                from . import main as _main_mod
+                _route = getattr(_main_mod, "route_outbound", None)
+                if _route:
+                    # p16a-fix: use get_running_loop() instead of deprecated
+                    # get_event_loop() (deprecated in Python 3.10+, may return
+                    # a different loop when called from a non-default loop).
+                    # create_task() itself raises RuntimeError when no loop is
+                    # running, so wrap in try/except rather than checking first.
+                    asyncio.create_task(
+                        _route(group_jid, "⚠️ 系統暫時無法處理訊息，請稍後重新傳送。"),
+                        name=f"retry-exceeded-notify-{group_jid}"
+                    )
+            except RuntimeError:
+                pass  # No event loop running — silently skip notification
+            except Exception as _ne:
+                log.warning("Failed to send retry-exceeded notification to %s: %s", group_jid, _ne)
             return
 
         delay = BASE_RETRY_SECS * (2 ** (state.retry_count - 1))
@@ -296,9 +330,18 @@ class GroupQueue:
         async def _retry():
             await asyncio.sleep(delay)
             if not self._shutting_down:
+                # BUG-GQ-01 FIX: Reset retry_count to 0 before calling
+                # enqueue_message_check.  Without this, the guard
+                # ``if state.retry_count > 0: return`` in enqueue_message_check
+                # fires immediately and prevents the retry from starting a new
+                # container, permanently deadlocking the group's message queue.
+                _s = self._get_group(group_jid)
+                _s.retry_count = 0
                 self.enqueue_message_check(group_jid)
 
         t = asyncio.create_task(_retry(), name=f"retry-{group_jid}")
+        self._retry_tasks.add(t)
+        t.add_done_callback(self._retry_tasks.discard)
         t.add_done_callback(_task_done_callback)
 
     def _drain_group(self, group_jid: str) -> None:
@@ -371,6 +414,23 @@ class GroupQueue:
                 )
                 t.add_done_callback(_task_done_callback)
             elif state.pending_messages:
+                # BUG-GQ-02 FIX: honour the exponential-backoff circuit breaker.
+                # _drain_group already checks retry_count before dispatching
+                # pending_messages; _drain_waiting must do the same.  Without
+                # this guard a group that failed and is waiting for its backoff
+                # delay can slip out of _waiting_groups and get a new container
+                # immediately, bypassing the circuit breaker entirely.
+                if state.retry_count > 0:
+                    log.debug(
+                        "[%s] Retry pending in drain_waiting — deferring message processing",
+                        next_jid,
+                    )
+                    continue
+                # Fix: _run_for_group clears pending_messages at the start of its
+                # execution, but between here and there another call could observe
+                # pending_messages=True and enqueue a duplicate run.  Clear it now
+                # (synchronously, before creating the task) to prevent double-dispatch.
+                state.pending_messages = False
                 state.active = True
                 self._active_count += 1
                 t = asyncio.create_task(
@@ -384,12 +444,27 @@ class GroupQueue:
         No new tasks will be accepted after this call.
         """
         self._shutting_down = True
+        # p15b-fix: count in-memory pending_tasks that will be lost so operators
+        # can understand any missed scheduled task firings after restart.
+        # Note: these tasks remain in the DB with status='active' and next_run<=now,
+        # so the scheduler will re-dispatch them on the next poll cycle after restart.
+        _pending_task_count = sum(len(s.pending_tasks) for s in self._groups.values())
+        _pending_msg_count = sum(1 for s in self._groups.values() if s.pending_messages)
+        if _pending_task_count or _pending_msg_count:
+            log.warning(
+                "GroupQueue: shutdown with %d in-memory pending task(s) and %d group(s) with "
+                "pending messages. These will be recovered from DB on next startup.",
+                _pending_task_count, _pending_msg_count,
+            )
         log.info(f"GroupQueue: shutdown signalled (active containers: {self._active_count})")
 
     async def shutdown(self) -> None:
         """Signal shutdown — no new tasks will be started."""
         self._shutting_down = True
         log.info(f"GroupQueue shutting down (active containers: {self._active_count})")
+        for task in list(self._retry_tasks):
+            task.cancel()
+        self._retry_tasks.clear()
 
     async def wait_for_active(self, timeout: float = 30.0) -> None:
         """Wait until all in-flight containers finish, or until timeout expires.
@@ -404,9 +479,14 @@ class GroupQueue:
             timeout,
             self._active_count,
         )
-        deadline = asyncio.get_event_loop().time() + timeout
+        # p15d BUG-FIX (HIGH): asyncio.get_event_loop() is deprecated in Python
+        # 3.10+ and may return the wrong loop if called from a coroutine running
+        # on a non-default loop.  Use asyncio.get_running_loop() instead, which
+        # always returns the loop the current coroutine is executing on.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
         while self._active_count > 0:
-            remaining = deadline - asyncio.get_event_loop().time()
+            remaining = deadline - loop.time()
             if remaining <= 0:
                 log.warning(
                     "Graceful shutdown timeout: %d container(s) still active",

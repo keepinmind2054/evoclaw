@@ -100,9 +100,12 @@ async def evolution_loop(stop_event: asyncio.Event) -> None:
             _sync_timestamps_loaded = True
             try:
                 from host import db as _ts_db
-                _sync_rows = _ts_db.get_db().execute(
-                    "SELECT MAX(last_micro_sync), MAX(last_weekly_compound) FROM group_memory_sync"
-                ).fetchone()
+                # Hold _db_lock for the duration of the query, as required by
+                # the threading contract documented in db.get_db().
+                with _ts_db._db_lock:
+                    _sync_rows = _ts_db.get_db().execute(
+                        "SELECT MAX(last_micro_sync), MAX(last_weekly_compound) FROM group_memory_sync"
+                    ).fetchone()
                 if _sync_rows and _sync_rows[0]:
                     _last_micro_sync = float(_sync_rows[0])
                 if _sync_rows and _sync_rows[1]:
@@ -165,7 +168,7 @@ def _sync_evolve() -> None:
     """
     from host import db
     from host.evolution.fitness import compute_fitness
-    from host.evolution.genome import evolve_genome_from_fitness
+    from host.evolution.genome import evolve_genome_from_fitness, get_genome, is_genome_valid, reset_genome
 
     # 取得所有在過去 FITNESS_WINDOW_DAYS 天內有執行記錄的群組
     try:
@@ -207,11 +210,32 @@ def _sync_evolve() -> None:
                     pass
                 continue
 
+            # Fix p11d: detect and reset bad/corrupted genomes before evolving.
+            current_genome = get_genome(jid)
+            if not is_genome_valid(current_genome):
+                log.warning("Evolution: bad genome detected for %s — resetting to defaults", jid)
+                reset_genome(jid)
+                try:
+                    db.log_evolution_event(
+                        jid=jid,
+                        event_type="genome_reset",
+                        notes="Bad genome detected and reset to defaults before evolution cycle",
+                    )
+                except Exception:
+                    pass
+
             # 計算綜合適應度分數
             fitness = compute_fitness(jid, FITNESS_WINDOW_DAYS)
 
             # 計算平均回應時間（用於回答風格調整）
-            valid_times = [r["response_ms"] for r in runs if r.get("response_ms")]
+            # Fix p14c: mirror the filtering used in fitness.py — only include successful
+            # runs with a strictly positive response_ms.  The original truthiness check
+            # r.get("response_ms") admitted negative values and included failed runs,
+            # causing avg_ms passed to evolve_genome_from_fitness to be misleadingly slow.
+            valid_times = [
+                r["response_ms"] for r in runs
+                if r.get("response_ms") and r["response_ms"] > 0 and r.get("success")
+            ]
             avg_ms = sum(valid_times) / len(valid_times) if valid_times else 0
 
             # 執行基因組演化（根據適應度和速度調整行為參數）

@@ -5,6 +5,7 @@ import collections
 import email as email_lib
 import logging
 import os
+import re
 from email.mime.text import MIMEText
 from typing import Callable, Optional
 
@@ -23,7 +24,14 @@ log = logging.getLogger(__name__)
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.modify",  # needed to mark messages read
 ]
+
+# FIX(p13c-GM-1): Minimum poll interval to avoid Gmail API rate limits.
+# Gmail API free-tier quota is 250 quota units/user/second; list() costs 5 units.
+# A 10-second minimum still leaves plenty of headroom while preventing accidental
+# misconfiguration (e.g. GMAIL_POLL_INTERVAL=0) from hammering the API.
+_MIN_POLL_INTERVAL = 10.0
 
 
 class GmailChannel:
@@ -49,9 +57,17 @@ class GmailChannel:
         ])
         self._credentials_file = env.get("GMAIL_CREDENTIALS_FILE", "") or os.environ.get("GMAIL_CREDENTIALS_FILE", "")
         self._token_file = env.get("GMAIL_TOKEN_FILE", "") or os.environ.get("GMAIL_TOKEN_FILE", "gmail_token.json")
-        self._poll_interval = float(
+
+        # FIX(p13c-GM-1): enforce minimum poll interval of 10s to avoid rate limits.
+        raw_interval = float(
             env.get("GMAIL_POLL_INTERVAL", "") or os.environ.get("GMAIL_POLL_INTERVAL", "30")
         )
+        self._poll_interval = max(raw_interval, _MIN_POLL_INTERVAL)
+        if self._poll_interval != raw_interval:
+            log.warning(
+                "GMAIL_POLL_INTERVAL=%s is below the minimum of %.0fs — using %.0fs",
+                raw_interval, _MIN_POLL_INTERVAL, self._poll_interval,
+            )
 
     def _jid(self, email_address: str) -> str:
         return f"gmail:{email_address}"
@@ -77,8 +93,17 @@ class GmailChannel:
                 try:
                     creds.refresh(Request())
                 except Exception as exc:
-                    log.warning("Gmail token refresh failed: %s", exc)
-                    creds = None
+                    # FIX(p13c-GM-2): token refresh failure was logged at WARNING
+                    # level and then silently fell through to the interactive OAuth
+                    # flow, which hangs in a headless server environment.  Now we
+                    # log at ERROR and return False immediately so callers can
+                    # detect the failure and not start the poll loop with a broken
+                    # (expired) service object.
+                    log.error(
+                        "Gmail token refresh failed — channel disabled until token is renewed: %s",
+                        exc,
+                    )
+                    return False
             if not creds:
                 if not self._credentials_file or not os.path.exists(self._credentials_file):
                     log.warning("GMAIL_CREDENTIALS_FILE not set or not found — Gmail disabled")
@@ -148,7 +173,18 @@ class GmailChannel:
         try:
             result = await loop.run_in_executor(None, list_messages)
         except HttpError as exc:
-            log.error("Gmail list messages failed: %s", exc)
+            # FIX(p13c-GM-3): HTTP 401 means the token has been revoked or
+            # expired between polls.  Mark the channel disconnected so the
+            # poll loop stops rather than hammering the API with failed requests
+            # every poll interval.
+            if exc.resp.status == 401:
+                log.error(
+                    "Gmail API returned 401 — token revoked or expired. "
+                    "Channel disconnecting. Re-authenticate and restart.",
+                )
+                self._connected = False
+            else:
+                log.error("Gmail list messages failed: %s", exc)
             return
 
         messages = result.get("messages", [])
@@ -184,6 +220,33 @@ class GmailChannel:
             if not sender_email:
                 continue
 
+            # FIX(p13c-GM-4): bounce/autoresponder loop prevention.
+            # If the sender is the bot's own address, skip it entirely.
+            # Without this guard, replies from the bot trigger another
+            # pipeline call which sends another reply — infinite loop.
+            if self._email_address and sender_email.lower() == self._email_address.lower():
+                log.debug("Gmail: skipping message from self (%s)", sender_email)
+                continue
+
+            # FIX(p13c-GM-5): skip common auto-responder/bounce message types.
+            # "Auto-Submitted" header is set by RFC 3834-compliant auto-responders,
+            # vacation replies, delivery notifications, etc.
+            auto_submitted = headers.get("auto-submitted", "")
+            if auto_submitted and auto_submitted.lower() != "no":
+                log.debug(
+                    "Gmail: skipping auto-submitted message from %s (Auto-Submitted: %s)",
+                    sender_email, auto_submitted,
+                )
+                continue
+
+            # Check for X-Auto-Response-Suppress header (Outlook/Exchange)
+            if headers.get("x-auto-response-suppress"):
+                log.debug(
+                    "Gmail: skipping auto-response message from %s (X-Auto-Response-Suppress present)",
+                    sender_email,
+                )
+                continue
+
             # Extract plain text body
             body = self._extract_body(msg.get("payload", {}))
             if not body:
@@ -191,18 +254,27 @@ class GmailChannel:
 
             jid = self._jid(sender_email)
 
-            await self._on_message(
-                jid=jid,
-                sender=sender_email,
-                sender_name=sender_raw,
-                content=body,
-                is_group=False,
-                channel="gmail",
-            )
+            try:
+                await self._on_message(
+                    jid=jid,
+                    sender=sender_email,
+                    sender_name=sender_raw,
+                    content=body,
+                    is_group=False,
+                    channel="gmail",
+                )
+            except Exception as exc:
+                # FIX(p13c-GM-6): exceptions in _on_message were unhandled here;
+                # the outer _poll_loop catch-all would abort the entire batch,
+                # dropping all remaining messages in this poll cycle.  Catch per
+                # message so other messages in the batch can still be processed.
+                log.error(
+                    "Gmail _on_message raised for sender=%s msg_id=%s: %s",
+                    sender_email, msg_id, exc, exc_info=True,
+                )
 
     def _extract_email(self, raw: str) -> str:
         """Extract email address from 'Name <email>' or plain 'email' format."""
-        import re
         match = re.search(r"<([^>]+)>", raw)
         if match:
             return match.group(1).strip()
@@ -255,10 +327,20 @@ class GmailChannel:
             return
         recipient = parts[1]
 
+        # FIX(p13c-GM-4b): never send email to ourselves — would start a loop.
+        if recipient.lower() == self._email_address.lower():
+            log.warning("Gmail send_message: refusing to send to self (%s)", recipient)
+            return
+
         mime_msg = MIMEText(text)
         mime_msg["to"] = recipient
         mime_msg["from"] = self._email_address
         mime_msg["subject"] = f"Re: {config.ASSISTANT_NAME}"
+        # FIX(p13c-GM-5b): set Auto-Submitted so our replies are not re-ingested
+        # by auto-responders on the remote side, and so our own poll loop skips
+        # them if the sent message ends up in the inbox (e.g. a misconfigured
+        # filter or a shared mailbox).
+        mime_msg["Auto-Submitted"] = "auto-replied"
 
         raw = base64.urlsafe_b64encode(mime_msg.as_bytes()).decode()
 

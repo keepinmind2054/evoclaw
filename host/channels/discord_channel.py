@@ -2,6 +2,7 @@
 import asyncio
 import concurrent.futures
 import logging
+import re
 import threading
 from typing import Callable, Optional
 
@@ -62,6 +63,23 @@ class DiscordChannel:
             self._connected = True
             log.info("Discord channel connected as %s", self._client.user)
 
+        # Capture the main event loop NOW (before the background thread starts)
+        # so the on_message handler can forward callbacks to it.
+        # p17c BUG-FIX (CRITICAL): the Discord client runs its own event loop in
+        # a background thread (self._loop).  When discord.py calls the on_message
+        # handler it runs on self._loop.  If on_message_callback (_on_message in
+        # main.py) is awaited directly on self._loop, every asyncio.create_task()
+        # call inside it schedules work on the Discord loop — not the main
+        # application loop.  GroupQueue tasks, dedup checks, route_outbound, and
+        # all other coroutines in the pipeline then execute on the wrong loop,
+        # breaking per-group serialization and causing RuntimeError when tasks try
+        # to access main-loop-bound asyncio primitives (Locks, Events, etc.).
+        # Fix: capture the main event loop here (connect() is always called from
+        # the main coroutine) and forward the callback to it via
+        # run_coroutine_threadsafe().  The Discord loop only does the lightweight
+        # message parsing; all application logic runs on the correct main loop.
+        _main_loop = asyncio.get_running_loop()
+
         @self._client.event
         async def on_message(message: discord.Message):
             if message.author.bot:
@@ -84,6 +102,23 @@ class DiscordChannel:
             is_dm = isinstance(message.channel, discord.DMChannel)
             is_group = not is_dm
 
+            # Normalize Discord @mention of the bot (e.g. <@1234567890> or <@!1234567890>)
+            # to the configured trigger word so that tagging the bot works naturally.
+            # e.g.  "<@1483370646770810881> 哈囉"  →  "@Eve 哈囉"
+            # Also strip any other user/role @mentions (e.g. <@!999>) that appear in the
+            # message so that TRIGGER_PATTERN.match() (anchored at start) is not confused
+            # by leading mention tags for other users.
+            if self._client.user and self._client.user in message.mentions:
+                # Remove the bot's own mention and prepend the trigger word
+                normalized = re.sub(rf"<@!?{self._client.user.id}>", "", text).strip()
+                # Strip any remaining user/role mentions from the normalized text
+                normalized = re.sub(r"<@[!&]?\d+>", "", normalized).strip()
+                text = f"@{config.ASSISTANT_NAME} {normalized}".strip()
+            else:
+                # Even without a bot mention, strip raw Discord mention syntax that could
+                # appear at the start of the message and break TRIGGER_PATTERN.match().
+                text = re.sub(r"^(<@[!&]?\d+>\s*)+", "", text).strip()
+
             groups = {g["jid"]: g for g in registered_groups}
             group = groups.get(jid)
             if group and group.get("requires_trigger", True):
@@ -96,14 +131,29 @@ class DiscordChannel:
             sender = str(message.author.id)
             sender_name = message.author.display_name or message.author.name
 
-            await on_message_callback(
-                jid=jid,
-                sender=sender,
-                sender_name=sender_name,
-                content=text,
-                is_group=is_group,
-                channel="discord",
-            )
+            # p17c BUG-FIX (CRITICAL): forward the callback to the main event
+            # loop via run_coroutine_threadsafe() so all downstream coroutines
+            # (GroupQueue.enqueue_message_check, asyncio.create_task, Locks, etc.)
+            # execute on the main loop where they were created.
+            # We do NOT await the future here because discord.py's on_message
+            # must return promptly; the actual processing is decoupled.
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    on_message_callback(
+                        jid=jid,
+                        sender=sender,
+                        sender_name=sender_name,
+                        content=text,
+                        is_group=is_group,
+                        channel="discord",
+                    ),
+                    _main_loop,
+                )
+            except Exception as _exc:
+                log.error(
+                    "Discord on_message: failed to forward callback for jid=%s: %s",
+                    jid, _exc, exc_info=True,
+                )
 
         # Run the discord client in a background thread with its own event loop
         self._loop = asyncio.new_event_loop()
@@ -175,17 +225,34 @@ class DiscordChannel:
                 log.error("Discord loop call failed: %s", exc)
                 return None
 
-        return await asyncio.get_event_loop().run_in_executor(None, _get_result)
+        # p17c BUG-FIX (MEDIUM): asyncio.get_event_loop() is deprecated in Python
+        # 3.10+ when called from a coroutine.  Use get_running_loop() which always
+        # returns the loop the current coroutine is executing on.
+        return await asyncio.get_running_loop().run_in_executor(None, _get_result)
 
     async def send_message(self, jid: str, text: str) -> None:
         if not self.is_connected():
             log.warning("Discord send_message called but channel not connected")
             return
         try:
+            # Discord enforces a hard 2000-character limit per message.
+            # Split long messages into chunks rather than silently truncating so
+            # the user sees the full response.
+            # Fix(p12a): the previous `range(0, max(len(text), 1), …)` passed
+            # `range(0, 1, 2000)` when text was empty, producing chunks=[""].
+            # Sending an empty string to Discord raises a 400 Bad Request.
+            # Guard against empty text before building the chunk list.
+            if not text:
+                log.debug("Discord send_message: empty text for jid=%s — skipping", jid)
+                return
+            _DISCORD_LIMIT = 2000
+            chunks = [text[i:i + _DISCORD_LIMIT] for i in range(0, len(text), _DISCORD_LIMIT)]
+
             async def _send():
                 channel = await self._get_channel(jid)
                 if channel is not None:
-                    await channel.send(text)
+                    for chunk in chunks:
+                        await channel.send(chunk)
             await self._run_in_discord_loop(_send())
         except Exception as exc:
             log.error("Discord send_message exception: %s", exc)

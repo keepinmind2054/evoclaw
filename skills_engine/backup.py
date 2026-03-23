@@ -16,10 +16,23 @@ def create_backup(file_paths: list[str | Path]) -> None:
     """Backup files before applying a skill. Non-existent files get a tombstone."""
     backup_dir = _get_backup_dir()
     backup_dir.mkdir(parents=True, exist_ok=True)
+    cwd = Path.cwd()
 
     for file_path in file_paths:
         abs_path = Path(file_path).resolve()
-        relative_path = abs_path.relative_to(Path.cwd())
+        # BUG-FIX: abs_path.relative_to(cwd) raises ValueError if the file is
+        # outside cwd (e.g. an absolute path or a symlink that resolves outside
+        # the project).  Skip such entries with a warning instead of crashing
+        # the entire backup operation.
+        try:
+            relative_path = abs_path.relative_to(cwd.resolve())
+        except ValueError:
+            import logging
+            logging.getLogger(__name__).warning(
+                "backup: skipping path outside project root: %s", abs_path
+            )
+            continue
+
         backup_path = backup_dir / relative_path
         backup_path.parent.mkdir(parents=True, exist_ok=True)
 

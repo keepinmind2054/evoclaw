@@ -1,8 +1,8 @@
 python-telegram-bot>=21.0
 croniter>=3.0.0
 pyyaml>=6.0
-aiohttp>=3.9.0
-aiofiles>=23.0
+aiohttp>=3.10.11  # CVE-2024-52304 (HTTP request smuggling) fixed in 3.10.11; CVE-2024-23334 (dir traversal) fixed in 3.9.2
+# aiofiles: removed — not imported anywhere in host/; re-add if host code uses aiofiles in future
 psutil>=5.9.0
 
 # Slack
@@ -18,4 +18,11 @@ google-auth-httplib2>=0.2.0
 google-auth-oauthlib>=1.2.0
 
 # Phase 1/2 (UnifiedClaw)
-websockets>=12.0  # Phase 1: WSBridge + SdkApi WebSocket servers
+sqlite-vec>=0.1.0  # Phase 1: Vector semantic search (optional, graceful fallback)
+websockets>=12.0   # Phase 1: WSBridge bidirectional IPC + SdkApi WebSocket servers
+
+# Phase 4C: PostgreSQL support (optional — only needed when DATABASE_URL=postgresql://... is set)
+# psycopg2-binary>=2.9.0  # optional, for PostgreSQL support
+
+# Phase 8C: inotify hybrid backend (optional — Linux only, reduces IPC latency from ~500ms to <20ms)
+inotify-simple>=1.3.0; sys_platform == "linux"

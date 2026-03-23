@@ -1,13 +1,27 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  EvoClaw launchd service for macOS.
+
+  To install:
+    bash scripts/install_launchd.sh
+
+  Or manually (replace {{PROJECT_ROOT}} and {{PYTHON_PATH}} with real values):
+    cp launchd/com.nanoclaw.plist ~/Library/LaunchAgents/com.nanoclaw.plist
+    launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
+
+  Logs:
+    tail -f {{PROJECT_ROOT}}/logs/evoclaw.log
+    tail -f {{PROJECT_ROOT}}/logs/evoclaw.error.log
+-->
 <plist version="1.0">
 <dict>
     <key>Label</key>
     <string>com.evoclaw</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{{NODE_PATH}}</string>
-        <string>{{PROJECT_ROOT}}/dist/index.js</string>
+        <string>{{PYTHON_PATH}}</string>
+        <string>{{PROJECT_ROOT}}/run.py</string>
     </array>
     <key>WorkingDirectory</key>
     <string>{{PROJECT_ROOT}}</string>
@@ -21,12 +35,12 @@
         <string>{{HOME}}/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>HOME</key>
         <string>{{HOME}}</string>
-        <key>ASSISTANT_NAME</key>
-        <string>Eve</string>
     </dict>
     <key>StandardOutPath</key>
     <string>{{PROJECT_ROOT}}/logs/evoclaw.log</string>
     <key>StandardErrorPath</key>
     <string>{{PROJECT_ROOT}}/logs/evoclaw.error.log</string>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
 </dict>
 </plist>

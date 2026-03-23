@@ -79,17 +79,33 @@ class TelegramChannel:
                     groups = {g["jid"]: g for g in self._registered_groups}
                     group = groups.get(jid)
                     if group and group.get("requires_trigger", True):
-                        if not text.lower().startswith(f"@{config.ASSISTANT_NAME.lower()}"):
+                        # Fix(p12a): use TRIGGER_PATTERN (regex with \b) for consistency
+                        # with Discord and _process_group_messages; the previous
+                        # str.startswith() check had no word-boundary so "@Eveline"
+                        # would incorrectly pass when ASSISTANT_NAME="Eve".
+                        if not config.TRIGGER_PATTERN.match(text):
                             return
 
-                    await self._on_message(
-                        jid=jid,
-                        sender=sender,
-                        sender_name=sender_name,
-                        content=text,
-                        is_group=update.effective_chat.type in ("group", "supergroup"),
-                        channel="telegram",
-                    )
+                    # Fix(p12a): wrap pipeline call in try/except so that any
+                    # exception raised inside _on_message (RBAC, DB, immune check,
+                    # dedup) does not propagate back into python-telegram-bot's
+                    # dispatcher and crash the update handler, which would cause
+                    # that update to be silently dropped and logged as an unhandled
+                    # application error.
+                    try:
+                        await self._on_message(
+                            jid=jid,
+                            sender=sender,
+                            sender_name=sender_name,
+                            content=text,
+                            is_group=update.effective_chat.type in ("group", "supergroup"),
+                            channel="telegram",
+                        )
+                    except Exception as _exc:
+                        log.error(
+                            "Telegram handle: unhandled exception in _on_message for jid=%s: %s",
+                            jid, _exc, exc_info=True,
+                        )
 
                 self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
 
@@ -143,8 +159,12 @@ class TelegramChannel:
                 )
                 await self._app.initialize()
                 await self._app.start()
-                await self._app.updater.start_polling()
-                log.info("Telegram channel connected")
+                # drop_pending_updates=True: flush all messages that accumulated
+                # while the bot was offline or blocked (e.g. during RBAC lockout,
+                # restart, maintenance). Without this, every restart re-processes
+                # all queued messages from Telegram's server-side buffer.
+                await self._app.updater.start_polling(drop_pending_updates=True)
+                log.info("Telegram channel connected (pending updates dropped)")
                 return  # success
             except Exception as e:
                 err_str = str(e).lower()
@@ -178,8 +198,15 @@ class TelegramChannel:
     async def send_message(self, jid: str, text: str) -> None:
         if not self._app:
             return
-        chat_id = int(jid.replace("tg:", ""))
-        await self._app.bot.send_message(chat_id=chat_id, text=text)
+        try:
+            chat_id = int(jid.replace("tg:", ""))
+        except ValueError:
+            log.error("send_message: malformed Telegram JID %r — cannot parse chat_id", jid)
+            return
+        try:
+            await self._app.bot.send_message(chat_id=chat_id, text=text)
+        except Exception as exc:
+            log.error("send_message: failed to deliver to %s: %s", jid, exc)
 
     async def send_file(self, jid: str, file_path: str, caption: str = "") -> None:
         """Send a document/file to a Telegram chat.
@@ -204,7 +231,11 @@ class TelegramChannel:
             await self.send_message(jid, f"[File not found: {p.name}]")
             return
 
-        chat_id = int(jid.replace("tg:", ""))
+        try:
+            chat_id = int(jid.replace("tg:", ""))
+        except ValueError:
+            log.error("send_file: malformed Telegram JID %r — cannot parse chat_id", jid)
+            return
 
         try:
             # Stream the file — do NOT read() the whole thing into memory.

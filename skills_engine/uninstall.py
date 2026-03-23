@@ -48,9 +48,11 @@ def uninstall_skill(skill_name: str, project_root: Path | None = None) -> Uninst
         skill_dirs[sname] = d
 
     # Check for custom modifications on the skill being removed
-    state = read_state()
+    # BUG-FIX: read state once here; we will re-read it inside the lock before
+    # writing so we don't overwrite concurrent changes.
+    state_snapshot = read_state()
     custom_patch_warning = None
-    for mod in state.custom_modifications:
+    for mod in state_snapshot.custom_modifications:
         skill_state = next((s for s in applied if s.name == skill_name), None)
         if skill_state:
             for f in skill_state.file_hashes:
@@ -98,9 +100,13 @@ def uninstall_skill(skill_name: str, project_root: Path | None = None) -> Uninst
                 error=result.error,
             )
 
-        # Remove the uninstalled skill from state
-        state.applied_skills = [s for s in state.applied_skills if s.name != skill_name]
-        write_state(state)
+        # BUG-FIX: re-read state inside the lock so we don't clobber changes
+        # that happened between the pre-lock read and this write.
+        current_state = read_state()
+        current_state.applied_skills = [
+            s for s in current_state.applied_skills if s.name != skill_name
+        ]
+        write_state(current_state)
 
         return UninstallResult(
             success=True,

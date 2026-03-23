@@ -4,14 +4,14 @@ EvoClaw Host — Main Entry Point
 Orchestrates message polling, container execution, IPC, and scheduling.
 """
 import asyncio
-import collections
+import contextlib
 import hashlib
 import logging
 import os
 import signal
 import time
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 from pathlib import Path
 
 # ── Per-group consecutive failure tracking (prevents infinite retry loops) ────
@@ -26,6 +26,11 @@ _GROUP_FAIL_COOLDOWN = 60.0  # seconds
 # One error notification per group per _ERROR_NOTIFY_COOLDOWN seconds.
 _error_notify_times: dict[str, float] = {}
 _ERROR_NOTIFY_COOLDOWN = 300.0  # 5 minutes
+# p15b-fix: lock to prevent TOCTOU race on _error_notify_times between
+# concurrent on_error callbacks for the same group.  Two coroutines that both
+# check (now - last < cooldown) simultaneously can both pass the gate and both
+# send a notification, defeating the rate limiter.
+_error_notify_lock: asyncio.Lock | None = None  # initialised in main()
 
 # ── Monitor group (watchdog destination) ──────────────────────────────────────
 # If MONITOR_JID is set in .env, error notifications are also forwarded there.
@@ -56,7 +61,7 @@ from .evolution import check_message as immune_check, evolution_loop
 from .health_monitor import health_monitor_loop
 from .memory import append_warm_log
 
-# Phase 1 (UnifiedClaw): Universal Memory Bus + WSBridge + Agent Identity
+# Phase 1 (UnifiedClaw): Universal Memory Bus + WSBridge + Agent Identity (guarded)
 try:
     from .memory.memory_bus import MemoryBus as _MemoryBus
     from .identity.agent_identity import AgentIdentityStore as _AgentIdentityStore
@@ -64,7 +69,7 @@ try:
     _PHASE1_AVAILABLE = True
 except ImportError as _e:
     _PHASE1_AVAILABLE = False
-    print(f"[Phase1] Components not available: {_e}")
+    logging.getLogger("evoclaw").warning("[Phase1] Components not available: %s", _e)
 
 # Phase 2 (UnifiedClaw): SDK API + Memory Summarizer
 try:
@@ -75,8 +80,54 @@ except ImportError as _e2:
     _PHASE2_AVAILABLE = False
     _SdkApi = None
     _MemorySummarizer = None
-    print(f"[Phase2] Components not available: {_e2}")
+    logging.getLogger("evoclaw").warning("[Phase2] Components not available: %s", _e2)
 
+# Phase 3: Bot Registry + RBAC
+try:
+    from .identity.bot_registry import BotRegistry as _BotRegistry, bootstrap_known_bots as _bootstrap_bots
+    from .rbac.roles import Permission as _Permission, RBACStore as _RBACStore, Role as _Role
+    _PHASE3_AVAILABLE = True
+except ImportError as _e3p:
+    _PHASE3_AVAILABLE = False
+    _BotRegistry = None
+    _bootstrap_bots = None
+    _Permission = None
+    _RBACStore = None
+    _Role = None
+    logging.getLogger("evoclaw").warning("[Phase3] Components not available: %s", _e3p)
+
+
+def _task_done_callback_main(task: "asyncio.Task") -> None:
+    """Log unhandled exceptions from fire-and-forget tasks created in main().
+
+    Mirrors group_queue._task_done_callback so all background tasks get the
+    same error visibility regardless of which module created them.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.error("Unhandled exception in background task %s: %s", task.get_name(), exc, exc_info=exc)
+
+
+async def _with_fail_lock(fn) -> None:
+    """Execute async callable *fn* inside _group_fail_lock.
+
+    The lock is None during the brief startup window before main() initialises
+    it.  Sites that mutate _group_fail_counts/_group_fail_timestamps call this
+    helper to avoid duplicating the None-guard boilerplate.  When the lock is
+    not yet available, *fn* is called without the lock — the same behaviour the
+    original per-site else branches provided.
+
+    Note: the consecutive-failure gate in _process_group_messages is kept inline
+    because it may issue an early return from the enclosing coroutine, which
+    cannot be propagated out of a nested async callback.
+    """
+    if _group_fail_lock is not None:
+        async with _group_fail_lock:
+            await fn()
+    else:
+        await fn()
 
 
 async def _discord_notify(content: str) -> None:
@@ -127,33 +178,36 @@ async def _store_bot_reply(jid: str, text: str) -> None:
         log.error("Failed to store bot response in DB for %s: %s", jid, e)
 
 
-def _configure_logging() -> None:
-    """Configure logging format based on LOG_FORMAT env var.
+def _setup_logging() -> None:
+    """Configure root logger based on LOG_FORMAT and LOG_LEVEL env vars.
 
     LOG_FORMAT=json  → emit newline-delimited JSON (compatible with Loki/Datadog/CloudWatch)
     LOG_FORMAT=text  → human-readable text (default)
+    LOG_LEVEL        → logging level (default: INFO)
     """
-    level = getattr(logging, config.LOG_LEVEL, logging.INFO)
-    if config.LOG_FORMAT == "json":
-        try:
-            from pythonjsonlogger import jsonlogger  # type: ignore
-            handler = logging.StreamHandler()
-            handler.setFormatter(
-                jsonlogger.JsonFormatter(
-                    "%(asctime)s %(levelname)s %(name)s %(message)s"
-                )
-            )
-            logging.root.setLevel(level)
-            logging.root.addHandler(handler)
-            return
-        except ImportError:
-            pass  # python-json-logger not installed — fall back to text
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+    from host.log_formatter import JsonFormatter
 
-_configure_logging()
+    level = getattr(logging, config.LOG_LEVEL, logging.INFO)
+    log_format = config.LOG_FORMAT
+
+    handler = logging.StreamHandler()
+
+    if log_format == "json":
+        handler.setFormatter(JsonFormatter())
+    else:
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)-8s %(name)s — %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+
+    root = logging.getLogger()
+    root.setLevel(level)
+    # Remove any existing handlers to avoid duplicate output
+    root.handlers.clear()
+    root.addHandler(handler)
+
+
+_setup_logging()
 log = logging.getLogger("evoclaw")
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -176,6 +230,19 @@ _self_update_requested: bool = False
 
 # 共用的停止事件：shutdown 時 set()，讓所有等待中的 sleep 立即醒來
 _stop_event: asyncio.Event | None = None
+
+# Leader election instance; None when leader election is disabled.
+# Set in main() after initialization; read by _message_loop to gate processing.
+_leader = None
+
+# RBAC store instance; None when Phase 3 is not available or not yet initialized.
+# Set in main() after initialization; read by _on_message to gate message pipeline.
+_rbac_store = None
+
+# Phase 1 (UnifiedClaw): AgentIdentityStore instance.
+# Defined as module-level global so _process_group_messages (a module-level function)
+# can access it without NameError.  main() sets this before starting the event loop.
+_identity_store = None
 
 # 允許傳送訊息的發送者白名單（phone number 或 JID 集合）
 _sender_allowlist: set[str] = set()
@@ -214,12 +281,48 @@ def _is_rate_limited(jid: str) -> bool:
     return False
 
 
+# ── Per-sender rate limiting (p16d) ───────────────────────────────────────────
+# Prevents a single user from flooding the bot with rapid-fire messages.
+# A sender that exceeds SENDER_RATE_LIMIT_MAX messages within
+# SENDER_RATE_LIMIT_WINDOW_SECS will be rate-limited and notified.
+# Config: SENDER_RATE_LIMIT_MAX (default 5), SENDER_RATE_LIMIT_WINDOW_SECS (default 60)
+_sender_msg_timestamps: dict[str, deque] = {}  # sender_id → deque of float timestamps
+# Track the last time we notified a sender they're rate-limited, to avoid spamming them.
+_sender_rate_limit_notify: dict[str, float] = {}
+_SENDER_RATE_NOTIFY_COOLDOWN = 30.0  # seconds between rate-limit notifications to same sender
+
+
+def _is_sender_rate_limited(sender: str) -> bool:
+    """Return True if this individual sender has exceeded the per-sender rate limit.
+
+    Config via env vars:
+      SENDER_RATE_LIMIT_MAX          (default 5 messages)
+      SENDER_RATE_LIMIT_WINDOW_SECS  (default 60 seconds)
+    """
+    max_msgs = int(os.environ.get("SENDER_RATE_LIMIT_MAX", 5))
+    window = float(os.environ.get("SENDER_RATE_LIMIT_WINDOW_SECS", 60))
+    now = time.time()
+    q = _sender_msg_timestamps.setdefault(sender, deque(maxlen=max_msgs * 2))
+    while q and now - q[0] > window:
+        q.popleft()
+    if len(q) >= max_msgs:
+        return True
+    q.append(now)
+    return False
+
+
 # ── Message deduplication fence ───────────────────────────────────────────────
 # Short-lived in-memory set of recently-seen message fingerprints.
 # Prevents duplicate processing caused by webhook retries or channel double-delivery.
 # Uses an OrderedDict as a bounded LRU cache: oldest entries are evicted when full.
 _DEDUP_MAX = 1000  # maximum entries before oldest is evicted
-_seen_msg_fingerprints: collections.OrderedDict = collections.OrderedDict()
+# Fix(p12a): store (insertion_time, True) instead of bare True so that entries
+# older than _DEDUP_TTL_SECS are expired on the next lookup.  Without TTL, a
+# fingerprint inserted once permanently blocks an identical message from ever
+# being re-processed (e.g. a user legitimately resending the same text hours
+# later, or after the DB was cleared and the user retries the same prompt).
+_DEDUP_TTL_SECS = 300.0  # 5 minutes — safely covers all webhook retry windows
+_seen_msg_fingerprints: OrderedDict = OrderedDict()
 _dedup_lock: asyncio.Lock | None = None  # initialized in main() after event loop starts
 
 
@@ -227,18 +330,29 @@ async def _is_duplicate_message(jid: str, sender: str, content: str) -> bool:
     """Return True if this (jid, sender, content) combination was seen recently.
 
     A SHA-256 fingerprint of the three values is used as the key to bound memory
-    usage. If the dedup set is full, the oldest entry is evicted (LRU eviction).
+    usage. If the dedup store is full, the oldest entry is evicted (LRU eviction).
+    Entries older than _DEDUP_TTL_SECS are also expired so legitimate re-sends
+    after the TTL window are not mistakenly blocked.
 
     The entire check-then-insert is wrapped in a single async with _dedup_lock:
     block so no two coroutines can check/insert simultaneously (Fix #105).
     """
+    if _dedup_lock is None:
+        # Event loop not yet started (e.g. during testing) — skip dedup rather than crash
+        log.warning("_is_duplicate_message called before event loop init — dedup skipped")
+        return False
     raw = f"{jid}\x00{sender}\x00{content}"
     fp = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()
+    now = time.time()
     async with _dedup_lock:
         if fp in _seen_msg_fingerprints:
-            _seen_msg_fingerprints.move_to_end(fp)  # mark as recently used
-            return True
-        _seen_msg_fingerprints[fp] = True
+            inserted_at = _seen_msg_fingerprints[fp]
+            if now - inserted_at < _DEDUP_TTL_SECS:
+                _seen_msg_fingerprints.move_to_end(fp)  # mark as recently used
+                return True
+            # TTL expired — treat as a fresh message and overwrite the entry
+            del _seen_msg_fingerprints[fp]
+        _seen_msg_fingerprints[fp] = now
         if len(_seen_msg_fingerprints) > _DEDUP_MAX:
             _seen_msg_fingerprints.popitem(last=False)  # evict oldest
         return False
@@ -279,10 +393,10 @@ def _cleanup_orphan_tasks() -> None:
         or t.get("chat_jid") not in registered_jids
     ]
     for t in bad:
-        log.warning(f"Removing orphan task {t['id']}: chat_jid={t.get('chat_jid')!r}")
+        log.warning("Removing orphan task %s: chat_jid=%r", t['id'], t.get('chat_jid'))
         db.delete_task(t["id"])
     if bad:
-        log.info(f"Cleaned up {len(bad)} orphan task(s)")
+        log.info("Cleaned up %d orphan task(s)", len(bad))
 
 def _get_groups() -> list[dict]:
     """回傳目前登記的群組清單，供 IPC watcher 等元件查詢。"""
@@ -386,15 +500,59 @@ async def _on_message(jid: str, sender: str, sender_name: str, content: str,
     真正的處理由 _message_loop 透過 GroupQueue 排程。
     """
     if not is_sender_allowed(sender, _sender_allowlist):
-        log.debug(f"Sender {sender} blocked by allowlist")
+        log.debug("Sender %s blocked by allowlist", sender)
+        return
+
+    # RBAC enforcement: check that the sender has TASK_SUBMIT permission before
+    # allowing the message into the pipeline.  When _rbac_store is None (Phase 3
+    # not available or not yet initialized) we fall through and allow all messages
+    # so the system degrades gracefully rather than blocking all traffic.
+    if _rbac_store is not None:
+        try:
+            if not _rbac_store.has_permission(sender, _Permission.TASK_SUBMIT):
+                log.warning(
+                    "RBAC: sender %s lacks task:submit permission — message rejected (jid=%s)",
+                    sender, jid,
+                )
+                # p16d: notify the sender so they are not left wondering why the bot is silent.
+                try:
+                    from .router import route_outbound as _ro_rbac
+                    await _ro_rbac(jid, "⚠️ 您目前沒有使用此機器人的權限，請聯繫管理員申請開通。")
+                except Exception as _rbac_notify_exc:
+                    log.debug("RBAC: failed to send rejection notice: %s", _rbac_notify_exc)
+                return
+        except (AttributeError, TypeError) as _rbac_exc:
+            log.error("RBAC check error — rejecting message for safety: %s", _rbac_exc)
+            return
+
+    # p16d: Per-sender rate limit — prevent a single user from flooding the bot.
+    # Notifies the sender at most once per _SENDER_RATE_NOTIFY_COOLDOWN seconds.
+    if _is_sender_rate_limited(sender):
+        log.debug(
+            "Sender rate limit exceeded for sender=%s in group=%s — message dropped", sender, jid
+        )
+        now = time.time()
+        last_notify = _sender_rate_limit_notify.get(sender, 0.0)
+        if now - last_notify >= _SENDER_RATE_NOTIFY_COOLDOWN:
+            _sender_rate_limit_notify[sender] = now
+            try:
+                from .router import route_outbound as _ro_rl
+                await _ro_rl(jid, "⚠️ 您傳送訊息的速度太快，請稍等片刻再試。")
+            except Exception as _rl_exc:
+                log.debug("sender rate limit: failed to notify %s: %s", sender, _rl_exc)
         return
 
     # Per-group rate limit: drop excess messages to prevent one group from
-    # starving others.  Logged at DEBUG to avoid log spam under sustained load.
+    # starving others.  Notifies user so they know the system is throttling.
     if _is_rate_limited(jid):
         log.debug(
             "Rate limit exceeded for group %s (sender=%s) — message dropped", jid, sender
         )
+        try:
+            from .router import route_outbound as _ro_grp
+            await _ro_grp(jid, "⚠️ 此群組的訊息量已達上限，請稍等片刻後再試。")
+        except Exception as _grp_rl_exc:
+            log.debug("group rate limit: failed to notify %s: %s", jid, _grp_rl_exc)
         return
 
     # 去重複檢查：防止頻道 webhook 重試造成相同訊息被處理兩次
@@ -406,7 +564,23 @@ async def _on_message(jid: str, sender: str, sender_name: str, content: str,
     # 在儲存到 DB 之前攔截，惡意訊息完全不進入處理流程
     safe, threat_type = immune_check(content, sender)
     if not safe:
-        log.warning(f"Immune system blocked message from {sender}: {threat_type}")
+        log.warning("Immune system blocked message from %s: %s", sender, threat_type)
+        # Fix p11d: inform the user so they don't silently wonder why they got no reply.
+        # Use a brief, non-revealing message to avoid giving attackers feedback about
+        # which specific pattern triggered the block.
+        try:
+            from .router import route_outbound
+            if threat_type == "blocked":
+                reply = "⚠️ 您的帳號已被系統暫時限制，請聯繫管理員。"
+            elif threat_type == "injection":
+                reply = "⚠️ 偵測到不允許的指令格式，訊息未被處理。"
+            elif threat_type == "spam":
+                reply = "⚠️ 偵測到重複訊息，請稍後再試。"
+            else:
+                reply = "⚠️ 訊息未被處理。"
+            await route_outbound(jid, reply)
+        except Exception as _immune_reply_exc:
+            log.debug("immune: failed to send block notification: %s", _immune_reply_exc)
         return
 
     ts = int(time.time() * 1000)
@@ -416,7 +590,44 @@ async def _on_message(jid: str, sender: str, sender_name: str, content: str,
     # 更新 chats 表的最後訊息時間與頻道資訊（用於管理介面顯示）
     db.store_chat_metadata(jid, sender_name, ts, channel, is_group)
 
+    # p16d: First-run welcome message — sent the very first time a group or DM is seen.
+    # Helps new users understand how to interact with the bot without reading docs.
+    try:
+        _is_new_chat = db.get_state(f"welcomed:{jid}") is None
+        if _is_new_chat:
+            db.set_state(f"welcomed:{jid}", "1")
+            _trigger = config.ASSISTANT_NAME
+            _welcome = (
+                f"👋 你好！我是 {_trigger}，很高興認識你！\n\n"
+                f"在群組中，請用「@{_trigger}」開頭呼叫我（例如：@{_trigger} 今天天氣如何？）。\n"
+                f"私訊我可以直接傳訊息，不需要特殊指令。\n\n"
+                f"我正在準備中，請稍候片刻…"
+            )
+            try:
+                await route_outbound(jid, _welcome)
+            except Exception as _welcome_exc:
+                log.debug("first-run welcome failed for %s: %s", jid, _welcome_exc)
+    except Exception as _fr_exc:
+        log.debug("first-run check failed for %s: %s", jid, _fr_exc)
+
+    # Fix(p12a): immediately trigger message processing instead of waiting up to
+    # POLL_INTERVAL (default 2 s) for _message_loop to notice the new row.
+    # GroupQueue serialises per-group so this is safe to call concurrently.
+
+    # p16d: Queue depth feedback — if the group already has a container running,
+    # tell the user they are in a queue so they know their message was received.
+    _group_state = _group_queue._get_group(jid)
+    _already_active = _group_state.active
+    _group_queue.enqueue_message_check(jid)
+    if _already_active:
+        try:
+            await route_outbound(jid, "⏳ 正在處理上一則訊息，您的請求已加入佇列，請稍候…")
+        except Exception as _queue_notify_exc:
+            log.debug("queue depth notify failed for %s: %s", jid, _queue_notify_exc)
+
     # 在訊息儲存後才送出 typing indicator，確保 DB 寫入不會被 network I/O 延遲阻塞
+    # p16d: typing indicator is also renewed every 4 seconds while the container runs;
+    # see the _typing_renewal_loop started in _process_group_messages.
     ch = find_channel(jid)
     if ch and hasattr(ch, "send_typing"):
         try:
@@ -437,24 +648,42 @@ async def _process_group_messages(group: dict, messages: list[dict],
     folder = group["folder"]
     jid = group["jid"]
 
+    # Phase 1 (UnifiedClaw): Track agent identity per group
+    try:
+        if _identity_store is not None:
+            _channel_name = group.get("channel", "unknown")
+            _identity = _identity_store.get_or_create(
+                name=folder,
+                project="evoclaw",
+                channel=_channel_name,
+            )
+            _identity_store.increment_message_count(_identity.agent_id)
+    except Exception as _id_exc:
+        log.debug("Phase 1: identity tracking failed (non-fatal): %s", _id_exc)
+
     # ── Consecutive failure guard: prevent infinite retry loops ───────────────
-    async with _group_fail_lock:
-        fail_count = _group_fail_counts.get(jid, 0)
-        last_fail = _group_fail_timestamps.get(jid, 0.0)
-        if fail_count >= _GROUP_MAX_FAILS:
-            if time.time() - last_fail < _GROUP_FAIL_COOLDOWN:
-                log.warning(
-                    "Group %s has failed %d times consecutively, cooling down for %ds",
-                    jid, fail_count, int(_GROUP_FAIL_COOLDOWN - (time.time() - last_fail))
-                )
-                return
-            else:
-                # Cooldown expired — decay counter and allow retry
-                # Instead of resetting to 0, reduce by 2 so repeated failures
-                # accumulate longer cooldowns
-                _group_fail_counts[jid] = max(0, _group_fail_counts.get(jid, 0) - 2)
-                _group_fail_timestamps.pop(jid, None)
-                log.info("group %s cooldown expired; fail_count decayed to %d", jid, _group_fail_counts[jid])
+    # Note: cannot use _with_fail_lock() helper here because this site may issue
+    # an early `return` from the enclosing coroutine (circuit-trip case).
+    # Simple dict mutations elsewhere use _with_fail_lock() instead.
+    if _group_fail_lock is not None:
+        async with _group_fail_lock:
+            fail_count = _group_fail_counts.get(jid, 0)
+            last_fail = _group_fail_timestamps.get(jid, 0.0)
+            if fail_count >= _GROUP_MAX_FAILS:
+                if time.time() - last_fail < _GROUP_FAIL_COOLDOWN:
+                    log.warning(
+                        "Group %s has failed %d times consecutively, cooling down for %ds",
+                        jid, fail_count, int(_GROUP_FAIL_COOLDOWN - (time.time() - last_fail))
+                    )
+                    return
+                else:
+                    # Cooldown expired — decay counter and allow retry.
+                    # Decrement by 2 rather than resetting to 0 so repeated failures
+                    # accumulate longer cooldowns.
+                    _group_fail_counts[jid] = max(0, _group_fail_counts.get(jid, 0) - 2)
+                    _group_fail_timestamps.pop(jid, None)
+                    log.info("group %s cooldown expired; fail_count decayed to %d", jid, _group_fail_counts[jid])
+    # else: lock not yet initialised (brief startup window) — skip guard rather than crash
 
     requires_trigger = bool(group.get("requires_trigger", True))
     is_main = bool(group.get("is_main"))
@@ -467,7 +696,11 @@ async def _process_group_messages(group: dict, messages: list[dict],
 
     # 取得最近 50 條對話歷史，轉為原生 multi-turn 格式（原為 20 ≈ 10 輪，提升至 50 ≈ 25 輪）
     new_ts_set = {m["timestamp"] for m in messages}
-    raw_history = [m for m in db.get_conversation_history(jid, limit=50) if m["timestamp"] not in new_ts_set]
+    try:
+        raw_history = [m for m in db.get_conversation_history(jid, limit=50) if m["timestamp"] not in new_ts_set]
+    except Exception as _hist_exc:
+        log.warning("Failed to fetch conversation history for %s — proceeding without context: %s", jid, _hist_exc)
+        raw_history = []
     conversation_history = [
         {
             "role": "assistant" if m.get("is_bot_message") else "user",
@@ -478,10 +711,25 @@ async def _process_group_messages(group: dict, messages: list[dict],
         if m.get("content", "").strip()
     ]
     # 只把新訊息作為 prompt（XML context），歷史以 multi-turn 傳入
-    prompt = format_messages(messages, config.TIMEZONE)
-    session_id = db.get_session(folder)
+    try:
+        prompt = format_messages(messages, config.TIMEZONE)
+    except Exception as _fmt_exc:
+        log.error("format_messages failed for %s: %s — using raw content fallback", jid, _fmt_exc)
+        prompt = "\n".join(m.get("content", "") for m in messages)
+    try:
+        session_id = db.get_session(folder)
+    except Exception as _sess_exc:
+        log.warning("get_session failed for %s: %s — using new session", folder, _sess_exc)
+        session_id = None
 
-    log.info(f"Processing {len(messages)} message(s) for {folder}")
+    # Generate a short run_id so all log lines for this agent invocation can be correlated
+    run_id = str(uuid.uuid4())[:8]
+
+    log.info(
+        "Processing %d message(s) for %s",
+        len(messages), folder,
+        extra={"run_id": run_id, "jid": jid, "folder": folder},
+    )
 
     # Capture prompt text for warm memory logging (join all new message contents)
     _user_prompt_text = " ".join(m.get("content", "") for m in messages if m.get("content", "").strip())
@@ -506,14 +754,35 @@ async def _process_group_messages(group: dict, messages: list[dict],
     # on_error shows only the user part to the originating group;
     # the monitor group receives the full context so Eve can diagnose the issue.
     _MONITOR_CTX_SEP = "|||MONITOR_CONTEXT|||"
+    _URGENT_PREFIX = "|||URGENT|||"
 
     async def on_error(msg: str):
-        now = time.time()
-        last = _error_notify_times.get(jid, 0.0)
-        if now - last < _ERROR_NOTIFY_COOLDOWN:
-            log.debug("on_error rate-limited for %s (%.0fs remaining)", jid, _ERROR_NOTIFY_COOLDOWN - (now - last))
-            return
-        _error_notify_times[jid] = now
+        # Fix: URGENT-prefixed messages (e.g. circuit breaker) bypass the rate
+        # limiter so the user always receives critical status messages even during
+        # a failure storm.  Strip the prefix before delivering to the user.
+        is_urgent = msg.startswith(_URGENT_PREFIX)
+        if is_urgent:
+            msg = msg[len(_URGENT_PREFIX):]
+
+        # p15b-fix: acquire the rate-limiter lock to prevent TOCTOU race where
+        # two concurrent on_error calls for the same group both read a stale
+        # timestamp, both pass the cooldown check, and both send a notification.
+        if _error_notify_lock is not None:
+            _rate_ctx = _error_notify_lock
+        else:
+            _rate_ctx = contextlib.nullcontext()
+        async with _rate_ctx:
+            now = time.time()
+            last = _error_notify_times.get(jid, 0.0)
+            if not is_urgent and now - last < _ERROR_NOTIFY_COOLDOWN:
+                log.debug("on_error rate-limited for %s (%.0fs remaining)", jid, _ERROR_NOTIFY_COOLDOWN - (now - last))
+                return
+            # p16a-fix: only update the cooldown timestamp for non-urgent messages.
+            # Previously, urgent messages also reset the timer, which would block
+            # subsequent non-urgent errors for 5 minutes after any URGENT notification —
+            # defeating the purpose of the rate limiter for normal error storms.
+            if not is_urgent:
+                _error_notify_times[jid] = now
 
         # Split user-facing message from optional monitor context
         if _MONITOR_CTX_SEP in msg:
@@ -549,12 +818,52 @@ async def _process_group_messages(group: dict, messages: list[dict],
     async def _on_success_tracked():
         nonlocal _run_succeeded
         _run_succeeded = True
-        async with _group_fail_lock:
+
+        async def _clear_fail_counters():
             _group_fail_counts.pop(jid, None)
             _group_fail_timestamps.pop(jid, None)
+
+        await _with_fail_lock(_clear_fail_counters)
         if on_success:
             await on_success()
 
+    log.debug(
+        "Invoking container agent",
+        extra={"run_id": run_id, "jid": jid, "folder": folder, "session_id": session_id},
+    )
+
+    # p16d: Typing indicator renewal loop — Telegram typing expires every 5 seconds;
+    # without renewal the user sees the indicator vanish after 5s even though the
+    # container may run for 30-60s.  We start a background task that re-sends the
+    # typing action every 4 seconds until the container finishes.
+    _typing_stop = asyncio.Event()
+
+    async def _typing_renewal_loop() -> None:
+        """Re-send typing indicator every 4 seconds while the container runs."""
+        _ch = find_channel(jid)
+        if not _ch or not hasattr(_ch, "send_typing"):
+            return
+        while not _typing_stop.is_set():
+            try:
+                await _ch.send_typing(jid)
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(_typing_stop.wait(), timeout=4.0)
+            except asyncio.TimeoutError:
+                pass  # Normal — keep looping
+
+    _typing_task = asyncio.create_task(
+        _typing_renewal_loop(), name=f"typing-renewal-{jid}"
+    )
+
+    # run_container_agent manages its own internal timeout (config.CONTAINER_TIMEOUT)
+    # and handles docker kill on expiry.  We add a slightly longer backstop timeout
+    # here (+30s grace) so a pathological case where the internal timeout itself hangs
+    # (e.g. docker kill fails) does not block the GroupQueue slot indefinitely.
+    # Using a different timeout avoids a race where both fire simultaneously and the
+    # outer cancellation prevents the inner docker-kill cleanup from completing.
+    _backstop_timeout = config.CONTAINER_TIMEOUT + 30
     try:
         result = await asyncio.wait_for(
             run_container_agent(
@@ -566,29 +875,66 @@ async def _process_group_messages(group: dict, messages: list[dict],
                 on_success=_on_success_tracked,
                 on_error=on_error,
             ),
-            timeout=config.CONTAINER_TIMEOUT,  # use central config value
+            timeout=_backstop_timeout,
         )
         # run_container_agent returns {"status": "error", ...} when no output markers found
         if not _run_succeeded and isinstance(result, dict) and result.get("status") == "error":
-            async with _group_fail_lock:
+            _err_detail = result.get("error", "unknown error")
+            log.warning(
+                "Agent run ended with error status for %s: %s",
+                jid, _err_detail,
+                extra={"run_id": run_id, "jid": jid, "folder": folder},
+            )
+            async def _inc_fail_count_err():
                 _group_fail_counts[jid] = _group_fail_counts.get(jid, 0) + 1
                 _group_fail_timestamps[jid] = time.time()
+
+            await _with_fail_lock(_inc_fail_count_err)
+            # Notify user so they know something went wrong instead of seeing silence.
+            # Show a brief, user-friendly hint based on the error category so the user
+            # understands what happened and what to do next (P10D improvement).
+            _err_lower = _err_detail.lower()
+            if "json" in _err_lower or "parse" in _err_lower:
+                _user_hint = "⚠️ AI 回應格式異常，將自動重試，無需任何操作。"
+            elif "no output" in _err_lower or "marker" in _err_lower:
+                _user_hint = "⚠️ AI 執行時中斷，將自動重試，無需任何操作。"
+            else:
+                _user_hint = "⚠️ 系統暫時發生問題，請稍後重新傳送訊息。"
+            try:
+                await route_outbound(jid, _user_hint)
+            except Exception as _notify_exc:
+                log.warning("Failed to send error notification to %s: %s", jid, _notify_exc)
     except asyncio.TimeoutError:
+        # This backstop should rarely fire — run_container_agent's own timeout fires first.
         log.error(
-            "Container run timed out after %ds for group %s — message NOT dropped, "
-            "will be retried on next poll cycle", int(config.CONTAINER_TIMEOUT), jid
+            "Container backstop timeout (%ds) hit for group %s — internal timeout/kill may "
+            "have hung. Message NOT dropped, will be retried on next poll cycle.",
+            int(_backstop_timeout), jid,
+            extra={"run_id": run_id, "jid": jid, "folder": folder},
         )
-        async with _group_fail_lock:
+        async def _inc_fail_count_timeout():
             _group_fail_counts[jid] = _group_fail_counts.get(jid, 0) + 1
             _group_fail_timestamps[jid] = time.time()
+
+        await _with_fail_lock(_inc_fail_count_timeout)
         # DO NOT call on_success() — cursor stays behind so message is retried
-        # Notify user that we're still working
+        # Notify user with the actual timeout limit so they understand the delay (P10D improvement).
+        _timeout_mins = int(config.CONTAINER_TIMEOUT) // 60
+        _timeout_display = f"{_timeout_mins} 分鐘" if _timeout_mins > 0 else f"{int(config.CONTAINER_TIMEOUT)} 秒"
         try:
             await route_outbound(
                 jid,
-                "⏱️ This request is taking longer than expected. It will be retried automatically."
+                f"⏱️ 請求超過 {_timeout_display} 仍未完成，系統將自動重試，請稍候。"
             )
-        except Exception:
+        except Exception as _tout_exc:
+            log.warning("Failed to send timeout notification to %s: %s", jid, _tout_exc)
+    finally:
+        # p16d: Stop the typing renewal loop regardless of success/failure/timeout.
+        _typing_stop.set()
+        _typing_task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(_typing_task), timeout=1.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
 
 
@@ -610,6 +956,22 @@ async def _message_loop() -> None:
     log.info("Message loop started")
     while _running:
         try:
+            # Leader-gate: skip message processing when another instance holds the lock.
+            # If _leader is None, leader election is disabled and we always process.
+            if _leader is not None and not _leader.is_leader:
+                if not getattr(_message_loop, "_logged_not_leader", False):
+                    log.info("Not leader — message processing paused until leadership acquired")
+                    _message_loop._logged_not_leader = True  # type: ignore[attr-defined]
+                try:
+                    await asyncio.wait_for(_stop_event.wait(), timeout=config.POLL_INTERVAL)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+            # Reset flag when we ARE leader (so next leadership loss is logged)
+            if getattr(_message_loop, "_logged_not_leader", False):
+                log.info("Leadership acquired — resuming message processing")
+                _message_loop._logged_not_leader = False  # type: ignore[attr-defined]
+
             # 偵測是否有 refresh_groups.flag 旗標檔，有的話重新從 DB 載入群組清單
             # 這讓 IPC watcher 可以在不重啟程序的情況下動態新增群組
             refresh_flag = config.DATA_DIR / "refresh_groups.flag"
@@ -627,14 +989,31 @@ async def _message_loop() -> None:
                     for jid in stale_jids:
                         _per_jid_cursors.pop(jid, None)
                         _group_msg_timestamps.pop(jid, None)
-                        async with _group_fail_lock:
-                            _group_fail_counts.pop(jid, None)
-                            _group_fail_timestamps.pop(jid, None)
+                        # p16a-fix: also prune _error_notify_times which was previously
+                        # omitted from this cleanup, causing a slow memory leak for
+                        # frequently-deregistered groups over long uptimes.
+                        # p17c BUG-FIX (MEDIUM): acquire _error_notify_lock before
+                        # mutating _error_notify_times.  Without the lock, this
+                        # removal races with the on_error rate-limiter in
+                        # _process_group_messages which reads+writes the same dict
+                        # under _error_notify_lock.  The race is benign on CPython
+                        # (GIL-protected dict ops), but it violates the locking
+                        # contract and can produce incorrect rate-limit decisions
+                        # on free-threaded Python (PEP 703).
+                        if _error_notify_lock is not None:
+                            async with _error_notify_lock:
+                                _error_notify_times.pop(jid, None)
+                        else:
+                            _error_notify_times.pop(jid, None)
+                        async def _prune_fail_state(j=jid):
+                            _group_fail_counts.pop(j, None)
+                            _group_fail_timestamps.pop(j, None)
+                        await _with_fail_lock(_prune_fail_state)
                     if stale_jids:
                         log.info("Pruned tracking state for %d deregistered group(s)", len(stale_jids))
-                    log.info(f"Groups reloaded: {len(_registered_groups)} group(s)")
+                    log.info("Groups reloaded: %d group(s)", len(_registered_groups))
                 except Exception as e:
-                    log.error(f"Failed to reload groups: {e}")
+                    log.error("Failed to reload groups: %s", e)
 
             # ── reset_group flag: clear fail counters for a specific group ───
             reset_flag = config.DATA_DIR / "reset_group.flag"
@@ -645,10 +1024,17 @@ async def _message_loop() -> None:
                     reset_flag.unlink(missing_ok=True)
                     _target_jid = _rflag_data.get("jid", "")
                     if _target_jid:
-                        async with _group_fail_lock:
-                            _group_fail_counts.pop(_target_jid, None)
-                            _group_fail_timestamps.pop(_target_jid, None)
-                        _error_notify_times.pop(_target_jid, None)
+                        async def _reset_fail_state(tj=_target_jid):
+                            _group_fail_counts.pop(tj, None)
+                            _group_fail_timestamps.pop(tj, None)
+                        await _with_fail_lock(_reset_fail_state)
+                        # p17c BUG-FIX (MEDIUM): acquire _error_notify_lock before
+                        # mutating _error_notify_times (same fix as stale_jids cleanup).
+                        if _error_notify_lock is not None:
+                            async with _error_notify_lock:
+                                _error_notify_times.pop(_target_jid, None)
+                        else:
+                            _error_notify_times.pop(_target_jid, None)
                         log.info("reset_group: cleared fail counters for jid=%s", _target_jid)
                 except Exception as _rfe:
                     log.warning("reset_group flag processing failed: %s", _rfe)
@@ -691,7 +1077,7 @@ async def _message_loop() -> None:
                     # GroupQueue ensures only one container runs per group
                     _group_queue.enqueue_message_check(jid)
         except Exception as e:
-            log.error(f"Message loop error: {e}")
+            log.error("Message loop error: %s", e)
         try:
             await asyncio.wait_for(_stop_event.wait(), timeout=config.POLL_INTERVAL)
         except asyncio.TimeoutError:
@@ -732,16 +1118,23 @@ async def main() -> None:
     7. 同時啟動訊息輪詢、IPC watcher 及排程器三個背景迴圈
     """
 
+    # Declare all module-level globals at the top of main() before any use.
+    # Previously "global _identity_store" appeared after _identity_store was
+    # assigned, raising SyntaxError and preventing the module from loading.
+    global _registered_groups, _sender_allowlist, _stop_event, _group_fail_lock, _dedup_lock
+    global _startup_time, _HEARTBEAT_INTERVAL, _last_heartbeat, _leader, _rbac_store
+    global _identity_store, _MONITOR_JID, _DISCORD_WEBHOOK_URL, _error_notify_lock
+
     # Phase 1 (UnifiedClaw): Initialize Universal Memory Bus, WSBridge, AgentIdentityStore
+    # _identity_store is declared as a module-level global so _process_group_messages
+    # can access it without a NameError (it is a module-level function, not a closure).
     _memory_bus = None
     _ws_bridge = None
-    _identity_store = None
     if _PHASE1_AVAILABLE:
         try:
             import sqlite3 as _sqlite3
-            from pathlib import Path as _Path
-            _db_conn = _sqlite3.connect("evoclaw.db", check_same_thread=False)
-            _memory_bus = _MemoryBus(_db_conn, _Path("groups"))
+            _db_conn = _sqlite3.connect(str(config.STORE_DIR / "evoclaw.db"), check_same_thread=False)
+            _memory_bus = _MemoryBus(_db_conn, config.GROUPS_DIR)
             _identity_store = _AgentIdentityStore(_db_conn)
             _ws_bridge = _WSBridge(_memory_bus)
 
@@ -750,10 +1143,9 @@ async def main() -> None:
                 # Forward fitness to evolution engine
                 pass  # TODO: wire to evolution/fitness.py
 
-            asyncio.create_task(_ws_bridge.start())
-            print(f"[Phase1] MemoryBus | WSBridge (port {_ws_bridge.port}) | AgentIdentityStore initialized")
+            log.info("[Phase1] MemoryBus | WSBridge (port %s) | AgentIdentityStore initialized", _ws_bridge.port)
         except Exception as _e:
-            print(f"[Phase1] Initialization failed (non-fatal): {_e}")
+            log.error("[Phase1] Initialization failed — agent will run WITHOUT long-term memory: %s", _e)
 
     # Phase 2 (UnifiedClaw): SDK API + Memory Summarizer
     _sdk_api = None
@@ -762,17 +1154,55 @@ async def main() -> None:
         try:
             _sdk_api = _SdkApi(_memory_bus, _identity_store)
             _summarizer = _MemorySummarizer()
-            asyncio.create_task(_sdk_api.start())
-            print(f"[Phase2] SdkApi OK (port {_sdk_api.port}) | MemorySummarizer OK")
+            # p16a-fix: store the task handle so it is cancelled during shutdown
+            # instead of being an untracked fire-and-forget coroutine that leaks
+            # past the finally block's bulk-cancel (which only sees tasks created
+            # before gather() starts).
+            _sdk_api_task = asyncio.create_task(_sdk_api.start(), name="sdk-api")
+            _sdk_api_task.add_done_callback(_task_done_callback_main)
+            log.info("[Phase2] SdkApi OK (port %s) | MemorySummarizer OK", _sdk_api.port)
         except Exception as _e3:
-            print(f"[Phase2] Initialization failed (non-fatal): {_e3}")
+            log.error("[Phase2] Initialization failed — memory summarizer unavailable: %s", _e3)
 
-
-    global _registered_groups, _sender_allowlist, _stop_event, _group_fail_lock, _dedup_lock
-    global _startup_time, _HEARTBEAT_INTERVAL, _last_heartbeat
+    # Phase 3: Bot Registry + RBAC
+    _bot_registry = None
+    _rbac_store = None
+    if _PHASE3_AVAILABLE:
+        try:
+            _bot_registry = _BotRegistry()
+            _bootstrap_bots(_bot_registry)
+            _rbac_store = _RBACStore()
+            log.info("[Phase3] BotRegistry + RBAC initialized")
+            # Auto-bootstrap: grant admin to all IDs listed in OWNER_IDS env var.
+            # Format: OWNER_IDS=123456,987654321  (comma-separated Telegram/Discord user IDs)
+            # This ensures the owner always has access even after a fresh install.
+            # Read from os.environ first; fall back to .env file so users who set it
+            # in .env without exporting to the shell environment still get bootstrapped.
+            _owner_ids_raw = os.environ.get("OWNER_IDS", "").strip()
+            if not _owner_ids_raw:
+                try:
+                    from .env import read_env_file as _ref_oids
+                    _owner_ids_raw = _ref_oids(["OWNER_IDS"]).get("OWNER_IDS", "").strip()
+                except Exception:
+                    pass
+            if not _owner_ids_raw:
+                log.info(
+                    "[Phase3] OWNER_IDS not set — RBAC is in fail-open mode (all users allowed). "
+                    "Set OWNER_IDS=<your-user-id> in .env to enable access control."
+                )
+            if _owner_ids_raw:
+                for _oid in [x.strip() for x in _owner_ids_raw.split(",") if x.strip()]:
+                    try:
+                        _rbac_store.grant(_oid, _Role.ADMIN, granted_by="system:bootstrap")
+                        log.info("[Phase3] RBAC bootstrap: granted admin to owner ID %s", _oid)
+                    except Exception as _eg:
+                        log.warning("[Phase3] RBAC bootstrap failed for %s: %s", _oid, _eg)
+        except Exception as _e4:
+            log.error("[Phase3] Initialization failed — BotRegistry/RBAC unavailable (fail-closed): %s", _e4)
     _stop_event = asyncio.Event()
     _group_fail_lock = asyncio.Lock()
     _dedup_lock = asyncio.Lock()
+    _error_notify_lock = asyncio.Lock()  # p15b-fix: serialise rate-limit checks
     _startup_time = time.time()
     _last_heartbeat = _startup_time  # Don't fire heartbeat immediately; wait one full interval
 
@@ -783,6 +1213,8 @@ async def main() -> None:
         _HEARTBEAT_INTERVAL = 1800.0
 
     log.info("EvoClaw starting up...")
+    # p12b: emit deferred config warnings now that logging is fully configured
+    config.warn_dashboard_no_password()
 
     # 初始化 SQLite 資料庫，建立所有必要的資料表
     db_path = config.STORE_DIR / "messages.db"
@@ -790,6 +1222,13 @@ async def main() -> None:
     from . import log_buffer
     log_buffer.install()
     _load_state()
+
+    # Phase 4C: Leader election (no-op when LEADER_ELECTION_ENABLED=false)
+    from .leader_election import LeaderElection
+    _leader = LeaderElection(db.get_db())
+    await _leader.acquire()  # blocks until we are leader (instant when disabled)
+    log.info("LeaderElection: running as leader (LEADER_ELECTION_ENABLED=%s)",
+             os.environ.get("LEADER_ELECTION_ENABLED", "false"))
 
     # Prune old log rows at startup to prevent unbounded disk growth.
     # Keeps last 30 days of task_run_logs and evolution_runs by default.
@@ -801,7 +1240,9 @@ async def main() -> None:
     # 啟動 Web dashboard（背景 daemon thread，port DASHBOARD_PORT）
     start_dashboard(_stop_event)
     from .webportal import start_webportal, deliver_reply as _portal_deliver
-    start_webportal()
+    # BUG-WP-06 FIX: pass _stop_event so the webportal server shuts down
+    # gracefully on SIGTERM/Ctrl-C, mirroring start_dashboard().
+    start_webportal(stop_event=_stop_event)
     _cleanup_orphan_tasks()  # ← add this line
 
     # 從設定檔載入允許傳訊的發送者白名單
@@ -809,13 +1250,12 @@ async def main() -> None:
 
     # 從 DB 載入已登記的群組（包含 JID、folder、trigger 等設定）
     _registered_groups = db.get_all_registered_groups()
-    log.info(f"Loaded {len(_registered_groups)} registered group(s)")
+    log.info("Loaded %d registered group(s)", len(_registered_groups))
 
     # ── Monitor group auto-registration ────────────────────────────────────────
     # If MONITOR_JID is set, ensure it's registered in DB so the router can
     # deliver messages to it.  Safe to call every startup — INSERT OR REPLACE
     # is idempotent.
-    global _MONITOR_JID
     _MONITOR_JID = os.environ.get("MONITOR_JID", "")
     if not _MONITOR_JID:
         # Also check .env file
@@ -843,7 +1283,6 @@ async def main() -> None:
             log.warning("Failed to register monitor group: %s", _me)
 
     # ── Discord webhook ─────────────────────────────────────────────────────────
-    global _DISCORD_WEBHOOK_URL
     _DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
     if not _DISCORD_WEBHOOK_URL:
         try:
@@ -855,7 +1294,8 @@ async def main() -> None:
         log.info("Discord webhook configured")
 
     # Validate LLM secrets once at startup instead of per-container-run (Fix #190)
-    _validate_secrets(_read_secrets())
+    # p12b: capture return value for startup summary below
+    _llm_secrets_ok = _validate_secrets(_read_secrets())
 
     # 確保群組資料夾與全域共享資料夾存在
     config.GROUPS_DIR.mkdir(parents=True, exist_ok=True)
@@ -885,6 +1325,67 @@ async def main() -> None:
     # 清除上次程序崩潰後遺留的 evoclaw-* container，避免資源洩漏
     await cleanup_orphans()
 
+    # p15d BUG-FIX (MEDIUM): clean up stale IPC result files left by a previous
+    # crashed run.  If the host was SIGKILL'd between a container writing its
+    # result to the IPC results/ directory and the host processing it, the file
+    # will persist.  On next startup the IPC watcher will process it and may
+    # deliver a duplicate or out-of-context reply.  We remove result files whose
+    # mtime is older than IPC_STALE_RESULTS_MAX_AGE_SECS (default 300s = 5 min)
+    # since those would produce stale, confusing replies.
+    _IPC_STALE_RESULTS_MAX_AGE_SECS = 300
+    try:
+        _now_ts = time.time()
+        _ipc_base = config.DATA_DIR / "ipc"
+        _stale_removed = 0
+        if _ipc_base.exists():
+            for _results_dir in _ipc_base.glob("*/results"):
+                for _stale in _results_dir.glob("*.json"):
+                    try:
+                        if (_now_ts - _stale.stat().st_mtime) > _IPC_STALE_RESULTS_MAX_AGE_SECS:
+                            _stale.unlink(missing_ok=True)
+                            _stale_removed += 1
+                            log.debug("Removed stale IPC result file: %s", _stale.name)
+                    except Exception:
+                        pass
+        if _stale_removed:
+            log.info("Startup: removed %d stale IPC result file(s) older than %ds",
+                     _stale_removed, _IPC_STALE_RESULTS_MAX_AGE_SECS)
+    except Exception as _ipc_clean_exc:
+        log.warning("Startup IPC stale file cleanup failed (non-fatal): %s", _ipc_clean_exc)
+
+    # ── Docker image pre-pull at startup (P10D Fix) ───────────────────────────
+    # Pre-pull the container image in the background so the first real request
+    # doesn't pay the 10-30s cold-pull penalty.  If the image is already cached
+    # locally this completes in < 1s.  Runs as a fire-and-forget task so it
+    # never blocks startup or message processing.
+    async def _prepull_image() -> None:
+        img = config.CONTAINER_IMAGE
+        log.info("Pre-pulling container image %r in background…", img)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "pull", img,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr_data = await asyncio.wait_for(proc.communicate(), timeout=300.0)
+            if proc.returncode == 0:
+                log.info("Container image %r is ready (pre-pull complete)", img)
+            else:
+                stderr_text = (stderr_data or b"").decode(errors="replace").strip()
+                log.warning(
+                    "Container image pre-pull exited with code %d: %s",
+                    proc.returncode, stderr_text[-200:],
+                )
+        except asyncio.TimeoutError:
+            log.warning("Container image pre-pull timed out after 300s — will pull on first request")
+        except Exception as exc:
+            log.warning("Container image pre-pull failed (non-fatal): %s", exc)
+
+    # p16a-fix: store task handle and add done callback so exceptions are logged
+    # and the task appears in asyncio.all_tasks() for proper shutdown cancellation.
+    _prepull_task = asyncio.create_task(_prepull_image(), name="image-prepull")
+    _prepull_task.add_done_callback(_task_done_callback_main)
+
     # ── 將 GroupQueue 與實際的訊息處理邏輯串接 ──────────────────────────────
     async def _process_messages_for_jid(jid: str) -> bool:
         """
@@ -892,6 +1393,7 @@ async def main() -> None:
         從 DB 取得該群組的待處理訊息，執行 container，
         成功後推進此群組的 per-JID 游標（Issue #52）。
         回傳 True 代表成功（GroupQueue 會重置 retry 計數）。
+        回傳 False 代表失敗（GroupQueue 會安排指數退避重試）。
         """
         group = _get_group_by_jid(jid)
         if not group:
@@ -901,7 +1403,11 @@ async def main() -> None:
         if not msgs:
             return True
         ts = max(m["timestamp"] for m in msgs)
+        _success_flag = False
+
         async def advance(ts=ts, jid=jid):
+            nonlocal _success_flag
+            _success_flag = True
             # Advance only this group's cursor — does not affect other groups
             _per_jid_cursors[jid] = max(_per_jid_cursors.get(jid, 0), ts)
             db.set_state(f"cursorJID:{jid}", str(_per_jid_cursors[jid]))
@@ -910,8 +1416,13 @@ async def main() -> None:
             if ts > _last_timestamp:
                 _last_timestamp = ts
                 db.set_state("lastTimestamp", str(_last_timestamp))
+
         await _process_group_messages(group, msgs, on_success=advance)
-        return True
+        # Fix: return actual success/failure so GroupQueue can schedule retries.
+        # Previously always returned True, meaning GroupQueue never retried after
+        # a container error — the message would only be retried on the next poll
+        # cycle (POLL_INTERVAL seconds later) rather than via exponential backoff.
+        return _success_flag
 
     _group_queue.set_process_messages_fn(_process_messages_for_jid)
 
@@ -950,7 +1461,7 @@ async def main() -> None:
         module_path = _channel_module_map.get(channel_name)
         class_name = _channel_class_map.get(channel_name)
         if not module_path or not class_name:
-            log.warning(f"Unknown channel '{channel_name}' in ENABLED_CHANNELS — skipping")
+            log.warning("Unknown channel %r in ENABLED_CHANNELS — skipping", channel_name)
             continue
         try:
             import importlib
@@ -969,19 +1480,47 @@ async def main() -> None:
             await ch.connect()
             register_channel(ch)
             _loaded_channels.append(ch)
-            log.info(f"Channel '{channel_name}' loaded and connected")
+            log.info("Channel %r loaded and connected", channel_name)
         except Exception as e:
-            log.error(f"Failed to load channel '{channel_name}': {e}")
+            log.error("Failed to load channel %r: %s", channel_name, e)
+
+    # ── p12b: Startup validation summary ─────────────────────────────────────
+    # Emit a clear, scannable status block so operators immediately know whether
+    # all required components connected successfully.  Fails fast with a CRITICAL
+    # log if zero channels loaded — the bot would run but never receive messages.
+    _llm_status = "OK" if _llm_secrets_ok else "MISSING — agents will fail"
+    log.info("--- EvoClaw startup summary ---")
+    log.info("  LLM key:       %s", _llm_status)
+    for _ch in _loaded_channels:
+        _connected = _ch.is_connected() if hasattr(_ch, "is_connected") else True
+        _status = "connected" if _connected else "FAILED TO CONNECT"
+        log.info("  Channel %-10s %s", f"{_ch.name}:", _status)
+    if not _loaded_channels:
+        log.critical(
+            "STARTUP FAILURE: No channels loaded. "
+            "EvoClaw is running but cannot receive any messages. "
+            "Check that ENABLED_CHANNELS is set and the corresponding token "
+            "(e.g. TELEGRAM_BOT_TOKEN) is present in .env."
+        )
+    log.info("  Registered groups: %d", len(_registered_groups))
+    log.info("--- end startup summary ---")
 
     # ── 優雅關機：接到 SIGTERM/SIGINT 時設旗標讓各迴圈自然退出 ──────────────
-    _shutdown_count = 0
+    # p15d: _shutdown_count is an int stored in a list so the nested sync handler
+    # can mutate it without a nonlocal declaration (which is not available in all
+    # Python versions when used inside a signal handler).  Using a list also makes
+    # the increment atomic enough for CPython's GIL-protected signal delivery.
+    _shutdown_count = [0]
 
     def _shutdown(sig, frame):
-        nonlocal _shutdown_count
         global _running
-        _shutdown_count += 1
+        # p15d BUG-FIX: guard against re-entrant double-signal delivery.
+        # On CPython the GIL ensures signal handlers are not truly concurrent,
+        # but two signals delivered in rapid succession can each see count==0
+        # before the first increment completes without this explicit guard.
+        _shutdown_count[0] += 1
 
-        if _shutdown_count >= 2:
+        if _shutdown_count[0] >= 2:
             # 第二次 Ctrl+C：強制殺死所有 container 並立即退出
             log.warning("Force exit (second signal). Killing all containers...")
             from .container_runner import _active_containers as _ac
@@ -995,7 +1534,7 @@ async def main() -> None:
             import os as _os
             _os._exit(1)
 
-        log.info(f"Received {sig}, shutting down... (press Ctrl+C again to force exit)")
+        log.info("Received %s, shutting down... (press Ctrl+C again to force exit)", sig)
         _running = False
         _group_queue.shutdown_sync()  # signal: no new tasks accepted
         if _stop_event is not None:
@@ -1004,6 +1543,24 @@ async def main() -> None:
     signal.signal(signal.SIGINT, _shutdown)
     if hasattr(signal, 'SIGTERM'):
         signal.signal(signal.SIGTERM, _shutdown)
+
+    # p15d BUG-FIX (MEDIUM): handle SIGHUP for config reload without full restart.
+    # On Linux/macOS, SIGHUP is the conventional "reload config" signal.
+    # We reload the sender allowlist and registered groups so operators can add
+    # groups or update the allowlist without bouncing the process.
+    if hasattr(signal, 'SIGHUP'):
+        def _sighup_handler(sig, frame):
+            log.info("SIGHUP received — scheduling config reload (allowlist + groups)")
+            # Write a refresh_groups flag so _message_loop picks up the change
+            # on its next poll cycle.  This is safe to do from a signal handler
+            # because Path.write_text() on a small file is atomic enough on Linux.
+            try:
+                reload_flag = config.DATA_DIR / "refresh_groups.flag"
+                reload_flag.touch()
+            except Exception as _hup_exc:
+                log.warning("SIGHUP: could not write refresh_groups.flag: %s", _hup_exc)
+        signal.signal(signal.SIGHUP, _sighup_handler)
+
     # SIGUSR1: 線上重置 Docker circuit breaker（不需重啟進程）
     # 用法：kill -USR1 $(pgrep -f "python.*evoclaw")
     if hasattr(signal, 'SIGUSR1'):
@@ -1019,14 +1576,18 @@ async def main() -> None:
         # - start_ipc_watcher: 監控 IPC 目錄，處理 container 發出的指令
         # - start_scheduler_loop: 檢查排程任務是否到期並觸發執行
         # - evolution_loop: 每 24 小時執行一次演化週期，調整群組基因組
-        await asyncio.gather(
+        _gather_tasks = [
             _message_loop(),
             start_ipc_watcher(_get_groups, _ipc_route_fn, _stop_event),
             start_scheduler_loop(_get_group_by_jid, run_container_agent, _stop_event, _group_queue),
             evolution_loop(_stop_event),
             health_monitor_loop(_stop_event),
             _orphan_cleanup_loop(_stop_event),
-        )
+        ]
+        # Phase 1 (UnifiedClaw): WebSocket bridge — coexists with file IPC
+        if _ws_bridge is not None:
+            _gather_tasks.append(_ws_bridge.start())
+        await asyncio.gather(*_gather_tasks)
     finally:
         # Fix #135: disconnect channels FIRST so Telegram's update_fetcher_task can stop cleanly
         # before we bulk-cancel tasks — prevents the misleading CRITICAL CancelledError log.
@@ -1036,10 +1597,11 @@ async def main() -> None:
             except Exception:
                 pass
 
-        # 等待所有進行中的 container 完成（最多 10 秒，從 30s 縮短），避免截斷回覆或損毀 IPC 狀態
-        await _group_queue.wait_for_active(timeout=10.0)
+        # 等待所有進行中的 container 完成（最多 30 秒），避免截斷回覆或損毀 IPC 狀態
+        log.info("Waiting up to 30s for active tasks to complete before shutdown...")
+        await _group_queue.wait_for_active(timeout=30.0)  # was 10.0 — increased for long-running tasks
 
-        # 若 10 秒後仍有 container 在跑，強制 kill 全部（Fix #164）
+        # 若 30 秒後仍有 container 在跑，強制 kill 全部（Fix #164）
         if _group_queue._active_count > 0:
             log.warning("Containers still active after timeout, force-killing all...")
             from .container_runner import kill_all_containers
@@ -1047,6 +1609,11 @@ async def main() -> None:
                 await asyncio.wait_for(kill_all_containers(), timeout=5.0)
             except Exception:
                 pass
+
+        # p15d BUG-FIX: cancel GroupQueue retry tasks BEFORE cancelling all tasks
+        # so the explicit cancellation of retry sleeps is visible in the log and
+        # they don't fire after the queue has been shut down.
+        await _group_queue.shutdown()
 
         # Fix #121: cancel any remaining sleeping tasks after channels are safely disconnected.
         pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
@@ -1062,6 +1629,17 @@ async def main() -> None:
             except asyncio.TimeoutError:
                 log.warning("Task cleanup timed out — forcing exit")
 
+        # p15d BUG-FIX (CRITICAL): _leader.release() was previously called OUTSIDE
+        # the finally block, so any exception that propagated through gather() would
+        # skip leader lease release entirely, leaving the DB lock row behind and
+        # preventing a new instance from acquiring leadership until the TTL expired.
+        # Moving it inside finally guarantees release even on abnormal exits.
+        try:
+            await _leader.release()
+            log.info("Leader lease released.")
+        except Exception as _lr_exc:
+            log.warning("Leader release failed (non-fatal): %s", _lr_exc)
+
     log.info("EvoClaw shut down cleanly.")
 
     # Self-update: replace current process with a fresh one so updated code is loaded.
@@ -1070,6 +1648,7 @@ async def main() -> None:
         import sys as _sys_restart
         log.info("Restarting EvoClaw for self-update via os.execv()...")
         os.execv(_sys_restart.executable, [_sys_restart.executable] + _sys_restart.argv)
+
 
 
 if __name__ == "__main__":
