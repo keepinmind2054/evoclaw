@@ -230,16 +230,28 @@ def _count_recent_failures(task_id: str) -> int:
     """Count consecutive failure/timeout runs for a task (most recent first).
 
     Returns the length of the trailing run of non-success statuses.
+
+    BUG-TS-5 FIX (LOW): Previously called db.get_db() directly without
+    holding db._db_lock, violating the codebase convention that all DB
+    access must hold the lock.  While the asyncio loop is single-threaded
+    (so coroutine-level races are impossible), the dashboard/webportal
+    background threads may hold the lock during their own queries, and
+    SQLite in WAL mode does not fully serialise reads from different
+    Python sqlite3 connection objects.  Holding _db_lock ensures
+    consistency with the rest of the codebase and is safe on the asyncio
+    loop (no deadlock is possible because no other coroutine can hold the
+    lock simultaneously).
     """
     try:
-        conn = db.get_db()
-        rows = conn.execute(
-            """SELECT status FROM task_run_logs
-               WHERE task_id = ?
-               ORDER BY run_at DESC
-               LIMIT ?""",
-            (task_id, _MAX_TASK_FAILURES),
-        ).fetchall()
+        with db._db_lock:
+            conn = db.get_db()
+            rows = conn.execute(
+                """SELECT status FROM task_run_logs
+                   WHERE task_id = ?
+                   ORDER BY run_at DESC
+                   LIMIT ?""",
+                (task_id, _MAX_TASK_FAILURES),
+            ).fetchall()
         count = 0
         for row in rows:
             status = row[0] if isinstance(row, (tuple, list)) else row["status"]
@@ -263,10 +275,14 @@ async def recover_stale_running_tasks() -> int:
     Returns the number of tasks recovered.
     """
     try:
-        conn = db.get_db()
-        rows = conn.execute(
-            "SELECT * FROM scheduled_tasks WHERE status='running'"
-        ).fetchall()
+        # BUG-TS-6 FIX (LOW): Hold _db_lock for the initial SELECT, consistent
+        # with the codebase convention (all direct db.get_db() calls must hold
+        # the lock to serialise against background threads).
+        with db._db_lock:
+            conn = db.get_db()
+            rows = conn.execute(
+                "SELECT * FROM scheduled_tasks WHERE status='running'"
+            ).fetchall()
         recovered = 0
         for row in rows:
             task = dict(row)
