@@ -239,10 +239,19 @@ class WhatsAppChannel:
         self._connected = True
         log.info("WhatsApp channel connected — webhook listening on port %d", self._webhook_port)
 
+    # WhatsApp Cloud API hard limit for text body is 4096 characters.
+    _WA_MAX_LEN = 4096
+
     async def send_message(self, jid: str, text: str) -> None:
         if not self._session:
             log.warning("WhatsApp send_message called but channel not connected")
             return
+
+        # p24c: guard against empty text — WhatsApp API rejects empty body strings.
+        if not text:
+            log.debug("WhatsApp send_message: empty text for jid=%s — skipping", jid)
+            return
+
         parts = jid.split(":")
         if len(parts) < 3:
             log.warning("WhatsApp invalid JID: %s", jid)
@@ -250,19 +259,48 @@ class WhatsAppChannel:
         phone_number_id = parts[1]
         chat_id = parts[2]
         url = f"https://graph.facebook.com/v19.0/{phone_number_id}/messages"
-        payload = {
-            "messaging_product": "whatsapp",
-            "to": chat_id,
-            "type": "text",
-            "text": {"body": text},
-        }
-        try:
-            async with self._session.post(url, json=payload) as resp:
-                if resp.status not in (200, 201):
-                    body = await resp.text()
-                    log.error("WhatsApp send_message failed: %s %s", resp.status, body)
-        except Exception as exc:
-            log.error("WhatsApp send_message exception: %s", exc)
+
+        # p24c: split messages that exceed WhatsApp's 4096-char body limit.
+        # Messages longer than this are silently rejected by the API with a 400 error.
+        chunks: list[str] = []
+        remaining = text
+        while remaining:
+            if len(remaining) <= self._WA_MAX_LEN:
+                chunks.append(remaining)
+                break
+            split_at = remaining.rfind("\n", 0, self._WA_MAX_LEN)
+            if split_at <= 0:
+                split_at = self._WA_MAX_LEN
+            chunks.append(remaining[:split_at].rstrip())
+            remaining = remaining[split_at:].lstrip("\n")
+        chunks = [c for c in chunks if c]
+
+        for chunk in chunks:
+            payload = {
+                "messaging_product": "whatsapp",
+                "to": chat_id,
+                "type": "text",
+                "text": {"body": chunk},
+            }
+            try:
+                async with self._session.post(url, json=payload) as resp:
+                    if resp.status == 429:
+                        # p24c: rate-limit response — back off and retry once.
+                        retry_after = float(resp.headers.get("Retry-After", "5"))
+                        log.warning(
+                            "WhatsApp send_message: rate limited for %s — sleeping %.0fs then retrying",
+                            jid, retry_after,
+                        )
+                        await asyncio.sleep(retry_after)
+                        async with self._session.post(url, json=payload) as resp2:
+                            if resp2.status not in (200, 201):
+                                body2 = await resp2.text()
+                                log.error("WhatsApp send_message retry failed: %s %s", resp2.status, body2)
+                    elif resp.status not in (200, 201):
+                        body = await resp.text()
+                        log.error("WhatsApp send_message failed: %s %s", resp.status, body)
+            except Exception as exc:
+                log.error("WhatsApp send_message exception: %s", exc)
 
     async def send_typing(self, jid: str) -> None:
         """Send a read receipt using the most recently received message's wamid."""

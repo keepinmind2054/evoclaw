@@ -62,27 +62,24 @@ class DiscordChannel:
     def is_connected(self) -> bool:
         # Watchdog: if the daemon thread has died, attempt to restart it so
         # Discord does not silently stop working after an unhandled exception.
+        # p24c BUG-FIX: the previous watchdog created a new discord.Client() but
+        # did NOT re-register the on_ready / on_message event handlers (those are
+        # closures registered on the *original* client in connect()).  The new
+        # bare client would start but never set self._connected = True and never
+        # deliver any messages — silently broken.  Log the failure and mark the
+        # channel as disconnected so the calling code can attempt a full reconnect
+        # via connect() rather than leaving a broken unhandled client running.
         if (
             hasattr(self, "_discord_thread")
             and self._discord_thread is not None
             and not self._discord_thread.is_alive()
             and self._client is not None
-            and not self._client.is_closed()
         ):
-            log.error("Discord daemon thread died unexpectedly — restarting")
-            # BUG-P21-3: Create a fresh discord.Client() before restarting the thread.
-            # In discord.py 2.x a Client has internal event loop binding and cannot
-            # be reused after the loop dies.  Reusing the old client causes errors
-            # such as "This event loop is already running" or silent hangs.
-            intents = discord.Intents.default()
-            intents.message_content = True
-            intents.messages = True
-            intents.guild_messages = True
-            intents.dm_messages = True
-            self._client = discord.Client(intents=intents)
-            # Reset the event loop since the previous one may be stopped/closed.
-            self._loop = asyncio.new_event_loop()
-            self._discord_thread = self._start_discord_thread()
+            log.error(
+                "Discord daemon thread died unexpectedly — marking disconnected. "
+                "A full reconnect via connect() is required to restore event handlers."
+            )
+            self._connected = False
         return self._connected and self._client is not None and not self._client.is_closed()
 
     async def connect(self) -> None:

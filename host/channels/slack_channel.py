@@ -148,6 +148,11 @@ class SlackChannel:
         self._connected = True
         log.info("Slack channel connected via Socket Mode")
 
+    # Slack chat.postMessage supports up to 40,000 characters, but blocks with
+    # very long plain-text messages may be truncated by some clients.  Use a
+    # conservative 3900-char split to stay well under any client limit.
+    _SLACK_MAX_LEN = 3900
+
     async def send_message(self, jid: str, text: str) -> None:
         if not self._app:
             log.warning("Slack send_message called but channel not connected")
@@ -164,10 +169,41 @@ class SlackChannel:
             log.debug("Slack send_message: empty text for jid=%s — skipping", jid)
             return
 
-        try:
-            await self._app.client.chat_postMessage(channel=channel_id, text=text)
-        except Exception as exc:
-            log.error("Slack send_message exception: %s", exc)
+        # p24c: split messages that exceed the conservative per-message character limit.
+        # Slack's API allows up to 40,000 chars, but very long messages may be
+        # truncated by clients.  Split on newlines where possible.
+        import asyncio as _asyncio
+        chunks: list[str] = []
+        remaining = text
+        while remaining:
+            if len(remaining) <= self._SLACK_MAX_LEN:
+                chunks.append(remaining)
+                break
+            split_at = remaining.rfind("\n", 0, self._SLACK_MAX_LEN)
+            if split_at <= 0:
+                split_at = self._SLACK_MAX_LEN
+            chunks.append(remaining[:split_at].rstrip())
+            remaining = remaining[split_at:].lstrip("\n")
+        chunks = [c for c in chunks if c]
+
+        for chunk in chunks:
+            try:
+                await self._app.client.chat_postMessage(channel=channel_id, text=chunk)
+            except Exception as exc:
+                exc_str = str(exc).lower()
+                # p24c: retry once on Slack rate-limit errors (status 429 / "ratelimited").
+                if "ratelimited" in exc_str or "429" in exc_str:
+                    log.warning(
+                        "Slack send_message: rate limited for %s — sleeping 5s then retrying",
+                        jid,
+                    )
+                    await _asyncio.sleep(5.0)
+                    try:
+                        await self._app.client.chat_postMessage(channel=channel_id, text=chunk)
+                    except Exception as exc2:
+                        log.error("Slack send_message retry failed: %s", exc2)
+                else:
+                    log.error("Slack send_message exception: %s", exc)
 
     async def send_typing(self, jid: str) -> None:
         # Slack does not expose a typing indicator API for bots
