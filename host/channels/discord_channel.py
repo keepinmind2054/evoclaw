@@ -70,6 +70,16 @@ class DiscordChannel:
             and not self._client.is_closed()
         ):
             log.error("Discord daemon thread died unexpectedly — restarting")
+            # BUG-P21-3: Create a fresh discord.Client() before restarting the thread.
+            # In discord.py 2.x a Client has internal event loop binding and cannot
+            # be reused after the loop dies.  Reusing the old client causes errors
+            # such as "This event loop is already running" or silent hangs.
+            intents = discord.Intents.default()
+            intents.message_content = True
+            intents.messages = True
+            intents.guild_messages = True
+            intents.dm_messages = True
+            self._client = discord.Client(intents=intents)
             # Reset the event loop since the previous one may be stopped/closed.
             self._loop = asyncio.new_event_loop()
             self._discord_thread = self._start_discord_thread()
