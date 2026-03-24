@@ -1,5 +1,32 @@
 # EvoClaw Skills Architecture
 
+> 本文件由 `nanoclaw-architecture-final.md`（詳細規格）與 `nanorepo-architecture.md`（概覽）合併而成。
+
+---
+
+## 什麼是 Skills
+
+EvoClaw 的核心刻意保持最小化。Skills 是使用者擴充它的方式：新增頻道、整合第三方服務、切換平台支援，或完全替換內部元件。
+
+例子：新增 Telegram（在 WhatsApp 旁邊）、從 Apple Container 切換到 Docker、新增 Gmail 整合、新增語音訊息轉錄。
+
+每個 skill **直接修改實際代碼**——新增 channel handlers、更新 message router、變更 container 設定、新增依賴——而非透過 plugin API 或 runtime hooks 運作。
+
+---
+
+## 為什麼要這樣設計
+
+**問題**：使用者需要在共享代碼庫上組合多個修改、在核心更新後保持這些修改正常運作，並且不需要成為 git 專家或失去自訂的變更。
+
+Plugin 系統更簡單，但限制了 skills 能做的事。給 skills 完整的代碼庫存取意味著它們可以改任何東西，但這帶來合併衝突、更新破損和狀態追蹤挑戰。
+
+**解法**：讓 skill 應用完全程式化，使用標準 git mechanics，以 AI 作為 git 無法解決衝突的後備，並用共享解決方案快取讓大多數使用者永遠不會碰到這些衝突。
+
+結果：使用者組合他們想要的功能，自訂變更在核心更新後自動存活，系統始終可恢復。
+
+---
+
+
 ## Core Principle
 
 Skills are self-contained, auditable packages that apply programmatically via standard git merge mechanics. Claude Code orchestrates the process — running git commands, reading skill manifests, and stepping in only when git can't resolve a conflict on its own. The system uses existing git features (`merge-file`, `rerere`, `apply`) rather than custom merge infrastructure.
