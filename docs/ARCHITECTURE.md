@@ -1,8 +1,8 @@
 # EvoClaw Architecture
 
-**版本**: 2.0
+**版本**: 2.1
 **日期**: 2026-03-24
-**狀態**: 整合 Phase 1–19 實際進展 + Phase 20 可攜 Agent 規劃
+**狀態**: 整合 Phase 1–21 實際進展 + Phase 22 可攜 Agent 規劃
 
 ---
 
@@ -13,11 +13,11 @@ EvoClaw 正在演進為統一的多 Agent 框架，結合：
 - **自我演化**（Genome-based 適應行為）
 - **企業工具**（LDAP / Jira / HPC / Workflow — 來自 MinionDesk 血脈）
 - **通用記憶層**（跨 agent 知識共享）
-- **可攜 Agent**（Git-native agent 定義，跨 runtime 可移植）← **Phase 20 新增**
+- **可攜 Agent**（Git-native agent 定義，跨 runtime 可移植）← **Phase 22 新增**
 
 ---
 
-## 一、現有架構（v1.x — Phase 1–19 已實作）
+## 一、現有架構（v1.x — Phase 1–21 已實作）
 
 ```
 [Channels]
@@ -99,7 +99,7 @@ Telegram / WhatsApp / Discord / Teams / Signal / iMessage / Matrix
   │   └── agent_id → profile, skills, history
   ├── evolution/         Evolution Engine（增強）
   │   └── cross_agent.py ← NEW: 跨 agent genome 協作
-  ├── agent_registry/    ← NEW Phase 20: Portable Agent Registry
+  ├── agent_registry/    ← NEW Phase 22: Portable Agent Registry
   │   ├── loader.py      從 Git repo 載入 agent 定義
   │   ├── resolver.py    branch/tag 解析 + shallow clone cache
   │   └── validator.py   agent.yaml schema 驗證
@@ -124,7 +124,7 @@ Telegram / WhatsApp / Discord / Teams / Signal / iMessage / Matrix
   │       ├── jira.py    Jira ticket 操作
   │       ├── hpc.py     LSF/Slurm HPC job 管理
   │       └── workflow.py 核准 workflow 引擎
-  ├── [agent-repo]/      ← NEW Phase 20: 從 Git 動態載入
+  ├── [agent-repo]/      ← NEW Phase 22: 從 Git 動態載入
   │   ├── soul.md        人格/價值觀（可被子 agent 覆蓋）
   │   ├── rules.md       安全禁令（繼承時不可覆蓋）
   │   ├── duties.md      職責說明
@@ -136,7 +136,7 @@ Telegram / WhatsApp / Discord / Teams / Signal / iMessage / Matrix
 
 ---
 
-## 三、Phase 20 — 可攜 Agent（Portable Agent）
+## 三、Phase 22 — 可攜 Agent（Portable Agent）
 
 > 靈感來源：[open-gitagent/gitagent](https://github.com/open-gitagent/gitagent)
 > 核心理念：「Clone 一個 repo = 得到一個 agent」
@@ -440,7 +440,20 @@ Agent ←──── task_payload ──────── Gateway
 - [ ] 正式 multi-agent swarm
 - [ ] 集體學習和知識蒸餾
 
-### Phase 20 — Portable Agent（新增）
+### Phase 21 — Stability & Anti-Hallucination（已完成，v1.27.0–v1.28.0）
+- [x] Tool 結果加入 ✓/✗ 成功/失敗前綴（三個 provider）
+- [x] MEMORY.md 注入「請重新驗證」警語
+- [x] 工具截斷改為保留 head+tail（保留尾部錯誤）
+- [x] 連續相同失敗工具呼叫偵測與警告（3 次上限）
+- [x] 指數退避 Cooldown（60 → 120 → 300 → 600s）
+- [x] `run_container_agent()` 內建 semaphore 防禦
+- [x] Subagent 輪詢超時 300s → 60s
+- [x] 語意假進度偵測（三個 provider 迴圈）
+- [x] health_monitor 主動 Telegram 告警
+- [x] Discord daemon thread watchdog 自動重啟
+- [x] `asyncio.get_event_loop()` 棄用修復
+
+### Phase 22 — Portable Agent（規劃中）
 - [ ] `agent.yaml` schema 設計 + AJV 驗證
 - [ ] SOUL.md / RULES.md / DUTIES.md 三檔分離
 - [ ] MEMORY.md 更新改為 `git commit` 寫入
@@ -461,8 +474,8 @@ Agent ←──── task_payload ──────── Gateway
 3. **Fork 友好**: 透過直接編輯代碼客製化，而非複雜 config
 4. **零外部依賴**: SQLite 處理一切（無 Redis、無 Postgres、無 Chroma）
 5. **優雅降級**: 即使子系統失敗，系統繼續運作
-6. **可攜性**: Agent 定義與執行環境分離，clone repo = 得到 agent ← **Phase 20 新增**
-7. **審計性**: 所有 agent 行為變更有 git 歷史可查 ← **Phase 20 新增**
+6. **可攜性**: Agent 定義與執行環境分離，clone repo = 得到 agent ← **Phase 22 新增**
+7. **審計性**: 所有 agent 行為變更有 git 歷史可查 ← **Phase 22 新增**
 
 ---
 
