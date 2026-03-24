@@ -175,14 +175,32 @@ async def process_ipc_dir(group_folder: str, is_main: bool, route_fn: Callable) 
                 except FileNotFoundError:
                     log.debug("IPC file vanished before read (race): %s", f.name)
                     continue
+                # BUG-IPC-04 FIX (MEDIUM): skip empty files instead of treating
+                # them as JSON parse errors.  An empty file is produced by an
+                # aborted partial write or a zero-byte flush mid-write; it is
+                # not a genuine IPC error and should not be moved to errors/.
+                # Delete it silently — it will be re-written by the agent if
+                # the operation is retried.
+                if not content.strip():
+                    log.debug("IPC file empty (partial write?), skipping: %s", f.name)
+                    f.unlink(missing_ok=True)
+                    continue
                 try:
                     payload = json.loads(content)
                 except json.JSONDecodeError as e:
                     log.error("IPC JSON parse error in %s: %s", f.name, e)
-                    # Move to errors dir instead of deleting
+                    # Move to errors dir instead of deleting.
+                    # BUG-IPC-05 FIX (MEDIUM): use a timestamped destination
+                    # name to avoid FileExistsError on Windows (and silent
+                    # overwrites on Linux) when a file with the same basename
+                    # already exists in errors_dir from a previous failure.
                     errors_dir = f.parent.parent / "errors"
                     errors_dir.mkdir(exist_ok=True)
-                    f.rename(errors_dir / f.name)
+                    _err_dest = errors_dir / f"{f.stem}_{int(time.time() * 1000)}{f.suffix}"
+                    try:
+                        f.rename(_err_dest)
+                    except Exception:
+                        f.unlink(missing_ok=True)
                     continue
                 await _handle_ipc(payload, group_folder, is_main, route_fn)
                 f.unlink(missing_ok=True)  # 成功後刪除，避免重複處理
@@ -444,10 +462,13 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
             log.warning("send_file IPC: file NOT found at host_path=%r (container: %r)",
                         host_path, container_path)
             fname = os.path.basename(container_path) if container_path else "unknown"
-            _asyncio.create_task(route_fn(
+            # BUG-IPC-01 FIX (HIGH): add done-callback so unhandled exceptions
+            # from this fire-and-forget task are logged rather than silently swallowed.
+            _t = _asyncio.create_task(route_fn(
                 _sf_jid,
                 f"⚠️ 檔案無法傳送：找不到 {fname}\n路徑：{host_path}"
             ))
+            _t.add_done_callback(_ipc_task_done_callback)
 
     elif msg_type == "memory_search":
         # 三層記憶系統：冷/暖記憶混合搜尋 — container 可透過 IPC 查詢歷史記憶
@@ -734,11 +755,18 @@ def _rc_state_file() -> Path:
 
 def _rc_save(pid: int, url: str, sender: str, jid: str) -> None:
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    _rc_state_file().write_text(
+    # BUG-IPC-06 FIX (LOW): use atomic tmp+rename so restore_remote_control()
+    # never reads a partial JSON if the process crashes mid-write.
+    # Path.write_text() creates the file (triggering inotify CREATE) before the
+    # full content is on disk, which can leave a truncated JSON on a crash.
+    _dest = _rc_state_file()
+    _tmp = _dest.with_suffix(".json.tmp")
+    _tmp.write_text(
         json.dumps({"pid": pid, "url": url, "sender": sender, "jid": jid,
                     "startedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}),
         encoding="utf-8",
     )
+    _tmp.rename(_dest)
 
 
 def restore_remote_control() -> None:
@@ -833,8 +861,16 @@ async def _run_start_remote_control(jid: str, sender: str, route_fn: Callable) -
         if not _rc_is_alive(pid):
             await route_fn(jid, "❌ Remote control 程序意外結束，請再試一次。")
             return
+        # BUG-IPC-03 FIX (MEDIUM): read_text() is a blocking I/O syscall.
+        # Calling it directly in an async function stalls the event loop for
+        # the duration of the read on every 200ms poll iteration (up to 150
+        # iterations over the 30s deadline).  Run in an executor so other
+        # coroutines (IPC watcher, health monitor, message loop) are not blocked.
         try:
-            content = stdout_path.read_text(encoding="utf-8")
+            _rc_loop = asyncio.get_running_loop()
+            content = await _rc_loop.run_in_executor(
+                None, lambda: stdout_path.read_text(encoding="utf-8")
+            )
         except Exception:
             content = ""
         m = _RC_URL_RE.search(content)
@@ -904,6 +940,15 @@ async def _run_self_update(jid: str, route_fn: Callable) -> None:
             try:
                 pip_out, _ = await asyncio.wait_for(pip_proc.communicate(), timeout=120.0)
             except asyncio.TimeoutError:
+                # BUG-IPC-02 FIX (HIGH): kill the orphaned pip process so it
+                # does not continue consuming CPU/network after the timeout.
+                # Without this the pip subprocess runs indefinitely, holding
+                # package-index connections and potentially corrupting a
+                # partial install.
+                try:
+                    pip_proc.kill()
+                except Exception:
+                    pass
                 log.warning("self_update: pip install timed out — continuing with restart anyway")
             else:
                 if pip_proc.returncode != 0:
