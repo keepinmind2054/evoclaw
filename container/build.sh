@@ -20,13 +20,15 @@ CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
 echo "Building EvoClaw agent container image..."
 echo "Image: ${IMAGE_NAME}:${TAG}"
 
-if ! ${CONTAINER_RUNTIME} build -t "${IMAGE_NAME}:${TAG}" .; then
-    echo "ERROR: docker build failed (exit code $?)" >&2
+"${CONTAINER_RUNTIME}" build -t "${IMAGE_NAME}:${TAG}" .
+BUILD_EXIT=$?
+if [ "${BUILD_EXIT}" -ne 0 ]; then
+    echo "ERROR: docker build failed (exit code ${BUILD_EXIT})" >&2
     exit 1
 fi
 
 # Verify the image actually landed in the local registry.
-if ! ${CONTAINER_RUNTIME} image inspect "${IMAGE_NAME}:${TAG}" > /dev/null 2>&1; then
+if ! "${CONTAINER_RUNTIME}" image inspect "${IMAGE_NAME}:${TAG}" > /dev/null 2>&1; then
     echo "ERROR: docker build exited 0 but image ${IMAGE_NAME}:${TAG} not found in local registry." >&2
     exit 1
 fi
@@ -36,4 +38,4 @@ echo "Build complete!"
 echo "Image: ${IMAGE_NAME}:${TAG}"
 echo ""
 echo "Test with:"
-echo "  echo '{\"prompt\":\"What is 2+2?\",\"groupFolder\":\"test\",\"chatJid\":\"test@g.us\",\"isMain\":false}' | ${CONTAINER_RUNTIME} run -i ${IMAGE_NAME}:${TAG}"
+echo "  echo '{\"prompt\":\"What is 2+2?\",\"groupFolder\":\"test\",\"chatJid\":\"test@g.us\",\"isMain\":false}' | \"${CONTAINER_RUNTIME}\" run -i ${IMAGE_NAME}:${TAG}"

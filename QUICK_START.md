@@ -19,6 +19,14 @@ cd evoclaw
 pip install -r host/requirements.txt
 ```
 
+> **Note (Ubuntu 23.04+ / Debian 12+):** If you see `error: externally-managed-environment`, use a
+> virtual environment instead:
+> ```bash
+> python3 -m venv .venv
+> source .venv/bin/activate
+> pip install -r host/requirements.txt
+> ```
+
 ### 2. Configure
 
 Copy the minimal config template:

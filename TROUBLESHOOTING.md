@@ -94,6 +94,21 @@ The host dependencies live in `host/requirements.txt`, not a root-level file.
 pip install -r host/requirements.txt
 ```
 
+**Ubuntu 23.04+ / Debian 12+ (`externally-managed-environment` error):**
+
+Use a virtual environment:
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r host/requirements.txt
+```
+
+Then always activate the venv before running `python run.py`:
+```bash
+source .venv/bin/activate
+python run.py
+```
+
 If you see `ModuleNotFoundError` for a specific package, install it directly:
 
 ```bash
