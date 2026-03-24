@@ -82,6 +82,20 @@ _input_chat_jid: str = ""
 _MAX_TOOL_RESULT_CHARS = 4000  # ~4KB per tool result
 _MAX_HISTORY_MESSAGES = 40     # max messages in history
 
+# BUG-P21-1 / BUG-P21-4: Module-level action-claim regex with stricter structure.
+# The old pattern matched single Chinese characters like 已/完成/成功 as standalone
+# tokens, causing false positives on normal sentences such as "我已了解您的問題".
+# The new pattern requires 已+specificVerb or verb+了/完成 structures, reducing noise.
+import re as _re_module_level
+_ACTION_CLAIM_RE = _re_module_level.compile(
+    r'(?:'
+    r'已(?:完成|修復|修正|部署|更新|新增|刪除|建立|創建|執行|運行|安裝|設定|配置|提交|推送|合併)'
+    r'|(?:完成|修復|修正|部署|更新|新增|刪除|建立|創建|執行|運行|安裝|設定|配置|提交|推送|合併)了'
+    r'|(?:successfully|completed|deployed|fixed|updated|committed|pushed|merged)\s+(?:the\s+)?(?:fix|update|feature|change|patch|code|file)'
+    r')',
+    _re_module_level.IGNORECASE,
+)
+
 
 def _log(tag: str, msg: str = "") -> None:
     """Structured stderr logging with millisecond timestamps."""
@@ -388,10 +402,13 @@ def tool_read(file_path: str) -> str:
                 raw = fh.read(_READ_SIZE_LIMIT)
             # P14D-READ-3: decode with errors="replace" to handle non-UTF-8 text
             text = raw.decode("utf-8", errors="replace")
-            return text + f"\n\n... (file truncated: read {_READ_SIZE_LIMIT} of {file_size} bytes)"
+            # BUG-P21-2: prefix with [OK] so _tool_fail_counter resets correctly
+            return f"[OK] {file_path}\n" + text + f"\n\n... (file truncated: read {_READ_SIZE_LIMIT} of {file_size} bytes)"
 
         # P14D-READ-3: use errors="replace" so Latin-1/Windows-1252 files don't crash
-        return p.read_text(encoding="utf-8", errors="replace")
+        # BUG-P21-2: prefix with [OK] so _tool_fail_counter resets correctly on successful reads
+        content = p.read_text(encoding="utf-8", errors="replace")
+        return f"[OK] {file_path}\n{content}"
     except Exception as e:
         return f"Error reading file: {e}"
 
@@ -1599,16 +1616,11 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
             # completion verbs) but did NOT call any tools this turn, inject a
             # verification demand.  This catches hallucinations that slip past the
             # syntactic _FAKE_STATUS_RE patterns above.
-            _ACTION_CLAIM_RE_C = _re_claude.compile(
-                r'(?:已|完成|成功|部署|修復|修正|更新|寫入|建立|刪除|執行)'
-                r'|(?:fixed|deployed|updated|written|created|deleted|executed|completed|done)',
-                _re_claude.IGNORECASE,
-            )
             _had_tool_calls_this_turn = any(
                 hasattr(b, "type") and b.type == "tool_use"
                 for b in response.content
             )
-            if not _had_tool_calls_this_turn and _ACTION_CLAIM_RE_C.search(final_response) and n < MAX_ITER - 1:
+            if not _had_tool_calls_this_turn and _ACTION_CLAIM_RE.search(final_response) and n < MAX_ITER - 1:
                 _log("⚠️ SEMANTIC-FAKE", "Claude claims action complete but called no tools this turn")
                 messages.append({
                     "role": "user",
@@ -2158,14 +2170,9 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
 
             # ── Semantic cross-validation: action claim without any tool call ──
             # Catches completion-verb hallucinations that slip past syntactic patterns.
-            _ACTION_CLAIM_RE_OAI = _re_cb.compile(
-                r'(?:已|完成|成功|部署|修復|修正|更新|寫入|建立|刪除|執行)'
-                r'|(?:fixed|deployed|updated|written|created|deleted|executed|completed|done)',
-                _re_cb.IGNORECASE,
-            )
             # OpenAI: tool calls appear as msg.tool_calls (None or empty list when absent)
             _had_tool_calls_this_turn_oai = bool(getattr(msg, "tool_calls", None))
-            if not _had_tool_calls_this_turn_oai and _ACTION_CLAIM_RE_OAI.search(content) and n < MAX_ITER - 1:
+            if not _had_tool_calls_this_turn_oai and _ACTION_CLAIM_RE.search(content) and n < MAX_ITER - 1:
                 _log("⚠️ SEMANTIC-FAKE", "OpenAI model claims action complete but called no tools this turn")
                 history.append({
                     "role": "user",
@@ -2484,14 +2491,9 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
 
             # ── Semantic cross-validation: action claim without any tool call ──
             # Catches completion-verb hallucinations that slip past syntactic patterns.
-            _ACTION_CLAIM_RE_G = _re_gemini.compile(
-                r'(?:已|完成|成功|部署|修復|修正|更新|寫入|建立|刪除|執行)'
-                r'|(?:fixed|deployed|updated|written|created|deleted|executed|completed|done)',
-                _re_gemini.IGNORECASE,
-            )
             # Gemini: fn_calls is already empty here (we're in the `if not fn_calls` branch)
             # so _had_tool_calls_this_turn is always False at this point.
-            if _ACTION_CLAIM_RE_G.search(final_response) and n < MAX_ITER - 1:
+            if _ACTION_CLAIM_RE.search(final_response) and n < MAX_ITER - 1:
                 _log("⚠️ SEMANTIC-FAKE", "Gemini claims action complete but called no tools this turn")
                 history.append(types.Content(role="user", parts=[types.Part(text=(
                     "【系統驗證】你的回應中聲稱已執行了某項操作，但本輪沒有呼叫任何工具。"
