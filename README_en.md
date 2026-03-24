@@ -1,9 +1,9 @@
 # EvoClaw
 
-> Full documentation is in [README.md](README.md) (Traditional Chinese).
-> For English readers, here is a brief overview:
+> This English README is a summary. For complete and current documentation, see [README.md](README.md) (Traditional Chinese).
+> Current version: v1.26.0
 
-[![Version](https://img.shields.io/badge/version-v1.11.42-blue)](https://github.com/KeithKeepGoing/evoclaw/blob/main/CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v1.26.0-blue)](https://github.com/KeithKeepGoing/evoclaw/blob/main/CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Docker](https://img.shields.io/badge/docker-required-blue)](https://www.docker.com/)
@@ -40,7 +40,7 @@ python run.py
 
 - Python 3.11+
 - Docker
-- One LLM API key: `GOOGLE_API_KEY` (Gemini), `ANTHROPIC_API_KEY` (Claude), `NIM_API_KEY`, or `OPENAI_API_KEY` + `OPENAI_BASE_URL`
+- One LLM API key: `GOOGLE_API_KEY` (Gemini), `CLAUDE_API_KEY` (Claude, also accepted as `ANTHROPIC_API_KEY`), `NIM_API_KEY`, or `OPENAI_API_KEY` + `OPENAI_BASE_URL`
 
 ## Configuration
 

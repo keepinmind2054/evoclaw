@@ -48,6 +48,13 @@ def _env_int(key: str, default: int, minimum: int | None = None) -> int:
     return val
 
 
+# p21c: ANTHROPIC_API_KEY alias — promote to CLAUDE_API_KEY at the process level
+# so that users who follow the README_en.md Quick Start (which showed
+# ANTHROPIC_API_KEY) get Claude rather than silently falling back to Gemini.
+# This runs once at import time and is transparent to all downstream consumers.
+if os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("CLAUDE_API_KEY"):
+    os.environ["CLAUDE_API_KEY"] = os.environ["ANTHROPIC_API_KEY"]
+
 # Assistant
 ASSISTANT_NAME = os.environ.get("ASSISTANT_NAME", "Eve")
 TRIGGER_PATTERN = re.compile(rf"^@{re.escape(ASSISTANT_NAME)}\b", re.IGNORECASE)
@@ -61,12 +68,35 @@ IPC_POLL_INTERVAL = _env_int("IPC_POLL_INTERVAL", 1000, minimum=100) / 1000
 
 # Container
 CONTAINER_IMAGE = os.environ.get("CONTAINER_IMAGE", "evoclaw-agent:latest")
+# p22c: Warn at config import time when CONTAINER_IMAGE uses the mutable ':latest'
+# tag.  ':latest' is the default but is mutable — a rebuild or 'docker pull' can
+# silently change the agent behaviour without any config change.  Operators should
+# pin to a specific version (e.g., evoclaw-agent:v1.27.0) in production.
+if CONTAINER_IMAGE.endswith(":latest"):
+    import logging as _log_tmp
+    _log_tmp.getLogger(__name__).warning(
+        "CONTAINER_IMAGE uses ':latest' tag — image may change unexpectedly on rebuild. "
+        "Consider pinning to a specific version (e.g., evoclaw-agent:v1.27.0) for reproducibility."
+    )
 # CONTAINER_TIMEOUT: maximum wall-clock seconds a single container run may take before
 # it is force-killed.  Configured as milliseconds in the env var for consistency with
 # other interval vars (e.g. POLL_INTERVAL), then divided by 1000 for runtime use.
 # Default: 1 800 000 ms = 1800 s = 30 minutes.
 # Override via env: CONTAINER_TIMEOUT=60000  (60 s, useful for fast-response groups)
 CONTAINER_TIMEOUT = _env_int("CONTAINER_TIMEOUT", 30 * 60 * 1000) / 1000
+# Startup sanity check: if CONTAINER_TIMEOUT looks like it was set in seconds
+# (i.e. < 1000) instead of milliseconds, warn the operator.  A value of 30
+# means 30 ms — almost certainly a misconfiguration (should be 30000 for 30 s).
+_raw_container_timeout = _env_int("CONTAINER_TIMEOUT", 30 * 60 * 1000)
+if _raw_container_timeout < 1000 and os.environ.get("CONTAINER_TIMEOUT"):
+    import warnings as _warnings
+    _warnings.warn(
+        f"CONTAINER_TIMEOUT={_raw_container_timeout} looks like it may be set in seconds. "
+        f"EvoClaw expects milliseconds (e.g., 30000 for 30 seconds). "
+        f"Current effective timeout: {CONTAINER_TIMEOUT:.1f}s",
+        UserWarning,
+        stacklevel=2,
+    )
 IDLE_TIMEOUT = _env_int("IDLE_TIMEOUT", 30 * 60 * 1000) / 1000
 # BUG-CFG-01 FIX: enforce minimum of 1.  A value of 0 or negative makes the
 # concurrency check (self._active_count >= MAX_CONCURRENT_CONTAINERS) always

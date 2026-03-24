@@ -46,6 +46,20 @@ def _is_windows() -> bool:
 
 log = logging.getLogger(__name__)
 
+# ── Module-level semaphore for defense-in-depth concurrency limiting ──────────
+# Ensures run_container_agent() itself enforces MAX_CONCURRENT_CONTAINERS even if
+# a future code path bypasses GroupQueue's concurrency check (STABILITY_ANALYSIS 2.4).
+_container_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_container_semaphore() -> asyncio.Semaphore:
+    global _container_semaphore
+    if _container_semaphore is None:
+        from . import config as _cfg
+        _container_semaphore = asyncio.Semaphore(_cfg.MAX_CONCURRENT_CONTAINERS)
+    return _container_semaphore
+
+
 # ── Container image version pin warning ───────────────────────────────────────
 # Log a warning at import time when the image tag uses the mutable ':latest' tag.
 # Operators should pin to a specific version or digest to prevent silent behavioral
@@ -198,13 +212,19 @@ def _read_secrets() -> dict:
     are intentionally excluded to limit blast radius if a container is
     compromised (Fix #187).
     """
-    return read_env_file([
+    secrets = read_env_file([
         "GOOGLE_API_KEY", "GEMINI_MODEL",
         "NIM_API_KEY", "NIM_MODEL", "NIM_BASE_URL",
         "OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL",
-        "CLAUDE_API_KEY", "CLAUDE_MODEL",
+        "CLAUDE_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_MODEL",
         "ASSISTANT_NAME",
     ])
+    # p21c: ANTHROPIC_API_KEY alias — users who follow the README_en.md example
+    # (which referenced ANTHROPIC_API_KEY) silently fell back to Gemini.
+    # If CLAUDE_API_KEY is absent but ANTHROPIC_API_KEY is set, promote the alias.
+    if not secrets.get("CLAUDE_API_KEY") and secrets.get("ANTHROPIC_API_KEY"):
+        secrets["CLAUDE_API_KEY"] = secrets["ANTHROPIC_API_KEY"]
+    return secrets
 
 def _validate_secrets(secrets: dict) -> bool:
     """Validate that at least one LLM API key is present; warn on startup for missing keys.
@@ -427,6 +447,13 @@ async def run_container_agent(
             f"請等待約 {_wait_secs} 秒後再試，屆時將自動恢復。其他群組不受影響。"
         )
         return {"status": "error", "error": f"Docker circuit breaker open for {folder}"}
+
+    # Defense-in-depth concurrency guard (STABILITY_ANALYSIS 2.4):
+    # Acquire the module-level semaphore so that even if a caller bypasses
+    # GroupQueue's concurrency check, at most MAX_CONCURRENT_CONTAINERS
+    # containers can execute simultaneously across all code paths.
+    # Released unconditionally in the existing finally block below.
+    await _get_container_semaphore().acquire()
     jid = group["jid"]
     # 用時間戳記讓 container 名稱唯一，方便 debug 與孤兒清理
     run_id = str(uuid.uuid4())
@@ -483,6 +510,14 @@ async def run_container_agent(
     # ── 三層記憶系統：注入熱記憶 ────────────────────────────────────────────
     # 取得此群組的熱記憶（per-group MEMORY.md，8KB 上限），注入到 container 的系統上下文
     hot_memory = get_hot_memory(jid)
+    # p22d-D: Defence-in-depth size cap on injection.  hot.py enforces 8 KB on
+    # write, but a DB record could theoretically be larger (e.g. written by an
+    # older version that had no limit, or via direct DB manipulation).  Cap here
+    # so the container input JSON cannot grow arbitrarily large.
+    _MEMORY_MAX_BYTES = 50_000  # 50 KB absolute ceiling for injection
+    if hot_memory and len(hot_memory.encode("utf-8")) > _MEMORY_MAX_BYTES:
+        hot_memory = hot_memory.encode("utf-8")[-_MEMORY_MAX_BYTES:].decode("utf-8", errors="ignore")
+        log.warning("hot_memory: truncated to %d bytes before injection for jid=%s", _MEMORY_MAX_BYTES, jid)
 
     # Phase 2 (UnifiedClaw): inject stable agent_id so FitnessReporter can self-identify
     _agent_id = _get_agent_id(
@@ -1000,6 +1035,14 @@ async def run_container_agent(
     finally:
         async with _get_active_lock():
             _active_containers.pop(container_name, None)
+        # Release the defense-in-depth semaphore acquired before execution
+        # (STABILITY_ANALYSIS 2.4).  Placed last so active-container cleanup
+        # runs first; wrapped in try/except so a NameError for container_name
+        # above cannot prevent the semaphore from being released.
+        try:
+            _get_container_semaphore().release()
+        except Exception:
+            pass
 
 async def _stop_container(name: str) -> None:
     """Stop a container on timeout using a two-phase SIGTERM → SIGKILL sequence.

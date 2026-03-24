@@ -19,7 +19,13 @@ _group_fail_counts: dict[str, int] = {}
 _group_fail_timestamps: dict[str, float] = {}
 _group_fail_lock: asyncio.Lock | None = None  # initialized in main() after event loop starts
 _GROUP_MAX_FAILS = 5
-_GROUP_FAIL_COOLDOWN = 60.0  # seconds
+_GROUP_FAIL_COOLDOWN_BASE = 60.0   # seconds
+_GROUP_FAIL_COOLDOWN_MAX = 600.0   # 10 minutes cap
+
+
+def _get_fail_cooldown(fail_count: int) -> float:
+    """Exponential backoff: 60 → 120 → 300 → 600s, capped at 10 min."""
+    return min(_GROUP_FAIL_COOLDOWN_BASE * (2 ** max(0, fail_count - 1)), _GROUP_FAIL_COOLDOWN_MAX)
 
 # ── Per-group error notification rate limiter ──────────────────────────────────
 # Prevents flooding the user with repeated error messages during a failure storm.
@@ -36,6 +42,13 @@ _error_notify_lock: asyncio.Lock | None = None  # initialised in main()
 # If MONITOR_JID is set in .env, error notifications are also forwarded there.
 # The monitor group is auto-registered at startup so EvoClaw can route to it.
 _MONITOR_JID: str = ""  # populated in main() from env
+
+# ── Health monitor alert queue (p22c) ─────────────────────────────────────────
+# asyncio.Queue used as a message bus between health_monitor.py and main.py.
+# health_monitor pushes (issue_key, message) tuples; _message_loop drains them
+# and delivers via route_outbound.  Initialised to a real Queue in main() after
+# the event loop starts; the sentinel None is replaced at that point.
+_health_alert_queue: "asyncio.Queue[tuple[str, str]] | None" = None
 
 # ── Heartbeat ─────────────────────────────────────────────────────────────────
 # Periodic "I'm alive" ping to MONITOR_JID. If the pings stop, EvoClaw is down.
@@ -58,7 +71,8 @@ from .ipc_watcher import start_ipc_watcher
 from .task_scheduler import start_scheduler_loop
 from .router import register_channel, route_outbound, format_messages, find_channel
 from .evolution import check_message as immune_check, evolution_loop
-from .health_monitor import health_monitor_loop
+from .evolution import record_run as _record_run
+from .health_monitor import health_monitor_loop, set_alert_queue as _set_hm_alert_queue
 from .memory import append_warm_log
 
 # Phase 1 (UnifiedClaw): Universal Memory Bus + WSBridge + Agent Identity (guarded)
@@ -219,6 +233,11 @@ _registered_groups: list[dict] = []
 # 使用 per-JID 游標而非全域游標，防止群組 A 的成功執行推進游標
 # 超過群組 B 尚未處理的訊息時間戳記，導致群組 B 的訊息被靜默丟棄。
 # 舊版單一全域游標 lastTimestamp 仍用作啟動時的初始值（向後相容）。
+# Legacy cursor: used only as fallback for groups with no per-JID cursor entry.
+# TODO(v2.x): Remove _last_timestamp entirely once all active groups have been
+# seen at least once and have per-JID cursor entries.  This was the original
+# single-cursor design from v1.0 and exists only for backward compatibility.
+# All new cursor reads/writes should use _per_jid_cursors instead.
 _last_timestamp: int = 0           # global fallback / legacy cursor (read-only after init)
 _per_jid_cursors: dict[str, int] = {}  # per-JID cursors (authoritative)
 
@@ -670,10 +689,11 @@ async def _process_group_messages(group: dict, messages: list[dict],
             fail_count = _group_fail_counts.get(jid, 0)
             last_fail = _group_fail_timestamps.get(jid, 0.0)
             if fail_count >= _GROUP_MAX_FAILS:
-                if time.time() - last_fail < _GROUP_FAIL_COOLDOWN:
+                _cooldown = _get_fail_cooldown(_group_fail_counts.get(jid, 1))
+                if time.time() - last_fail < _cooldown:
                     log.warning(
                         "Group %s has failed %d times consecutively, cooling down for %ds",
-                        jid, fail_count, int(_GROUP_FAIL_COOLDOWN - (time.time() - last_fail))
+                        jid, fail_count, int(_cooldown - (time.time() - last_fail))
                     )
                     return
                 else:
@@ -1050,6 +1070,23 @@ async def _message_loop() -> None:
                     _stop_event.set()
                 break
 
+            # ── p22c: Drain health monitor alert queue ───────────────────────
+            # health_monitor.py pushes (issue_key, message) tuples onto
+            # _health_alert_queue; we deliver them here via route_outbound so
+            # that health_monitor has no direct dependency on router or main.
+            if _health_alert_queue is not None:
+                while not _health_alert_queue.empty():
+                    try:
+                        _alert_key, _alert_msg = _health_alert_queue.get_nowait()
+                        if _MONITOR_JID:
+                            asyncio.create_task(route_outbound(_MONITOR_JID, _alert_msg))
+                        else:
+                            log.debug("Health alert dropped (MONITOR_JID not set): %s", _alert_key)
+                    except asyncio.QueueEmpty:
+                        break
+                    except Exception as _ha_exc:
+                        log.warning("Failed to deliver health alert: %s", _ha_exc)
+
             # ── Heartbeat: periodic ping to monitor group ────────────────────
             global _last_heartbeat
             if _MONITOR_JID and (time.time() - _last_heartbeat) >= _HEARTBEAT_INTERVAL:
@@ -1085,12 +1122,46 @@ async def _message_loop() -> None:
 
 
 async def _orphan_cleanup_loop(stop_event: asyncio.Event) -> None:
-    """Periodically clean up orphaned Docker containers every 5 minutes."""
+    """Periodically clean up orphaned Docker containers every 5 minutes.
+
+    p22c: Also prunes IPC result files older than 24 hours once per hour to
+    prevent indefinite accumulation of result files from long-running deployments.
+    The startup cleanup (main()) only removes files older than 5 minutes from
+    the previous run; this loop catches files that slip through (e.g. the host
+    processes a result but the container writes another before the TTL expires).
+    """
+    _last_ipc_prune: float = 0.0
+    _IPC_PRUNE_INTERVAL = 3600.0   # prune every hour
+    _IPC_PRUNE_MAX_AGE = 86400.0   # remove files older than 24 hours
+
     while not stop_event.is_set():
         try:
             await cleanup_orphans()
         except Exception as exc:
             log.warning("orphan cleanup error: %s", exc)
+
+        # p22c: Periodic IPC result file pruning (hourly, 24h cutoff)
+        if time.time() - _last_ipc_prune >= _IPC_PRUNE_INTERVAL:
+            _last_ipc_prune = time.time()
+            try:
+                import glob as _glob
+                _ipc_base = config.DATA_DIR / "ipc"
+                _cutoff = time.time() - _IPC_PRUNE_MAX_AGE
+                _pruned = 0
+                if _ipc_base.exists():
+                    for _rdir in _ipc_base.glob("*/results"):
+                        for _f in _rdir.glob("*.json"):
+                            try:
+                                if _f.stat().st_mtime < _cutoff:
+                                    _f.unlink()
+                                    _pruned += 1
+                            except Exception:
+                                pass
+                if _pruned:
+                    log.info("IPC result pruning: removed %d file(s) older than 24h", _pruned)
+            except Exception as _prune_exc:
+                log.warning("IPC result pruning failed (non-fatal): %s", _prune_exc)
+
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=300.0)
         except asyncio.TimeoutError:
@@ -1141,7 +1212,15 @@ async def main() -> None:
             @_ws_bridge.on_fitness_update
             async def _on_fitness(agent_id, score, metadata):
                 # Forward fitness to evolution engine
-                pass  # TODO: wire to evolution/fitness.py
+                try:
+                    run_id = metadata.get("run_id") if metadata else None
+                    if run_id is None:
+                        run_id = str(uuid.uuid4())
+                    response_ms = int(metadata.get("response_ms", 0)) if metadata else 0
+                    success = score >= 0.5
+                    _record_run(agent_id, run_id, response_ms, retry_count=0, success=success)
+                except Exception as _fit_exc:
+                    log.debug("_on_fitness: record_run failed (non-fatal): %s", _fit_exc)
 
             log.info("[Phase1] MemoryBus | WSBridge (port %s) | AgentIdentityStore initialized", _ws_bridge.port)
         except Exception as _e:
@@ -1205,6 +1284,14 @@ async def main() -> None:
     _error_notify_lock = asyncio.Lock()  # p15b-fix: serialise rate-limit checks
     _startup_time = time.time()
     _last_heartbeat = _startup_time  # Don't fire heartbeat immediately; wait one full interval
+
+    # p22c: Set up asyncio Queue as message bus for health monitor alerts.
+    # health_monitor.py pushes (issue_key, message) tuples here; the main
+    # polling loop drains the queue and delivers via route_outbound.
+    # maxsize=50 caps memory usage; excess alerts are silently dropped.
+    global _health_alert_queue
+    _health_alert_queue = asyncio.Queue(maxsize=50)
+    _set_hm_alert_queue(_health_alert_queue)
 
     # Heartbeat interval: configurable via env (default 30 min)
     try:

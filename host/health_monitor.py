@@ -20,6 +20,49 @@ from typing import Callable, Awaitable
 
 from . import config, db
 
+# ── Active alert state ────────────────────────────────────────────────────────
+# Separate from the WARNING_COOLDOWN log-dedup mechanism: these track when each
+# issue_key was last forwarded to the Telegram MONITOR_JID so we don't flood it.
+#
+# p22c: Alert delivery uses an asyncio.Queue message bus instead of a direct
+# circular import of main.py.  main.py calls set_alert_queue() to inject the
+# queue; the health monitor pushes (issue_key, message) tuples onto it; main.py
+# drains the queue and delivers via route_outbound.  This avoids the circular
+# import that was previously deferred and never resolved.
+_alert_queue: "asyncio.Queue[tuple[str, str]] | None" = None
+_alert_last_sent: dict[str, float] = {}
+_ALERT_COOLDOWN_S = 600  # 10 minutes between same-type alerts to Telegram
+
+
+def set_alert_queue(q: "asyncio.Queue[tuple[str, str]]") -> None:
+    """Called by main.py to inject the alert delivery queue.
+
+    The queue carries (issue_key, message) tuples.  main.py drains the queue
+    on each poll cycle and delivers the messages via route_outbound.
+    """
+    global _alert_queue
+    _alert_queue = q
+
+
+def _enqueue_alert(issue_key: str, message: str) -> None:
+    """Non-blocking: put alert on queue if cooldown permits.
+
+    Drops the alert silently if:
+    - the per-issue cooldown has not expired yet, or
+    - the queue has not been injected (set_alert_queue not called yet), or
+    - the queue is full (maxsize exceeded).
+    Never raises — callers must not crash due to alert delivery failure.
+    """
+    now = time.time()
+    if now - _alert_last_sent.get(issue_key, 0) < _ALERT_COOLDOWN_S:
+        return
+    _alert_last_sent[issue_key] = now
+    if _alert_queue is not None:
+        try:
+            _alert_queue.put_nowait((issue_key, f"🚨 [HealthMonitor] {message}"))
+        except Exception:
+            pass  # Queue full or not set — alert dropped, don't crash health monitor
+
 log = logging.getLogger(__name__)
 
 # 監控閾值設定
@@ -231,6 +274,18 @@ async def _check_group_activity() -> None:
         log.warning("Failed to check group activity: %s", e)
 
 
+def _send_health_alert(issue_key: str, message: str) -> None:
+    """Enqueue an alert for delivery to MONITOR_JID.
+
+    p22c: Replaced the previous circular-import approach (importing main.py at
+    call time) with a queue-based message bus.  _enqueue_alert() handles the
+    per-issue cooldown and puts the message on _alert_queue; main.py drains the
+    queue and calls route_outbound.  This function is synchronous and
+    non-blocking — safe to call from both async and sync contexts.
+    """
+    _enqueue_alert(issue_key, f"[{message}]")
+
+
 async def _send_warning(level: str, message: str, warning_id: str) -> None:
     """發送警告（非同步版本）。"""
     if _should_send_warning(warning_id):
@@ -242,7 +297,9 @@ async def _send_warning(level: str, message: str, warning_id: str) -> None:
         else:
             log.info(log_msg)
 
-        # TODO: 可以在這裡加入发送通知到 Telegram/Slack 等
+        # Send active alert to Telegram MONITOR_JID (10-min cooldown per issue).
+        # p22c: _send_health_alert is now synchronous (queue-based); no await needed.
+        _send_health_alert(warning_id, f"[{level.upper()}] {message}")
 
         # BUG-HM-04 (MEDIUM): _last_warnings is mutated from both the async
         # loop and the sync helper without any lock.  Use _warnings_lock to
@@ -261,6 +318,10 @@ def _send_warning_sync(level: str, message: str, warning_id: str) -> None:
             log.warning(log_msg)
         else:
             log.info(log_msg)
+
+        # p22c: _send_health_alert is now synchronous (queue-based), so we can
+        # call it directly without scheduling a coroutine on the event loop.
+        _send_health_alert(warning_id, f"[{level.upper()}] {message}")
 
         with _warnings_lock:
             _last_warnings[warning_id] = datetime.now()

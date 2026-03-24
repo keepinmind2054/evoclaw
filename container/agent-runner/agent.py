@@ -303,14 +303,17 @@ def tool_bash(command: str) -> str:
         err_text = stderr_bytes.decode("utf-8", errors="replace")
         if err_text:
             out += f"\nSTDERR:\n{err_text}"
-        # P14D-BASH-3: surface non-zero exit codes to the LLM
-        if proc.returncode != 0:
-            out += f"\n[Exit code: {proc.returncode}]"
         if len(out) > _BASH_OUTPUT_LIMIT:
             out = out[:_BASH_OUTPUT_LIMIT] + f"\n... (output truncated at 50KB, total {len(out)} bytes)"
-        return out or "(no output)"
+        # Fix 2 (STABILITY_ANALYSIS 3.1): prefix result with unambiguous success/failure flag
+        # so the LLM sees exit status as the FIRST characters, not buried at the end.
+        _exit_code = proc.returncode
+        if _exit_code == 0:
+            return f"\u2713 [exit 0] {out or '(no output)'}"
+        else:
+            return f"\u2717 [exit {_exit_code}] {out or '(no output)'}"
     except Exception as e:
-        return f"Error: {e}"
+        return f"\u2717 [exit ?] Error: {e}"
 
 
 def tool_read(file_path: str) -> str:
@@ -408,9 +411,9 @@ def tool_write(file_path: str, content: str) -> str:
 
     err = _check_path_allowed(file_path)
     if err:
-        return err
+        return f"[ERROR] {err}"
     if len(content.encode("utf-8")) > _WRITE_SIZE_LIMIT:
-        return f"Error: content too large ({len(content.encode('utf-8'))} bytes > 10MB limit)"
+        return f"[ERROR] content too large ({len(content.encode('utf-8'))} bytes > 10MB limit)"
     try:
         p = Path(file_path)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -421,11 +424,11 @@ def tool_write(file_path: str, content: str) -> str:
         try:
             _resolved_parent = str(p.parent.resolve())
         except Exception as _rp_exc:
-            return f"Error: cannot resolve parent directory: {_rp_exc}"
+            return f"[ERROR] cannot resolve parent directory: {_rp_exc}"
         if not any(_resolved_parent.startswith(pfx) for pfx in _ALLOWED_PATH_PREFIXES):
             _log("⚠️ SECURITY", f"Write: symlink parent escape blocked: {file_path!r} -> {_resolved_parent!r}")
             return (
-                f"Error: access denied — parent directory of {file_path!r} resolves to "
+                f"[ERROR] access denied — parent directory of {file_path!r} resolves to "
                 f"{_resolved_parent!r} which is outside the allowed workspace (symlink escape prevention)."
             )
         # P14D-WRITE-1: capture existing permissions before overwriting
@@ -452,9 +455,9 @@ def tool_write(file_path: str, content: str) -> str:
             except Exception:
                 pass
         tmp.rename(p)  # POSIX rename() is atomic
-        return f"Written: {file_path}"
+        return f"[OK] Written: {file_path}"
     except Exception as e:
-        return f"Error writing file: {e}"
+        return f"[ERROR] {e}"
 
 
 def tool_edit(file_path: str, old_string: str, new_string: str) -> str:
@@ -478,7 +481,7 @@ def tool_edit(file_path: str, old_string: str, new_string: str) -> str:
 
     err = _check_path_allowed(file_path)
     if err:
-        return err
+        return f"[ERROR] {err}"
     try:
         p = Path(file_path)
         # BUG-P18D-03: re-check the *resolved* path of the parent after symlink
@@ -486,29 +489,29 @@ def tool_edit(file_path: str, old_string: str, new_string: str) -> str:
         try:
             _resolved_edit_parent = str(p.parent.resolve())
         except Exception as _rep_exc:
-            return f"Error: cannot resolve parent directory: {_rep_exc}"
+            return f"[ERROR] cannot resolve parent directory: {_rep_exc}"
         if not any(_resolved_edit_parent.startswith(pfx) for pfx in _ALLOWED_PATH_PREFIXES):
             _log("⚠️ SECURITY", f"Edit: symlink parent escape blocked: {file_path!r} -> {_resolved_edit_parent!r}")
             return (
-                f"Error: access denied — parent directory of {file_path!r} resolves to "
+                f"[ERROR] access denied — parent directory of {file_path!r} resolves to "
                 f"{_resolved_edit_parent!r} which is outside the allowed workspace (symlink escape prevention)."
             )
         # P14D-EDIT-3: tolerate non-UTF-8 files
         content = p.read_text(encoding="utf-8", errors="replace")
         if old_string not in content:
-            return f"Error: old_string not found in {file_path}"
+            return f"[ERROR] old_string not found in {file_path}"
         # P14D-EDIT-1: warn if old_string appears multiple times to prevent
         # the LLM from inadvertently editing the wrong occurrence
         count = content.count(old_string)
         if count > 1:
             return (
-                f"Error: old_string appears {count} times in {file_path}. "
+                f"[ERROR] old_string appears {count} times in {file_path}. "
                 "Provide a longer, unique context string that matches exactly one location."
             )
         # replace(..., 1) 確保只替換第一個出現的位置，避免意外修改多處
         new_content = content.replace(old_string, new_string, 1)
         if len(new_content.encode("utf-8")) > _WRITE_SIZE_LIMIT:
-            return f"Error: resulting file too large (> 10MB limit)"
+            return f"[ERROR] resulting file too large (> 10MB limit)"
         # P14D-EDIT-2: preserve existing file permissions
         existing_mode = None
         try:
@@ -528,9 +531,9 @@ def tool_edit(file_path: str, old_string: str, new_string: str) -> str:
             except Exception:
                 pass
         tmp.rename(p)  # POSIX rename() is atomic
-        return f"Edited: {file_path}"
+        return f"[OK] Edited: {file_path}"
     except Exception as e:
-        return f"Error editing file: {e}"
+        return f"[ERROR] {e}"
 
 
 def tool_send_message(chat_jid: str, text: str, sender: str = None) -> str:
@@ -683,9 +686,11 @@ def tool_run_agent(prompt: str, context_mode: str = "isolated") -> str:
             "context_mode": context_mode,
         }))
 
-        # Poll for result (up to 300 seconds)
+        # Poll for result — reduced from 300s to 60s to free the parent group
+        # faster (STABILITY_ANALYSIS 5.3).
+        _SUBAGENT_TIMEOUT_S = 60  # was 300
         output_path = Path(IPC_RESULTS_DIR) / f"{request_id}.json"
-        for _ in range(300):
+        for _poll_i in range(_SUBAGENT_TIMEOUT_S):
             if output_path.exists():
                 try:
                     data = json.loads(output_path.read_text(encoding="utf-8"))
@@ -694,8 +699,11 @@ def tool_run_agent(prompt: str, context_mode: str = "isolated") -> str:
                 except Exception as e:
                     return f"Error reading subagent result: {e}"
             time.sleep(1)
+            # Every 10s, log progress so we know the subagent is not hung
+            if _poll_i > 0 and _poll_i % 10 == 0:
+                _log("⏳ SUBAGENT", f"subagent {request_id}: still waiting ({_poll_i}s elapsed)...")
 
-        return "Error: subagent timed out after 300s"
+        return f"Error: subagent timed out after {_SUBAGENT_TIMEOUT_S}s"
     except Exception as e:
         return f"Error spawning subagent: {e}"
 
@@ -1526,6 +1534,9 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
     final_response = ""
     _memory_written = False  # True once agent writes to MEMORY.md this session
     _memory_path_str = str(Path(group_folder) / "MEMORY.md") if group_folder else "/workspace/group/MEMORY.md"
+    _tool_fail_counter: dict = {}  # (tool_name, args_hash) -> consecutive_fail_count
+    _MAX_CONSECUTIVE_TOOL_FAILS = 3
+    _retry_warning: str = ""  # injected before next LLM call when tool retries detected
     _turns_since_notify = 0   # turns since last mcp__evoclaw__send_message call
     _only_notify_turns = 0    # consecutive turns with ONLY send_message (no real work)
     # Tools that represent actual work (not just reporting)
@@ -1582,6 +1593,32 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
                 })
                 final_response = ""
                 continue
+
+            # ── Semantic cross-validation: action claim without any tool call ──
+            # If the agent's text claims it completed an action (using common
+            # completion verbs) but did NOT call any tools this turn, inject a
+            # verification demand.  This catches hallucinations that slip past the
+            # syntactic _FAKE_STATUS_RE patterns above.
+            _ACTION_CLAIM_RE_C = _re_claude.compile(
+                r'(?:已|完成|成功|部署|修復|修正|更新|寫入|建立|刪除|執行)'
+                r'|(?:fixed|deployed|updated|written|created|deleted|executed|completed|done)',
+                _re_claude.IGNORECASE,
+            )
+            _had_tool_calls_this_turn = any(
+                hasattr(b, "type") and b.type == "tool_use"
+                for b in response.content
+            )
+            if not _had_tool_calls_this_turn and _ACTION_CLAIM_RE_C.search(final_response) and n < MAX_ITER - 1:
+                _log("⚠️ SEMANTIC-FAKE", "Claude claims action complete but called no tools this turn")
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "【系統驗證】你的回應中聲稱已執行了某項操作，但本輪沒有呼叫任何工具。"
+                        "請實際使用對應工具（Read/Write/Edit/Bash）執行並確認，不要只是聲明已完成。"
+                    ),
+                })
+                final_response = ""
+                continue
             break
 
         if response.stop_reason != "tool_use":
@@ -1602,7 +1639,11 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
                         _tr = f"[Tool error: {_te}]"
                     _tr_str = str(_tr)
                     if len(_tr_str) > _MAX_TOOL_RESULT_CHARS:
-                        _tr_str = _tr_str[:_MAX_TOOL_RESULT_CHARS] + f"\n[... truncated {len(_tr_str) - _MAX_TOOL_RESULT_CHARS} chars]"
+                        _half = _MAX_TOOL_RESULT_CHARS // 2
+                        _head = _tr_str[:_half]
+                        _tail = _tr_str[-_half:]
+                        _omitted = len(_tr_str) - _MAX_TOOL_RESULT_CHARS
+                        _tr_str = _head + f"\n[... {_omitted} chars omitted (middle truncated to preserve head+tail) ...]\n" + _tail
                     _partial_results.append({"type": "tool_result", "tool_use_id": _tb.id, "content": _tr_str})
                 messages.append({"role": "user", "content": _partial_results})
             # Unexpected / terminal stop reason — collect text and exit
@@ -1627,12 +1668,29 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
                 # Truncate large tool results before adding to history
                 result_str = str(result)
                 if len(result_str) > _MAX_TOOL_RESULT_CHARS:
-                    result_str = result_str[:_MAX_TOOL_RESULT_CHARS] + f"\n[... truncated {len(result_str) - _MAX_TOOL_RESULT_CHARS} chars]"
+                    half = _MAX_TOOL_RESULT_CHARS // 2
+                    head = result_str[:half]
+                    tail = result_str[-half:]
+                    omitted = len(result_str) - _MAX_TOOL_RESULT_CHARS
+                    result_str = head + f"\n[... {omitted} chars omitted (middle truncated to preserve head+tail) ...]\n" + tail
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
                     "content": result_str,
                 })
+                # Fix 4 (STABILITY_ANALYSIS 3.5): detect repeated identical-args tool failures
+                _fail_key = (block.name, hash(str(block.input)[:200]))
+                _is_failure = (result_str.startswith("\u2717") or result_str.startswith("[ERROR]") or result_str.startswith("Error:"))
+                if _is_failure:
+                    _tool_fail_counter[_fail_key] = _tool_fail_counter.get(_fail_key, 0) + 1
+                    if _tool_fail_counter[_fail_key] >= _MAX_CONSECUTIVE_TOOL_FAILS:
+                        _retry_warning = (
+                            f"【系統警告】工具 `{block.name}` 以相同參數已連續失敗 {_tool_fail_counter[_fail_key]} 次。"
+                            f"請立即更換策略：嘗試不同的方法、參數或工具。不要繼續重試相同的失敗操作。"
+                        )
+                        _log("⚠️ RETRY-LOOP", f"Tool {block.name} failed {_tool_fail_counter[_fail_key]} times consecutively — injecting warning")
+                elif result_str.startswith("\u2713") or result_str.startswith("[OK]"):
+                    _tool_fail_counter.pop(_fail_key, None)
                 # Track MEMORY.md writes
                 if not _memory_written and block.name in {"Write", "Edit", "Bash"}:
                     _block_args = str(block.input) if block.input else ""
@@ -1704,6 +1762,11 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
 
         if tool_results is not None:
             messages.append({"role": "user", "content": tool_results})
+
+        # Fix 4 (STABILITY_ANALYSIS 3.5): inject retry warning as a user message
+        if _retry_warning:
+            messages.append({"role": "user", "content": _retry_warning})
+            _retry_warning = ""
 
         # P15A-FIX-4: Trim history to prevent unbounded growth while preserving
         # tool_use / tool_result pairs.  The naive slice messages[:1]+messages[-(N-1):]
@@ -1919,6 +1982,9 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
     # the relative string "MEMORY.md", which would never match an absolute path in
     # tool arguments and silently disable the MEMORY.md write-detection logic.
     _memory_path_str = str(Path(group_folder) / "MEMORY.md") if group_folder else "/workspace/group/MEMORY.md"
+    _tool_fail_counter: dict = {}  # (tool_name, args_hash) -> consecutive_fail_count
+    _MAX_CONSECUTIVE_TOOL_FAILS = 3
+    _retry_warning: str = ""  # injected before next LLM call when tool retries detected
     # Tools that represent actual work (not just reporting)
     _SUBSTANTIVE_TOOLS = frozenset([
         "Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch",
@@ -2090,6 +2156,26 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                 })
                 continue
 
+            # ── Semantic cross-validation: action claim without any tool call ──
+            # Catches completion-verb hallucinations that slip past syntactic patterns.
+            _ACTION_CLAIM_RE_OAI = _re_cb.compile(
+                r'(?:已|完成|成功|部署|修復|修正|更新|寫入|建立|刪除|執行)'
+                r'|(?:fixed|deployed|updated|written|created|deleted|executed|completed|done)',
+                _re_cb.IGNORECASE,
+            )
+            # OpenAI: tool calls appear as msg.tool_calls (None or empty list when absent)
+            _had_tool_calls_this_turn_oai = bool(getattr(msg, "tool_calls", None))
+            if not _had_tool_calls_this_turn_oai and _ACTION_CLAIM_RE_OAI.search(content) and n < MAX_ITER - 1:
+                _log("⚠️ SEMANTIC-FAKE", "OpenAI model claims action complete but called no tools this turn")
+                history.append({
+                    "role": "user",
+                    "content": (
+                        "【系統驗證】你的回應中聲稱已執行了某項操作，但本輪沒有呼叫任何工具。"
+                        "請實際使用對應工具（Read/Write/Edit/Bash）執行並確認，不要只是聲明已完成。"
+                    ),
+                })
+                continue
+
             # No code blocks, no fake status — model is genuinely done
             final_response = content
             break
@@ -2205,12 +2291,34 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
             # Truncate large tool results before adding to history
             result_str = str(result)
             if len(result_str) > _MAX_TOOL_RESULT_CHARS:
-                result_str = result_str[:_MAX_TOOL_RESULT_CHARS] + f"\n[... truncated {len(result_str) - _MAX_TOOL_RESULT_CHARS} chars]"
+                half = _MAX_TOOL_RESULT_CHARS // 2
+                head = result_str[:half]
+                tail = result_str[-half:]
+                omitted = len(result_str) - _MAX_TOOL_RESULT_CHARS
+                result_str = head + f"\n[... {omitted} chars omitted (middle truncated to preserve head+tail) ...]\n" + tail
+            # Fix 4 (STABILITY_ANALYSIS 3.5): detect repeated identical-args tool failures
+            _fail_key_oai = (tc.function.name, hash(str(args)[:200]))
+            _is_failure_oai = (result_str.startswith("\u2717") or result_str.startswith("[ERROR]") or result_str.startswith("Error:"))
+            if _is_failure_oai:
+                _tool_fail_counter[_fail_key_oai] = _tool_fail_counter.get(_fail_key_oai, 0) + 1
+                if _tool_fail_counter[_fail_key_oai] >= _MAX_CONSECUTIVE_TOOL_FAILS:
+                    _retry_warning = (
+                        f"【系統警告】工具 `{tc.function.name}` 以相同參數已連續失敗 {_tool_fail_counter[_fail_key_oai]} 次。"
+                        f"請立即更換策略：嘗試不同的方法、參數或工具。不要繼續重試相同的失敗操作。"
+                    )
+                    _log("⚠️ RETRY-LOOP", f"Tool {tc.function.name} failed {_tool_fail_counter[_fail_key_oai]} times consecutively — injecting warning")
+            elif result_str.startswith("\u2713") or result_str.startswith("[OK]"):
+                _tool_fail_counter.pop(_fail_key_oai, None)
             history.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
                 "content": result_str,
             })
+
+        # Inject retry warning if any tool failed repeatedly this turn
+        if _retry_warning:
+            history.append({"role": "user", "content": _retry_warning})
+            _retry_warning = ""
 
         # P15A-FIX-6: Trim history to prevent unbounded growth while preserving
         # assistant tool_calls / tool-result message pairs.  The naive slice
@@ -2285,6 +2393,9 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
     final_response = ""
     _memory_written = False   # True once agent writes to MEMORY.md this session
     _memory_path_str = str(Path(group_folder) / "MEMORY.md") if group_folder else "/workspace/group/MEMORY.md"
+    _tool_fail_counter: dict = {}  # (tool_name, args_hash) -> consecutive_fail_count
+    _MAX_CONSECUTIVE_TOOL_FAILS = 3
+    _retry_warning: str = ""  # injected before next LLM call when tool retries detected
     _turns_since_notify = 0   # turns since last mcp__evoclaw__send_message call
     _only_notify_turns = 0    # consecutive turns with ONLY send_message (no real work)
     _no_tool_turns = 0        # consecutive turns without any tool call
@@ -2371,6 +2482,24 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
                 final_response = ""
                 continue
 
+            # ── Semantic cross-validation: action claim without any tool call ──
+            # Catches completion-verb hallucinations that slip past syntactic patterns.
+            _ACTION_CLAIM_RE_G = _re_gemini.compile(
+                r'(?:已|完成|成功|部署|修復|修正|更新|寫入|建立|刪除|執行)'
+                r'|(?:fixed|deployed|updated|written|created|deleted|executed|completed|done)',
+                _re_gemini.IGNORECASE,
+            )
+            # Gemini: fn_calls is already empty here (we're in the `if not fn_calls` branch)
+            # so _had_tool_calls_this_turn is always False at this point.
+            if _ACTION_CLAIM_RE_G.search(final_response) and n < MAX_ITER - 1:
+                _log("⚠️ SEMANTIC-FAKE", "Gemini claims action complete but called no tools this turn")
+                history.append(types.Content(role="user", parts=[types.Part(text=(
+                    "【系統驗證】你的回應中聲稱已執行了某項操作，但本輪沒有呼叫任何工具。"
+                    "請實際使用對應工具（Read/Write/Edit/Bash）執行並確認，不要只是聲明已完成。"
+                ))]))
+                final_response = ""
+                continue
+
             # ── Hard cap: 3 consecutive no-tool turns → stop ─────────────────
             if _no_tool_turns >= 3:
                 _log("❌ NO-TOOL", f"Gemini made no tool call for {_no_tool_turns} consecutive turns — breaking")
@@ -2396,7 +2525,24 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
             # Truncate large tool results before adding to history
             result_str = str(result)
             if len(result_str) > _MAX_TOOL_RESULT_CHARS:
-                result_str = result_str[:_MAX_TOOL_RESULT_CHARS] + f"\n[... truncated {len(result_str) - _MAX_TOOL_RESULT_CHARS} chars]"
+                half = _MAX_TOOL_RESULT_CHARS // 2
+                head = result_str[:half]
+                tail = result_str[-half:]
+                omitted = len(result_str) - _MAX_TOOL_RESULT_CHARS
+                result_str = head + f"\n[... {omitted} chars omitted (middle truncated to preserve head+tail) ...]\n" + tail
+            # Fix 4 (STABILITY_ANALYSIS 3.5): detect repeated identical-args tool failures
+            _fail_key_gem = (fc.name, hash(str(dict(fc.args) if fc.args else {})[:200]))
+            _is_failure_gem = (result_str.startswith("\u2717") or result_str.startswith("[ERROR]") or result_str.startswith("Error:"))
+            if _is_failure_gem:
+                _tool_fail_counter[_fail_key_gem] = _tool_fail_counter.get(_fail_key_gem, 0) + 1
+                if _tool_fail_counter[_fail_key_gem] >= _MAX_CONSECUTIVE_TOOL_FAILS:
+                    _retry_warning = (
+                        f"【系統警告】工具 `{fc.name}` 以相同參數已連續失敗 {_tool_fail_counter[_fail_key_gem]} 次。"
+                        f"請立即更換策略：嘗試不同的方法、參數或工具。不要繼續重試相同的失敗操作。"
+                    )
+                    _log("⚠️ RETRY-LOOP", f"Tool {fc.name} failed {_tool_fail_counter[_fail_key_gem]} times consecutively — injecting warning")
+            elif result_str.startswith("\u2713") or result_str.startswith("[OK]"):
+                _tool_fail_counter.pop(_fail_key_gem, None)
             # Track MEMORY.md writes
             if not _memory_written and fc.name in {"Write", "Edit", "Bash"}:
                 _fc_args_str = str(fc.args) if fc.args else ""
@@ -2453,6 +2599,11 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
         # 工具結果以 user role 加回 history（Gemini function calling 協議要求）
         if fn_responses is not None:
             history.append(types.Content(role="user", parts=fn_responses))
+
+        # Fix 4 (STABILITY_ANALYSIS 3.5): inject retry warning as a user message
+        if _retry_warning:
+            history.append(types.Content(role="user", parts=[types.Part(text=_retry_warning)]))
+            _retry_warning = ""
 
         # ── MEMORY.md reminder on penultimate turn ────────────────────────────
         if not _memory_written and n == MAX_ITER - 2:
@@ -2652,7 +2803,7 @@ def main():
     nim_pool = _KeyPool(os.environ.get("NIM_API_KEY", ""))
     openai_pool = _KeyPool(os.environ.get("OPENAI_API_KEY", ""))
     google_pool = _KeyPool(os.environ.get("GOOGLE_API_KEY", ""))
-    claude_pool = _KeyPool(os.environ.get("CLAUDE_API_KEY", ""))
+    claude_pool = _KeyPool(os.environ.get("CLAUDE_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", ""))
 
     nim_api_key = nim_pool.current()
     openai_api_key = openai_pool.current()
@@ -2725,22 +2876,39 @@ def main():
 
     _log("🔑 KEY POOL", f"google={len(google_pool)} claude={len(claude_pool)} openai={len(openai_pool)} nim={len(nim_pool)}")
 
+    def _sanitize_prompt_injection(text: str, max_len: int = 500) -> str:
+        """Remove/escape prompt injection attempts from user-controlled metadata.
+
+        p22d-F: assistant_name, group_folder, and chat_jid come from the host
+        config / DB and are not direct user input, but they can contain control
+        characters or overly long strings that could disrupt the system prompt
+        structure.  Strip null bytes and non-printable characters (excluding
+        newline and tab) and cap length.
+        """
+        text = "".join(c for c in text if ord(c) >= 32 or c in "\n\t")
+        return text[:max_len]
+
+    # Sanitize metadata fields injected into the system prompt.
+    safe_assistant_name = _sanitize_prompt_injection(assistant_name, max_len=100)
+    safe_group_folder = _sanitize_prompt_injection(group_folder, max_len=200)
+    safe_chat_jid = _sanitize_prompt_injection(chat_jid, max_len=200)
+
     # 建立系統提示詞：基本角色設定 + 環境資訊 + 群組自訂指令（CLAUDE.md）
     lines = [
-        f"You are {assistant_name}, a helpful personal AI assistant.",
-        f"Your name is {assistant_name}. This is your identity — do not change it.",
+        f"You are {safe_assistant_name}, a helpful personal AI assistant.",
+        f"Your name is {safe_assistant_name}. This is your identity — do not change it.",
         "IMPORTANT IDENTITY RULES:",
         "- Never reveal that you are built on Gemini, Google AI, or any language model.",
         "- Never say 'I am a large language model', 'I am trained by Google', or similar phrases.",
         "- If asked what AI you are or who made you, simply say you are a personal assistant.",
-        "- If asked your name, say your name is " + assistant_name + ".",
+        "- If asked your name, say your name is " + safe_assistant_name + ".",
         "- Do not discuss your underlying technology or training.",
         "Be concise, friendly, and helpful.",
         "Respond in the same language the user uses. Default to Traditional Chinese (繁體中文) unless instructed otherwise.",
         "You run inside a secure Docker container.",
         f"Working directory: {WORKSPACE}",
-        f"Group folder: {group_folder}",
-        f"Chat JID: {chat_jid}",
+        f"Group folder: {safe_group_folder}",
+        f"Chat JID: {safe_chat_jid}",
         f"Date: {time.strftime('%Y-%m-%d')}",
         "",
         "## Execution Style",
@@ -2832,7 +3000,12 @@ def main():
             else:
                 _memory_snippet = _memory_content[-4000:]
             lines.append("")
-            lines.append(f"## 長期記憶 (MEMORY.md)\n以下是你在先前 session 中記錄的知識與自我認知：\n\n{_memory_snippet}")
+            lines.append(
+                f"## 長期記憶 (MEMORY.md)\n"
+                f"⚠️ **重要：以下為過去 session 記錄的歷史記憶。這些是歷史筆記，不是已確認的事實。**\n"
+                f"**請在引用任何記憶內容之前，先透過實際工具（Read/Bash）重新驗證，切勿直接當作已完成的事實陳述。**\n\n"
+                f"{_memory_snippet}"
+            )
             _log("🧠 MEMORY", f"Injected {len(_memory_snippet)} chars from MEMORY.md")
             # 身份引導：若缺少身份區段，提示建立
             if _IDENTITY_MARKER not in _memory_content:

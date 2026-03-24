@@ -675,6 +675,10 @@ def update_task(task_id: str, **kwargs) -> None:
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return
+    # p22d-A: assert all column names come from the whitelist before building the
+    # dynamic SET clause.  fields is already filtered; the assertion makes the
+    # invariant explicit and will catch any future refactor that bypasses it.
+    assert all(k in allowed for k in fields), f"Unexpected column in fields: {set(fields) - allowed}"
     set_clause = ", ".join(f"{k}=?" for k in fields)
     with _db_lock:
         db = get_db()
@@ -841,6 +845,9 @@ def upsert_group_genome(jid: str, **kwargs) -> None:
             """, (jid,))
 
             if fields:
+                # p22d-A: assert all column names come from the whitelist before
+                # building the dynamic SET clause.
+                assert all(k in allowed for k in fields), f"Unexpected column in fields: {set(fields) - allowed}"
                 # updated_at 用 SQL 函式，需特殊處理
                 set_parts = []
                 values = []
@@ -969,6 +976,10 @@ def log_evolution_event(jid: str, event_type: str, **kwargs) -> None:
     allowed = {"generation_before", "generation_after", "fitness_score",
                "avg_response_ms", "genome_before", "genome_after", "notes"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
+    # p22d-A: assert that only whitelisted column names reach the f-string.
+    # fields.keys() is already filtered above; this assertion makes it explicit
+    # so future refactors cannot accidentally bypass the whitelist.
+    assert all(k in allowed for k in fields), f"Unexpected column in fields: {set(fields) - allowed}"
     # genome dicts → JSON strings
     for key in ("genome_before", "genome_after"):
         if key in fields and isinstance(fields[key], dict):
