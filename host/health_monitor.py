@@ -259,7 +259,22 @@ async def _check_group_activity() -> None:
             if last_activity > 0:
                 last_activity_dt = datetime.fromtimestamp(last_activity / 1000)
                 days_inactive = (now - last_activity_dt).days
-                
+                # BUG-HM-06 FIX (LOW): guard against negative days_inactive.
+                # A negative value means last_activity_dt is in the future —
+                # possible if the stored timestamp was accidentally in seconds
+                # rather than milliseconds (off by 1000x).  A negative delta
+                # would never trigger the alert, silently hiding the data error.
+                # Skip groups with a future timestamp and log a warning so
+                # operators can identify the bad data.
+                if days_inactive < 0:
+                    log.warning(
+                        "Group %s has a future last_activity timestamp (%d ms) — "
+                        "possible unit mismatch (seconds stored as milliseconds?). "
+                        "Skipping inactivity check for this group.",
+                        jid, last_activity,
+                    )
+                    continue
+
                 if days_inactive >= GROUP_INACTIVE_DAYS:
                     # 只對主群組發送一次警告
                     if group.get('is_main', False):

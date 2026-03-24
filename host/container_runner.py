@@ -541,7 +541,11 @@ async def run_container_agent(
         "hotMemory": hot_memory,  # 三層記憶：熱記憶（8KB MEMORY.md，每次對話自動注入）
         "agentId": _agent_id,  # Phase 2 (UnifiedClaw): stable agent_id for FitnessReporter
     }
-    input_json = json.dumps(input_data, ensure_ascii=True)
+    # BUG-CR-03 FIX (LOW): use ensure_ascii=False so Chinese characters in
+    # prompt / hot_memory are serialised as UTF-8 rather than \uXXXX escape
+    # sequences.  The container reads stdin as UTF-8, so compact encoding is
+    # both correct and significantly smaller for CJK content.
+    input_json = json.dumps(input_data, ensure_ascii=False)
     # 記錄 container 啟動時間，用於計算回應時間（適應度追蹤）
     t0 = time.time()
     async with _get_active_lock():
@@ -614,7 +618,9 @@ async def run_container_agent(
     ]
 
     log.info("Starting container %s for group %s (run_id=%s)", container_name, folder, run_id)
-    _started_at = time.monotonic()
+    # BUG-CR-01 FIX (LOW): removed dead _started_at = time.monotonic() — t0 (time.time())
+    # is used for all elapsed-time calculations; the monotonic variable was assigned but
+    # never referenced, creating confusion about which clock base is authoritative.
     db.log_container_start(run_id, jid, folder, container_name, time.time())
 
     input_bytes = input_json.encode("utf-8")
@@ -667,6 +673,15 @@ async def run_container_agent(
             proc.stdin.write(input_bytes)
             await proc.stdin.drain()
             proc.stdin.close()
+            # BUG-CR-02 FIX (MEDIUM): await wait_closed() so the underlying
+            # StreamWriter transport is fully torn down before we proceed.
+            # Without this Python 3.12+ emits ResourceWarning: unclosed
+            # transport and the write buffer may not be fully flushed on some
+            # asyncio implementations.
+            try:
+                await proc.stdin.wait_closed()
+            except Exception:
+                pass  # Not available on all Python versions; best-effort
 
             # stderr_lines already declared at function scope above (p16c fix); reuse it.
             _MAX_STDERR_LINES = 5000  # Cap to prevent unbounded memory growth
@@ -990,6 +1005,15 @@ async def run_container_agent(
         # 超時：強制停止 container，避免佔用資源；不呼叫 on_success
         log.error("Container %s timed out after %ds", folder, config.CONTAINER_TIMEOUT)
         await _stop_container(container_name)
+        # BUG-CR-04 FIX (MEDIUM): after docker stop/kill, reap the asyncio
+        # subprocess so Python cleans up its internal pipe transports and
+        # avoids ResourceWarning about unclosed streams.  Short timeout —
+        # docker stop should have already sent SIGKILL by now.
+        if proc is not None:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except Exception:
+                pass
         # 記錄超時失敗數據（適應度扣分）
         _timeout_ms = int(config.CONTAINER_TIMEOUT * 1000)
         record_run(jid, run_id, _timeout_ms, retry_count=0, success=False)
