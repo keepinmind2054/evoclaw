@@ -1083,12 +1083,7 @@ def tool_web_fetch(url: str) -> str:
                 pass  # DNS error at connect time — let urllib surface it naturally
             return _orig_create_conn(address, *_args, **_kwargs)
 
-        _socket_rebind.create_connection = _safe_create_connection
-        try:
-            _opener = urllib.request.build_opener(_LimitedRedirectHandler)
-        finally:
-            # Restore original create_connection regardless of outcome
-            _socket_rebind.create_connection = _orig_create_conn
+        _opener = urllib.request.build_opener(_LimitedRedirectHandler)
 
         req = urllib.request.Request(
             url,
@@ -1097,7 +1092,21 @@ def tool_web_fetch(url: str) -> str:
                 "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
             }
         )
-        with _opener.open(req, timeout=30) as resp:
+        # BUG-P24A-1: the previous code patched socket.create_connection only
+        # during build_opener() (which makes no network connections) and then
+        # restored the original before _opener.open() was called.  The DNS
+        # rebinding protection was therefore never active during the actual TCP
+        # connection, making it completely ineffective.  Fix: keep the patched
+        # socket.create_connection active for the duration of _opener.open() so
+        # every TCP connection made while fetching the URL is validated.
+        _socket_rebind.create_connection = _safe_create_connection
+        try:
+            _fetch_ctx = _opener.open(req, timeout=30)
+        except Exception:
+            _socket_rebind.create_connection = _orig_create_conn
+            raise
+        _socket_rebind.create_connection = _orig_create_conn
+        with _fetch_ctx as resp:
             content_type = resp.headers.get("Content-Type", "")
 
             # ── Binary content detection ──────────────────────────────────────

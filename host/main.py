@@ -553,6 +553,15 @@ async def _on_message(jid: str, sender: str, sender_name: str, content: str,
         now = time.time()
         last_notify = _sender_rate_limit_notify.get(sender, 0.0)
         if now - last_notify >= _SENDER_RATE_NOTIFY_COOLDOWN:
+            # BUG-P24A-2: _sender_rate_limit_notify grew unboundedly because entries
+            # were inserted but never evicted.  Over days/weeks with many unique
+            # senders hitting the rate limit, this dict accumulates indefinitely.
+            # Cap at 2000 entries; when full, evict the entry with the oldest
+            # timestamp before inserting the new one.
+            _SENDER_NOTIFY_MAX = 2000
+            if len(_sender_rate_limit_notify) >= _SENDER_NOTIFY_MAX:
+                _oldest_sender = min(_sender_rate_limit_notify, key=_sender_rate_limit_notify.__getitem__)
+                _sender_rate_limit_notify.pop(_oldest_sender, None)
             _sender_rate_limit_notify[sender] = now
             try:
                 from .router import route_outbound as _ro_rl
