@@ -1,8 +1,8 @@
-# Claude Agent SDK Deep Dive
+# Claude Agent SDK 深度解析
 
-Findings from reverse-engineering `@google/genai` v0.2.29–0.2.34 to understand how `query()` works, why agent teams subagents were being killed, and how to fix it. Supplemented with official SDK reference docs.
+透過逆向工程 `@google/genai` v0.2.29–0.2.34 所得到的研究成果，用於理解 `query()` 的運作原理、為何 agent 團隊的子代理（subagent）會被終止，以及如何修復這個問題。並輔以官方 SDK 參考文件。
 
-## Architecture
+## 架構
 
 ```
 Agent Runner (our code)
@@ -12,17 +12,17 @@ Agent Runner (our code)
               └── Task tool → spawns subagent subprocesses
 ```
 
-The SDK spawns `cli.js` as a child process with `--output-format stream-json --input-format stream-json --print --verbose` flags. Communication happens via JSON-lines on stdin/stdout.
+SDK 以 `--output-format stream-json --input-format stream-json --print --verbose` 旗標將 `cli.js` 作為子行程（child process）啟動。通訊透過 stdin/stdout 上的 JSON-lines 進行。
 
-`query()` returns a `Query` object extending `AsyncGenerator<SDKMessage, void>`. Internally:
+`query()` 回傳一個繼承自 `AsyncGenerator<SDKMessage, void>` 的 `Query` 物件。內部運作如下：
 
-- SDK spawns CLI as a child process, communicates via stdin/stdout JSON lines
-- SDK's `readMessages()` reads from CLI stdout, enqueues into internal stream
-- `readSdkMessages()` async generator yields from that stream
-- `[Symbol.asyncIterator]` returns `readSdkMessages()`
-- Iterator returns `done: true` only when CLI closes stdout
+- SDK 將 CLI 作為子行程啟動，透過 stdin/stdout JSON lines 進行通訊
+- SDK 的 `readMessages()` 從 CLI 的 stdout 讀取資料，並排入內部 stream
+- `readSdkMessages()` async generator 從該 stream 中 yield 資料
+- `[Symbol.asyncIterator]` 回傳 `readSdkMessages()`
+- 只有在 CLI 關閉 stdout 時，Iterator 才會回傳 `done: true`
 
-Both V1 (`query()`) and V2 (`createSession`/`send`/`stream`) use the exact same three-layer architecture:
+V1（`query()`）和 V2（`createSession`/`send`/`stream`）均使用完全相同的三層架構：
 
 ```
 SDK (sdk.mjs)           CLI Process (cli.js)
@@ -36,66 +36,66 @@ $X Query      <------   stdout writer
                         Anthropic Messages API
 ```
 
-## The Core Agent Loop (EZ)
+## 核心 Agent 迴圈（EZ）
 
-Inside the CLI, the agentic loop is a **recursive async generator called `EZ()`**, not an iterative while loop:
+在 CLI 內部，agentic 迴圈是一個**名為 `EZ()` 的遞迴 async generator**，而非迭代式的 while 迴圈：
 
 ```
 EZ({ messages, systemPrompt, canUseTool, maxTurns, turnCount=1, ... })
 ```
 
-Each invocation = one API call to Claude (one "turn").
+每次呼叫 = 對 Claude 發起一次 API 呼叫（一個「回合」）。
 
-### Flow per turn:
+### 每個回合的流程：
 
-1. **Prepare messages** — trim context, run compaction if needed
-2. **Call the Anthropic API** (via `mW1` streaming function)
-3. **Extract tool_use blocks** from the response
-4. **Branch:**
-   - If **no tool_use blocks** → stop (run stop hooks, return)
-   - If **tool_use blocks present** → execute tools, increment turnCount, recurse
+1. **準備訊息** — 修剪上下文，必要時執行壓縮（compaction）
+2. **呼叫 Anthropic API**（透過 `mW1` streaming 函式）
+3. **從回應中提取 tool_use 區塊**
+4. **分支：**
+   - 若**沒有 tool_use 區塊** → 停止（執行 stop hooks，回傳）
+   - 若**有 tool_use 區塊** → 執行工具，遞增 turnCount，遞迴呼叫
 
-All complex logic — the agent loop, tool execution, background tasks, teammate orchestration — runs inside the CLI subprocess. `query()` is a thin transport wrapper.
+所有複雜邏輯——agent 迴圈、工具執行、背景任務、隊友協調——都在 CLI 子行程內執行。`query()` 只是一個薄薄的傳輸層封裝。
 
-## query() Options
+## query() 選項
 
-Full `Options` type from the official docs:
+官方文件中完整的 `Options` 型別：
 
-| Property | Type | Default | Description |
-|----------|------|---------|-------------|
-| `abortController` | `AbortController` | `new AbortController()` | Controller for cancelling operations |
-| `additionalDirectories` | `string[]` | `[]` | Additional directories Claude can access |
-| `agents` | `Record<string, AgentDefinition>` | `undefined` | Programmatically define subagents (not agent teams — no orchestration) |
-| `allowDangerouslySkipPermissions` | `boolean` | `false` | Required when using `permissionMode: 'bypassPermissions'` |
-| `allowedTools` | `string[]` | All tools | List of allowed tool names |
-| `betas` | `SdkBeta[]` | `[]` | Beta features (e.g., `['context-1m-2025-08-07']` for 1M context) |
-| `canUseTool` | `CanUseTool` | `undefined` | Custom permission function for tool usage |
-| `continue` | `boolean` | `false` | Continue the most recent conversation |
-| `cwd` | `string` | `process.cwd()` | Current working directory |
-| `disallowedTools` | `string[]` | `[]` | List of disallowed tool names |
-| `enableFileCheckpointing` | `boolean` | `false` | Enable file change tracking for rewinding |
-| `env` | `Dict<string>` | `process.env` | Environment variables |
-| `executable` | `'bun' \| 'deno' \| 'node'` | Auto-detected | JavaScript runtime |
-| `fallbackModel` | `string` | `undefined` | Model to use if primary fails |
-| `forkSession` | `boolean` | `false` | When resuming, fork to a new session ID instead of continuing original |
-| `hooks` | `Partial<Record<HookEvent, HookCallbackMatcher[]>>` | `{}` | Hook callbacks for events |
-| `includePartialMessages` | `boolean` | `false` | Include partial message events (streaming) |
-| `maxBudgetUsd` | `number` | `undefined` | Maximum budget in USD for the query |
-| `maxThinkingTokens` | `number` | `undefined` | Maximum tokens for thinking process |
-| `maxTurns` | `number` | `undefined` | Maximum conversation turns |
-| `mcpServers` | `Record<string, McpServerConfig>` | `{}` | MCP server configurations |
-| `model` | `string` | Default from CLI | Claude model to use |
-| `outputFormat` | `{ type: 'json_schema', schema: JSONSchema }` | `undefined` | Structured output format |
-| `pathToClaudeCodeExecutable` | `string` | Uses built-in | Path to Claude Code executable |
-| `permissionMode` | `PermissionMode` | `'default'` | Permission mode |
-| `plugins` | `SdkPluginConfig[]` | `[]` | Load custom plugins from local paths |
-| `resume` | `string` | `undefined` | Session ID to resume |
-| `resumeSessionAt` | `string` | `undefined` | Resume session at a specific message UUID |
-| `sandbox` | `SandboxSettings` | `undefined` | Sandbox behavior configuration |
-| `settingSources` | `SettingSource[]` | `[]` (none) | Which filesystem settings to load. Must include `'project'` to load CLAUDE.md |
-| `stderr` | `(data: string) => void` | `undefined` | Callback for stderr output |
-| `systemPrompt` | `string \| { type: 'preset'; preset: 'claude_code'; append?: string }` | `undefined` | System prompt. Use preset to get Claude Code's prompt, with optional `append` |
-| `tools` | `string[] \| { type: 'preset'; preset: 'claude_code' }` | `undefined` | Tool configuration |
+| 屬性 | 型別 | 預設值 | 說明 |
+|------|------|--------|------|
+| `abortController` | `AbortController` | `new AbortController()` | 用於取消操作的控制器 |
+| `additionalDirectories` | `string[]` | `[]` | Claude 可存取的額外目錄 |
+| `agents` | `Record<string, AgentDefinition>` | `undefined` | 以程式方式定義子代理（非 agent 團隊——無代理間協調） |
+| `allowDangerouslySkipPermissions` | `boolean` | `false` | 使用 `permissionMode: 'bypassPermissions'` 時必須設為 true |
+| `allowedTools` | `string[]` | 所有工具 | 允許的工具名稱清單 |
+| `betas` | `SdkBeta[]` | `[]` | Beta 功能（例如 `['context-1m-2025-08-07']` 啟用 1M 上下文） |
+| `canUseTool` | `CanUseTool` | `undefined` | 工具使用的自訂權限函式 |
+| `continue` | `boolean` | `false` | 繼續最近一次對話 |
+| `cwd` | `string` | `process.cwd()` | 當前工作目錄 |
+| `disallowedTools` | `string[]` | `[]` | 不允許的工具名稱清單 |
+| `enableFileCheckpointing` | `boolean` | `false` | 啟用檔案變更追蹤以供回溯 |
+| `env` | `Dict<string>` | `process.env` | 環境變數 |
+| `executable` | `'bun' \| 'deno' \| 'node'` | 自動偵測 | JavaScript 執行環境 |
+| `fallbackModel` | `string` | `undefined` | 主要模型失敗時使用的備用模型 |
+| `forkSession` | `boolean` | `false` | 繼續對話時，fork 成新的 session ID 而非延續原始 session |
+| `hooks` | `Partial<Record<HookEvent, HookCallbackMatcher[]>>` | `{}` | 事件的 Hook 回呼 |
+| `includePartialMessages` | `boolean` | `false` | 包含部分訊息事件（streaming） |
+| `maxBudgetUsd` | `number` | `undefined` | 查詢的最高預算（美元） |
+| `maxThinkingTokens` | `number` | `undefined` | 思考過程的最大 token 數 |
+| `maxTurns` | `number` | `undefined` | 最大對話回合數 |
+| `mcpServers` | `Record<string, McpServerConfig>` | `{}` | MCP 伺服器設定 |
+| `model` | `string` | CLI 預設值 | 使用的 Claude 模型 |
+| `outputFormat` | `{ type: 'json_schema', schema: JSONSchema }` | `undefined` | 結構化輸出格式 |
+| `pathToClaudeCodeExecutable` | `string` | 使用內建 | Claude Code 執行檔路徑 |
+| `permissionMode` | `PermissionMode` | `'default'` | 權限模式 |
+| `plugins` | `SdkPluginConfig[]` | `[]` | 從本地路徑載入自訂套件 |
+| `resume` | `string` | `undefined` | 要繼續的 session ID |
+| `resumeSessionAt` | `string` | `undefined` | 從特定訊息 UUID 處繼續 session |
+| `sandbox` | `SandboxSettings` | `undefined` | 沙箱行為設定 |
+| `settingSources` | `SettingSource[]` | `[]`（無） | 要載入哪些檔案系統設定。必須包含 `'project'` 才能載入 CLAUDE.md |
+| `stderr` | `(data: string) => void` | `undefined` | stderr 輸出的回呼 |
+| `systemPrompt` | `string \| { type: 'preset'; preset: 'claude_code'; append?: string }` | `undefined` | System prompt。使用 preset 可取得 Claude Code 的 prompt，並可選擇性附加內容 |
+| `tools` | `string[] \| { type: 'preset'; preset: 'claude_code' }` | `undefined` | 工具設定 |
 
 ### PermissionMode
 
@@ -112,11 +112,11 @@ type SettingSource = 'user' | 'project' | 'local';
 // 'local'   → .claude/settings.local.json (gitignored)
 ```
 
-When omitted, SDK loads NO filesystem settings (isolation by default). Precedence: local > project > user. Programmatic options always override filesystem settings.
+省略時，SDK 不載入任何檔案系統設定（預設隔離）。優先順序：local > project > user。程式選項永遠覆蓋檔案系統設定。
 
 ### AgentDefinition
 
-Programmatic subagents (NOT agent teams — these are simpler, no inter-agent coordination):
+程式化子代理（非 agent 團隊——較為簡單，無代理間協調）：
 
 ```typescript
 type AgentDefinition = {
@@ -158,30 +158,30 @@ type PermissionResult =
   | { behavior: 'deny'; message: string; interrupt?: boolean };
 ```
 
-## SDKMessage Types
+## SDKMessage 型別
 
-`query()` can yield 16 message types. The official docs show a simplified union of 7, but `sdk.d.ts` has the full set:
+`query()` 可以 yield 16 種訊息型別。官方文件展示了簡化的 7 種聯集型別，但 `sdk.d.ts` 中有完整的集合：
 
-| Type | Subtype | Purpose |
-|------|---------|---------|
-| `system` | `init` | Session initialized, contains session_id, tools, model |
-| `system` | `task_notification` | Background agent completed/failed/stopped |
-| `system` | `compact_boundary` | Conversation was compacted |
-| `system` | `status` | Status change (e.g. compacting) |
-| `system` | `hook_started` | Hook execution started |
-| `system` | `hook_progress` | Hook progress output |
-| `system` | `hook_response` | Hook completed |
-| `system` | `files_persisted` | Files saved |
-| `assistant` | — | Claude's response (text + tool calls) |
-| `user` | — | User message (internal) |
-| `user` (replay) | — | Replayed user message on resume |
-| `result` | `success` / `error_*` | Final result of a prompt processing round |
-| `stream_event` | — | Partial streaming (when includePartialMessages) |
-| `tool_progress` | — | Long-running tool progress |
-| `auth_status` | — | Authentication state changes |
-| `tool_use_summary` | — | Summary of preceding tool uses |
+| 型別 | 子型別 | 用途 |
+|------|--------|------|
+| `system` | `init` | Session 初始化，包含 session_id、工具、模型 |
+| `system` | `task_notification` | 背景 agent 已完成/失敗/停止 |
+| `system` | `compact_boundary` | 對話已壓縮 |
+| `system` | `status` | 狀態變更（例如壓縮中） |
+| `system` | `hook_started` | Hook 執行開始 |
+| `system` | `hook_progress` | Hook 進度輸出 |
+| `system` | `hook_response` | Hook 已完成 |
+| `system` | `files_persisted` | 檔案已儲存 |
+| `assistant` | — | Claude 的回應（文字與工具呼叫） |
+| `user` | — | 使用者訊息（內部） |
+| `user`（重播） | — | 繼續 session 時重播的使用者訊息 |
+| `result` | `success` / `error_*` | 一輪 prompt 處理的最終結果 |
+| `stream_event` | — | 部分 streaming（啟用 includePartialMessages 時） |
+| `tool_progress` | — | 長時間執行的工具進度 |
+| `auth_status` | — | 身份驗證狀態變更 |
+| `tool_use_summary` | — | 前次工具使用的摘要 |
 
-### SDKTaskNotificationMessage (sdk.d.ts:1507)
+### SDKTaskNotificationMessage（sdk.d.ts:1507）
 
 ```typescript
 type SDKTaskNotificationMessage = {
@@ -196,9 +196,9 @@ type SDKTaskNotificationMessage = {
 };
 ```
 
-### SDKResultMessage (sdk.d.ts:1375)
+### SDKResultMessage（sdk.d.ts:1375）
 
-Two variants with shared fields:
+兩種變體共享欄位：
 
 ```typescript
 // Shared fields on both variants:
@@ -223,7 +223,7 @@ type SDKResultError = {
 };
 ```
 
-Useful fields on result: `total_cost_usd`, `duration_ms`, `num_turns`, `modelUsage` (per-model breakdown with `costUSD`, `inputTokens`, `outputTokens`, `contextWindow`).
+result 上的實用欄位：`total_cost_usd`、`duration_ms`、`num_turns`、`modelUsage`（各模型細項，包含 `costUSD`、`inputTokens`、`outputTokens`、`contextWindow`）。
 
 ### SDKAssistantMessage
 
@@ -237,7 +237,7 @@ type SDKAssistantMessage = {
 };
 ```
 
-### SDKSystemMessage (init)
+### SDKSystemMessage（init）
 
 ```typescript
 type SDKSystemMessage = {
@@ -256,64 +256,64 @@ type SDKSystemMessage = {
 };
 ```
 
-## Turn Behavior: When the Agent Stops vs Continues
+## 回合行為：Agent 何時停止，何時繼續
 
-### When the Agent STOPS (no more API calls)
+### Agent 停止的情況（不再發起 API 呼叫）
 
-**1. No tool_use blocks in response (THE PRIMARY CASE)**
+**1. 回應中無 tool_use 區塊（主要情況）**
 
-Claude responded with text only — it decided it has completed the task. The API's `stop_reason` will be `"end_turn"`. The SDK does NOT make this decision — it's entirely driven by Claude's model output.
+Claude 僅以文字回應——它判斷任務已完成。API 的 `stop_reason` 將為 `"end_turn"`。SDK 不做此決定——完全由 Claude 的模型輸出驅動。
 
-**2. Max turns exceeded** — Results in `SDKResultError` with `subtype: "error_max_turns"`.
+**2. 超過最大回合數** — 產生 `SDKResultError`，`subtype: "error_max_turns"`。
 
-**3. Abort signal** — User interruption via `abortController`.
+**3. Abort signal** — 使用者透過 `abortController` 中斷。
 
-**4. Budget exceeded** — `totalCost >= maxBudgetUsd` → `"error_max_budget_usd"`.
+**4. 超出預算** — `totalCost >= maxBudgetUsd` → `"error_max_budget_usd"`。
 
-**5. Stop hook prevents continuation** — Hook returns `{preventContinuation: true}`.
+**5. Stop hook 阻止繼續** — Hook 回傳 `{preventContinuation: true}`。
 
-### When the Agent CONTINUES (makes another API call)
+### Agent 繼續的情況（再次發起 API 呼叫）
 
-**1. Response contains tool_use blocks (THE PRIMARY CASE)** — Execute tools, increment turnCount, recurse into EZ.
+**1. 回應包含 tool_use 區塊（主要情況）** — 執行工具，遞增 turnCount，遞迴進入 EZ。
 
-**2. max_output_tokens recovery** — Up to 3 retries with a "break your work into smaller pieces" context message.
+**2. max_output_tokens 恢復** — 最多重試 3 次，並帶入「將工作拆分成更小部分」的上下文訊息。
 
-**3. Stop hook blocking errors** — Errors fed back as context messages, loop continues.
+**3. Stop hook 阻塞錯誤** — 錯誤作為上下文訊息回饋，迴圈繼續。
 
-**4. Model fallback** — Retry with fallback model (one-time).
+**4. 模型備援** — 使用備援模型重試（僅一次）。
 
-### Decision Table
+### 決策表
 
-| Condition | Action | Result Type |
-|-----------|--------|-------------|
-| Response has `tool_use` blocks | Execute tools, recurse into `EZ` | continues |
-| Response has NO `tool_use` blocks | Run stop hooks, return | `success` |
+| 條件 | 動作 | 結果型別 |
+|------|------|----------|
+| 回應有 `tool_use` 區塊 | 執行工具，遞迴進入 `EZ` | 繼續 |
+| 回應無 `tool_use` 區塊 | 執行 stop hooks，回傳 | `success` |
 | `turnCount > maxTurns` | Yield max_turns_reached | `error_max_turns` |
-| `totalCost >= maxBudgetUsd` | Yield budget error | `error_max_budget_usd` |
-| `abortController.signal.aborted` | Yield interrupted msg | depends on context |
-| `stop_reason === "max_tokens"` (output) | Retry up to 3x with recovery prompt | continues |
-| Stop hook `preventContinuation` | Return immediately | `success` |
-| Stop hook blocking error | Feed error back, recurse | continues |
-| Model fallback error | Retry with fallback model (one-time) | continues |
+| `totalCost >= maxBudgetUsd` | Yield 預算錯誤 | `error_max_budget_usd` |
+| `abortController.signal.aborted` | Yield 中斷訊息 | 視上下文而定 |
+| `stop_reason === "max_tokens"`（輸出） | 帶恢復 prompt 最多重試 3 次 | 繼續 |
+| Stop hook `preventContinuation` | 立即回傳 | `success` |
+| Stop hook 阻塞錯誤 | 回饋錯誤，遞迴 | 繼續 |
+| 模型備援錯誤 | 使用備援模型重試（僅一次） | 繼續 |
 
-## Subagent Execution Modes
+## 子代理執行模式
 
-### Case 1: Synchronous Subagents (`run_in_background: false`) — BLOCKS
+### 情況一：同步子代理（`run_in_background: false`）— 阻塞
 
-Parent agent calls Task tool → `VR()` runs `EZ()` for subagent → parent waits for full result → tool result returned to parent → parent continues.
+父代理呼叫 Task 工具 → `VR()` 為子代理執行 `EZ()` → 父代理等待完整結果 → 工具結果回傳給父代理 → 父代理繼續。
 
-The subagent runs the full recursive EZ loop. The parent's tool execution is suspended via `await`. There is a mid-execution "promotion" mechanism: a synchronous subagent can be promoted to background via `Promise.race()` against a `backgroundSignal` promise.
+子代理執行完整的遞迴 EZ 迴圈。父代理的工具執行透過 `await` 暫停。存在一個執行中期的「晉升」機制：同步子代理可透過 `Promise.race()` 對抗 `backgroundSignal` promise，晉升為背景執行。
 
-### Case 2: Background Tasks (`run_in_background: true`) — DOES NOT WAIT
+### 情況二：背景任務（`run_in_background: true`）— 不等待
 
-- **Bash tool:** Command spawned, tool returns immediately with empty result + `backgroundTaskId`
-- **Task/Agent tool:** Subagent launched in fire-and-forget wrapper (`g01()`), tool returns immediately with `status: "async_launched"` + `outputFile` path
+- **Bash 工具：** 命令啟動後，工具立即回傳空結果 + `backgroundTaskId`
+- **Task/Agent 工具：** 子代理以即發即忘的包裝器（`g01()`）啟動，工具立即回傳 `status: "async_launched"` + `outputFile` 路徑
 
-Zero "wait for background tasks" logic before emitting the `type: "result"` message. When a background task completes, an `SDKTaskNotificationMessage` is emitted separately.
+在發出 `type: "result"` 訊息前，沒有任何「等待背景任務」的邏輯。背景任務完成時，會另外發出 `SDKTaskNotificationMessage`。
 
-### Case 3: Agent Teams (TeammateTool / SendMessage) — RESULT FIRST, THEN POLLING
+### 情況三：Agent 團隊（TeammateTool / SendMessage）— 先回傳結果，再輪詢
 
-The team leader runs its normal EZ loop, which includes spawning teammates. When the leader's EZ loop finishes, `type: "result"` is emitted. Then the leader enters a post-result polling loop:
+團隊領導者執行其正常的 EZ 迴圈，其中包括啟動隊友。當領導者的 EZ 迴圈結束後，`type: "result"` 被發出。接著領導者進入結果後的輪詢迴圈：
 
 ```javascript
 while (true) {
@@ -324,17 +324,17 @@ while (true) {
 }
 ```
 
-From the SDK consumer's perspective: you receive the initial `type: "result"`, but the AsyncGenerator may continue yielding more messages as the team leader processes teammate responses and re-enters the agent loop. The generator only truly finishes when all teammates have shut down.
+從 SDK 消費者的角度來看：你會收到初始的 `type: "result"`，但 AsyncGenerator 可能在團隊領導者處理隊友回應並重新進入 agent 迴圈時，持續 yield 更多訊息。只有當所有隊友都關閉後，generator 才真正結束。
 
-## The isSingleUserTurn Problem
+## isSingleUserTurn 問題
 
-From sdk.mjs:
+來自 sdk.mjs：
 
 ```javascript
 QK = typeof X === "string"  // isSingleUserTurn = true when prompt is a string
 ```
 
-When `isSingleUserTurn` is true and the first `result` message arrives:
+當 `isSingleUserTurn` 為 true 且第一個 `result` 訊息到達時：
 
 ```javascript
 if (this.isSingleUserTurn) {
@@ -342,15 +342,15 @@ if (this.isSingleUserTurn) {
 }
 ```
 
-This triggers a chain reaction:
+這會觸發連鎖反應：
 
-1. SDK closes CLI stdin
-2. CLI detects stdin close
-3. Polling loop sees `D = true` (stdin closed) with active teammates
-4. Injects shutdown prompt → leader sends `shutdown_request` to all teammates
-5. **Teammates get killed mid-research**
+1. SDK 關閉 CLI 的 stdin
+2. CLI 偵測到 stdin 關閉
+3. 輪詢迴圈看到 `D = true`（stdin 已關閉），且有活躍的隊友
+4. 注入關閉 prompt → 領導者向所有隊友發送 `shutdown_request`
+5. **隊友在研究途中被終止**
 
-The shutdown prompt (found via `BGq` variable in minified cli.js):
+關閉 prompt（在縮小版 cli.js 的 `BGq` 變數中找到）：
 
 ```
 You are running in non-interactive mode and cannot return a response
@@ -363,21 +363,21 @@ You MUST shut down your team before preparing your final response:
 4. Only then provide your final response to the user
 ```
 
-### The practical problem
+### 實際問題
 
-With V1 `query()` + string prompt + agent teams:
+使用 V1 `query()` + 字串 prompt + agent 團隊時：
 
-1. Leader spawns teammates, they start researching
-2. Leader's EZ loop ends ("I've dispatched the team, they're working on it")
-3. `type: "result"` emitted
-4. SDK sees `isSingleUserTurn = true` → closes stdin immediately
-5. Polling loop detects stdin closed + active teammates → injects shutdown prompt
-6. Leader sends `shutdown_request` to all teammates
-7. **Teammates could be 10 seconds into a 5-minute research task and they get told to stop**
+1. 領導者啟動隊友，他們開始研究
+2. 領導者的 EZ 迴圈結束（「我已派出團隊，他們正在執行」）
+3. `type: "result"` 被發出
+4. SDK 看到 `isSingleUserTurn = true` → 立即關閉 stdin
+5. 輪詢迴圈偵測到 stdin 已關閉 + 有活躍的隊友 → 注入關閉 prompt
+6. 領導者向所有隊友發送 `shutdown_request`
+7. **隊友可能才進行了 10 秒的 5 分鐘研究任務，就被告知停止**
 
-## The Fix: Streaming Input Mode
+## 解決方案：Streaming 輸入模式
 
-Instead of passing a string prompt (which sets `isSingleUserTurn = true`), pass an `AsyncIterable<SDKUserMessage>`:
+不要傳入字串 prompt（會將 `isSingleUserTurn` 設為 true），而是傳入 `AsyncIterable<SDKUserMessage>`：
 
 ```typescript
 // Before (broken for agent teams):
@@ -387,21 +387,21 @@ query({ prompt: "do something" })
 query({ prompt: asyncIterableOfMessages })
 ```
 
-When prompt is an `AsyncIterable`:
+當 prompt 為 `AsyncIterable` 時：
 - `isSingleUserTurn = false`
-- SDK does NOT close stdin after first result
-- CLI stays alive, continues processing
-- Background agents keep running
-- `task_notification` messages flow through the iterator
-- We control when to end the iterable
+- SDK 不會在第一個結果後關閉 stdin
+- CLI 保持存活，繼續處理
+- 背景 agent 持續運行
+- `task_notification` 訊息流經 iterator
+- 由我們控制何時結束 iterable
 
-### Additional Benefit: Streaming New Messages
+### 額外優點：Streaming 新訊息
 
-With the async iterable approach, we can push new incoming WhatsApp messages into the iterable while the agent is still working. Instead of queuing messages until the container exits and spawning a new container, we stream them directly into the running session.
+透過 async iterable 的方式，我們可以在 agent 仍在工作時，將新進入的 WhatsApp 訊息推入 iterable。無需將訊息排隊等待容器退出後再啟動新容器，而是直接 stream 到正在執行的 session 中。
 
-### Intended Lifecycle with Agent Teams
+### Agent 團隊的預期生命週期
 
-With the async iterable fix (`isSingleUserTurn = false`), stdin stays open so the CLI never hits the teammate check or shutdown prompt injection:
+使用 async iterable 修復後（`isSingleUserTurn = false`），stdin 保持開啟，因此 CLI 永遠不會觸及隊友檢查或關閉 prompt 注入：
 
 ```
 1. system/init          → session initialized
@@ -414,21 +414,21 @@ With the async iterable fix (`isSingleUserTurn = false`), stdin stays open so th
 8. [iterator done]      → CLI closed stdout, all done
 ```
 
-All results are meaningful — capture every one, not just the first.
+所有結果都有意義——擷取每一個，而非只擷取第一個。
 
-## V1 vs V2 API
+## V1 與 V2 API
 
-### V1: `query()` — One-shot async generator
+### V1：`query()` — 單次 async generator
 
 ```typescript
 const q = query({ prompt: "...", options: {...} });
 for await (const msg of q) { /* process events */ }
 ```
 
-- When `prompt` is a string: `isSingleUserTurn = true` → stdin auto-closes after first result
-- For multi-turn: must pass an `AsyncIterable<SDKUserMessage>` and manage coordination yourself
+- 當 `prompt` 為字串時：`isSingleUserTurn = true` → 第一個結果後自動關閉 stdin
+- 多回合場景：必須傳入 `AsyncIterable<SDKUserMessage>` 並自行管理協調
 
-### V2: `createSession()` + `send()` / `stream()` — Persistent session
+### V2：`createSession()` + `send()` / `stream()` — 持久 session
 
 ```typescript
 await using session = unstable_v2_createSession({ model: "..." });
@@ -438,27 +438,27 @@ await session.send("follow-up");
 for await (const msg of session.stream()) { /* events */ }
 ```
 
-- `isSingleUserTurn = false` always → stdin stays open
-- `send()` enqueues into an async queue (`QX`)
-- `stream()` yields from the same message generator, stopping on `result` type
-- Multi-turn is natural — just alternate `send()` / `stream()`
-- V2 does NOT call V1 `query()` internally — both independently create Transport + Query
+- `isSingleUserTurn = false` 永遠如此 → stdin 保持開啟
+- `send()` 排入 async 佇列（`QX`）
+- `stream()` 從相同的訊息 generator yield，遇到 `result` 型別時停止
+- 多回合很自然——只需交替呼叫 `send()` / `stream()`
+- V2 內部不呼叫 V1 的 `query()`——兩者都獨立建立 Transport + Query
 
-### Comparison Table
+### 比較表
 
-| Aspect | V1 | V2 |
-|--------|----|----|
-| `isSingleUserTurn` | `true` for string prompt | always `false` |
-| Multi-turn | Requires managing `AsyncIterable` | Just call `send()`/`stream()` |
-| stdin lifecycle | Auto-closes after first result | Stays open until `close()` |
-| Agentic loop | Identical `EZ()` | Identical `EZ()` |
-| Stop conditions | Same | Same |
-| Session persistence | Must pass `resume` to new `query()` | Built-in via session object |
-| API stability | Stable | Unstable preview (`unstable_v2_*` prefix) |
+| 面向 | V1 | V2 |
+|------|----|----|
+| `isSingleUserTurn` | 字串 prompt 時為 `true` | 永遠為 `false` |
+| 多回合 | 需要管理 `AsyncIterable` | 只需呼叫 `send()`/`stream()` |
+| stdin 生命週期 | 第一個結果後自動關閉 | 直到呼叫 `close()` 前保持開啟 |
+| Agentic 迴圈 | 相同的 `EZ()` | 相同的 `EZ()` |
+| 停止條件 | 相同 | 相同 |
+| Session 持久性 | 必須傳入 `resume` 給新的 `query()` | 透過 session 物件內建 |
+| API 穩定性 | 穩定 | 不穩定預覽版（`unstable_v2_*` 前綴） |
 
-**Key finding: Zero difference in turn behavior.** Both use the same CLI process, the same `EZ()` recursive generator, and the same decision logic.
+**關鍵發現：回合行為零差異。** 兩者使用相同的 CLI 行程、相同的 `EZ()` 遞迴 generator，以及相同的決策邏輯。
 
-## Hook Events
+## Hook 事件
 
 ```typescript
 type HookEvent =
@@ -476,7 +476,7 @@ type HookEvent =
   | 'PermissionRequest'; // Permission being requested
 ```
 
-### Hook Configuration
+### Hook 設定
 
 ```typescript
 interface HookCallbackMatcher {
@@ -491,7 +491,7 @@ type HookCallback = (
 ) => Promise<HookJSONOutput>;
 ```
 
-### Hook Return Values
+### Hook 回傳值
 
 ```typescript
 type HookJSONOutput = AsyncHookJSONOutput | SyncHookJSONOutput;
@@ -513,7 +513,7 @@ type SyncHookJSONOutput = {
 };
 ```
 
-### Subagent Hooks (from sdk.d.ts)
+### 子代理 Hooks（來自 sdk.d.ts）
 
 ```typescript
 type SubagentStartHookInput = BaseHookInput & {
@@ -533,9 +533,9 @@ type SubagentStopHookInput = BaseHookInput & {
 // BaseHookInput = { session_id, transcript_path, cwd, permission_mode? }
 ```
 
-## Query Interface Methods
+## Query 介面方法
 
-The `Query` object (sdk.d.ts:931). Official docs list these public methods:
+`Query` 物件（sdk.d.ts:931）。官方文件列出以下公開方法：
 
 ```typescript
 interface Query extends AsyncGenerator<SDKMessage, void> {
@@ -551,12 +551,12 @@ interface Query extends AsyncGenerator<SDKMessage, void> {
 }
 ```
 
-Found in sdk.d.ts but NOT in official docs (may be internal):
-- `streamInput(stream)` — stream additional user messages
-- `close()` — forcefully end the query
-- `setMcpServers(servers)` — dynamically add/remove MCP servers
+在 sdk.d.ts 中找到但官方文件未列出（可能為內部使用）：
+- `streamInput(stream)` — stream 額外的使用者訊息
+- `close()` — 強制結束 query
+- `setMcpServers(servers)` — 動態新增/移除 MCP 伺服器
 
-## Sandbox Configuration
+## 沙箱設定
 
 ```typescript
 type SandboxSettings = {
@@ -578,13 +578,13 @@ type SandboxSettings = {
 };
 ```
 
-When `allowUnsandboxedCommands` is true, the model can set `dangerouslyDisableSandbox: true` in Bash tool input, which falls back to the `canUseTool` permission handler.
+當 `allowUnsandboxedCommands` 為 true 時，模型可在 Bash 工具輸入中設定 `dangerouslyDisableSandbox: true`，這會回退到 `canUseTool` 權限處理器。
 
-## MCP Server Helpers
+## MCP 伺服器輔助工具
 
 ### tool()
 
-Creates type-safe MCP tool definitions with Zod schemas:
+使用 Zod schema 建立型別安全的 MCP 工具定義：
 
 ```typescript
 function tool<Schema extends ZodRawShape>(
@@ -597,7 +597,7 @@ function tool<Schema extends ZodRawShape>(
 
 ### createSdkMcpServer()
 
-Creates an in-process MCP server (we use stdio instead for subagent inheritance):
+建立行程內的 MCP 伺服器（我們改用 stdio 以繼承至子代理）：
 
 ```typescript
 function createSdkMcpServer(options: {
@@ -607,37 +607,37 @@ function createSdkMcpServer(options: {
 }): McpSdkServerConfigWithInstance
 ```
 
-## Internals Reference
+## 內部參考
 
-### Key minified identifiers (sdk.mjs)
+### 關鍵縮寫識別碼（sdk.mjs）
 
-| Minified | Purpose |
-|----------|---------|
-| `s_` | V1 `query()` export |
+| 縮寫 | 用途 |
+|------|------|
+| `s_` | V1 `query()` 匯出 |
 | `e_` | `unstable_v2_createSession` |
 | `Xx` | `unstable_v2_resumeSession` |
 | `Qx` | `unstable_v2_prompt` |
-| `U9` | V2 Session class (`send`/`stream`/`close`) |
-| `XX` | ProcessTransport (spawns cli.js) |
-| `$X` | Query class (JSON-line routing, async iterable) |
-| `QX` | AsyncQueue (input stream buffer) |
+| `U9` | V2 Session 類別（`send`/`stream`/`close`） |
+| `XX` | ProcessTransport（啟動 cli.js） |
+| `$X` | Query 類別（JSON-line 路由，async iterable） |
+| `QX` | AsyncQueue（輸入 stream 緩衝區） |
 
-### Key minified identifiers (cli.js)
+### 關鍵縮寫識別碼（cli.js）
 
-| Minified | Purpose |
-|----------|---------|
-| `EZ` | Core recursive agentic loop (async generator) |
-| `_t4` | Stop hook handler (runs when no tool_use blocks) |
-| `PU1` | Streaming tool executor (parallel during API response) |
-| `TP6` | Standard tool executor (after API response) |
-| `GU1` | Individual tool executor |
-| `lTq` | SDK session runner (calls EZ directly) |
-| `bd1` | stdin reader (JSON-lines from transport) |
-| `mW1` | Anthropic API streaming caller |
+| 縮寫 | 用途 |
+|------|------|
+| `EZ` | 核心遞迴 agentic 迴圈（async generator） |
+| `_t4` | Stop hook 處理器（無 tool_use 區塊時執行） |
+| `PU1` | Streaming 工具執行器（API 回應期間並行） |
+| `TP6` | 標準工具執行器（API 回應後） |
+| `GU1` | 單一工具執行器 |
+| `lTq` | SDK session 執行器（直接呼叫 EZ） |
+| `bd1` | stdin 讀取器（來自 transport 的 JSON-lines） |
+| `mW1` | Anthropic API streaming 呼叫器 |
 
-## Key Files
+## 關鍵檔案
 
-- `sdk.d.ts` — All type definitions (1777 lines)
-- `sdk-tools.d.ts` — Tool input schemas
-- `sdk.mjs` — SDK runtime (minified, 376KB)
-- `cli.js` — CLI executable (minified, runs as subprocess)
+- `sdk.d.ts` — 所有型別定義（1777 行）
+- `sdk-tools.d.ts` — 工具輸入 schema
+- `sdk.mjs` — SDK 執行時期（縮寫版，376KB）
+- `cli.js` — CLI 執行檔（縮寫版，作為子行程執行）

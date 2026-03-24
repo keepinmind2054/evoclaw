@@ -27,57 +27,57 @@ Plugin 系統更簡單，但限制了 skills 能做的事。給 skills 完整的
 ---
 
 
-## Core Principle
+## 核心原則
 
-Skills are self-contained, auditable packages that apply programmatically via standard git merge mechanics. Claude Code orchestrates the process — running git commands, reading skill manifests, and stepping in only when git can't resolve a conflict on its own. The system uses existing git features (`merge-file`, `rerere`, `apply`) rather than custom merge infrastructure.
+Skills 是自包含、可審計的套件，透過標準 git 合併機制以程式化方式套用。Claude Code 負責協調整個流程——執行 git 指令、讀取 skill 清單、並在 git 無法自行解決衝突時介入。系統使用現有的 git 功能（`merge-file`、`rerere`、`apply`），而非自行建立合併基礎設施。
 
-### The Three-Level Resolution Model
+### 三層解決模型
 
-Every operation in the system follows this escalation:
+系統中的每個操作都遵循以下升級順序：
 
-1. **Git** — deterministic, programmatic. `git merge-file` merges, `git rerere` replays cached resolutions, structured operations apply without merging. No AI involved. This handles the vast majority of cases.
-2. **Claude Code** — reads `SKILL.md`, `.intent.md`, migration guides, and `state.yaml` to understand context. Resolves conflicts that git can't handle programmatically. Caches the resolution via `git rerere` so it never needs to resolve the same conflict again.
-3. **User** — Claude Code asks the user when it lacks context or intent. This happens when two features genuinely conflict at an application level (not just a text-level merge conflict) and a human decision is needed about desired behavior.
+1. **Git** — 確定性、程式化。`git merge-file` 執行合併，`git rerere` 重播快取的解決方案，結構化操作無需合併即可套用。不涉及 AI。這處理了絕大多數情況。
+2. **Claude Code** — 讀取 `SKILL.md`、`.intent.md`、遷移指南與 `state.yaml` 以理解上下文。解決 git 無法以程式化方式處理的衝突。透過 `git rerere` 快取解決方案，使同樣的衝突無需再次解決。
+3. **使用者** — 當 Claude Code 缺乏上下文或意圖時，會詢問使用者。這發生在兩個功能在應用層面真正衝突（而非僅是文字層面的合併衝突），且需要人工判斷期望行為時。
 
-The goal is that Level 1 handles everything on a mature, well-tested installation. Level 2 handles first-time conflicts and edge cases. Level 3 is rare and only for genuine ambiguity.
+目標是：在成熟、經充分測試的安裝環境中，第一層處理所有情況。第二層處理首次衝突和邊緣案例。第三層很少發生，僅適用於真正模糊的情況。
 
-**Important**: a clean merge (exit code 0) does not guarantee working code. Semantic conflicts — a renamed variable, a shifted reference, a changed function signature — can produce clean text merges that break at runtime. **Tests must run after every operation**, regardless of whether the merge was clean. A clean merge with failing tests escalates to Level 2.
+**重要**：乾淨的合併（退出碼 0）並不保證代碼能正常運作。語意衝突——重新命名的變數、移位的引用、變更的函式簽名——可能產生乾淨的文字合併，但在執行時卻會出錯。**每次操作後都必須執行測試**，無論合併是否乾淨。乾淨的合併但測試失敗，將升級至第二層。
 
-### Safe Operations via Backup/Restore
+### 透過備份/還原確保操作安全
 
-Many users clone the repo without forking, don't commit their changes, and don't think of themselves as git users. The system must work safely for them without requiring any git knowledge.
+許多使用者在沒有 fork 的情況下複製了代碼庫，不提交變更，也不認為自己是 git 使用者。系統必須在不要求任何 git 知識的情況下，對他們安全地運作。
 
-Before any operation, the system copies all files that will be modified to `.evoclaw/backup/`. On success, the backup is deleted. On failure, the backup is restored. This provides rollback safety regardless of whether the user commits, pushes, or understands git.
-
----
-
-## 1. The Shared Base
-
-`.evoclaw/base/` holds the clean core — the original codebase before any skills or customizations were applied. This is the stable common ancestor for all three-way merges, and it only changes on core updates.
-
-- `git merge-file` uses the base to compute two diffs: what the user changed (current vs base) and what the skill wants to change (base vs skill's modified file), then combines both
-- The base enables drift detection: if a file's hash differs from its base hash, something has been modified (skills, user customizations, or both)
-- Each skill's `modify/` files contain the full file as it should look with that skill applied (including any prerequisite skill changes), all authored against the same clean core base
-
-On a **fresh codebase**, the user's files are identical to the base. This means `git merge-file` always exits cleanly for the first skill — the merge trivially produces the skill's modified version. No special-casing needed.
-
-When multiple skills modify the same file, the three-way merge handles the overlap naturally. If Telegram and Discord both modify `src/index.ts`, and both skill files include the Telegram changes, those common changes merge cleanly against the base. The result is the base + all skill changes + user customizations.
+在任何操作之前，系統會將所有將被修改的檔案複製到 `.evoclaw/backup/`。成功時，備份將被刪除。失敗時，備份將被還原。這提供了回滾安全性，無論使用者是否提交、推送或理解 git。
 
 ---
 
-## 2. Two Types of Changes: Code Merges vs. Structured Operations
+## 1. 共享基礎
 
-Not all files should be merged as text. The system distinguishes between **code files** (merged via `git merge-file`) and **structured data** (modified via deterministic operations).
+`.evoclaw/base/` 存放乾淨的核心——套用任何 skills 或自訂前的原始代碼庫。這是所有三方合併的穩定公共祖先，僅在核心更新時變更。
 
-### Code Files (Three-Way Merge)
+- `git merge-file` 使用此基礎計算兩個差異：使用者的變更（當前 vs 基礎）與 skill 想要的變更（基礎 vs skill 的修改檔案），然後將兩者合併
+- 基礎啟用漂移偵測：如果某個檔案的雜湊與其基礎雜湊不同，則某些內容已被修改（skills、使用者自訂，或兩者都有）
+- 每個 skill 的 `modify/` 檔案包含套用該 skill 後檔案應有的完整內容（包含任何先決 skill 的變更），全部針對相同的乾淨核心基礎撰寫
 
-Source code files where skills weave in logic — route handlers, middleware, business logic. These are merged using `git merge-file` against the shared base. The skill carries a full modified version of the file.
+在**全新代碼庫**中，使用者的檔案與基礎相同。這意味著 `git merge-file` 對第一個 skill 總是乾淨退出——合併輕鬆產生 skill 的修改版本。無需特殊處理。
 
-### Structured Data (Deterministic Operations)
+當多個 skills 修改同一個檔案時，三方合併自然地處理重疊部分。如果 Telegram 和 Discord 都修改了 `src/index.ts`，且兩個 skill 檔案都包含 Telegram 的變更，那些共同的變更會乾淨地與基礎合併。結果是基礎 + 所有 skill 變更 + 使用者自訂。
 
-Files like `package.json`, `docker-compose.yml`, `.env.example`, and generated configs are not code you merge — they're structured data you aggregate. Multiple skills adding npm dependencies to `package.json` shouldn't require a three-way text merge. Instead, skills declare their structured requirements in the manifest, and the system applies them programmatically.
+---
 
-**Structured operations are implicit.** If a skill declares `npm_dependencies`, the system handles dependency installation automatically. There is no need for the skill author to add `npm install` to `post_apply`. When multiple skills are applied in sequence, the system batches structured operations: merge all dependency declarations first, write `package.json` once, run `npm install` once at the end.
+## 2. 兩種變更類型：代碼合併與結構化操作
+
+並非所有檔案都應作為文字合併。系統區分**代碼檔案**（透過 `git merge-file` 合併）和**結構化資料**（透過確定性操作修改）。
+
+### 代碼檔案（三方合併）
+
+Skills 在其中織入邏輯的原始碼檔案——路由處理器、中介軟體、業務邏輯。這些使用 `git merge-file` 針對共享基礎進行合併。Skill 攜帶檔案的完整修改版本。
+
+### 結構化資料（確定性操作）
+
+像 `package.json`、`docker-compose.yml`、`.env.example` 和生成的設定檔這類檔案，不是要合併的代碼——它們是要聚合的結構化資料。多個 skills 向 `package.json` 新增 npm 依賴，不應需要三方文字合併。相反，skills 在清單中宣告其結構化需求，系統以程式化方式套用它們。
+
+**結構化操作是隱式的。** 如果 skill 宣告了 `npm_dependencies`，系統會自動處理依賴安裝。Skill 作者無需在 `post_apply` 中新增 `npm install`。當多個 skills 依序套用時，系統會批次處理結構化操作：先合併所有依賴宣告，寫入一次 `package.json`，最後執行一次 `npm install`。
 
 ```yaml
 # In manifest.yaml
@@ -95,36 +95,36 @@ structured:
       ports: ["6380:6379"]
 ```
 
-### Structured Operation Conflicts
+### 結構化操作衝突
 
-Structured operations eliminate text merge conflicts but can still conflict at a semantic level:
+結構化操作消除了文字合併衝突，但仍可能在語意層面發生衝突：
 
-- **NPM version conflicts**: two skills request incompatible semver ranges for the same package
-- **Port collisions**: two docker-compose services claim the same host port
-- **Service name collisions**: two skills define a service with the same name
-- **Env var duplicates**: two skills declare the same variable with different expectations
+- **NPM 版本衝突**：兩個 skills 為同一個套件請求不相容的 semver 範圍
+- **連接埠衝突**：兩個 docker-compose 服務佔用相同的主機連接埠
+- **服務名稱衝突**：兩個 skills 定義了具有相同名稱的服務
+- **環境變數重複**：兩個 skills 以不同期望宣告了相同的變數
 
-The resolution policy:
+解決策略：
 
-1. **Automatic where possible**: widen semver ranges to find a compatible version, detect and flag port/name collisions
-2. **Level 2 (Claude Code)**: if automatic resolution fails, Claude proposes options based on skill intents
-3. **Level 3 (User)**: if it's a genuine product choice (which Redis instance should get port 6379?), ask the user
+1. **盡可能自動處理**：擴大 semver 範圍以找到相容版本，偵測並標記連接埠/名稱衝突
+2. **第二層（Claude Code）**：如果自動解決失敗，Claude 根據 skill 意圖提出選項
+3. **第三層（使用者）**：如果這是真正的產品選擇（哪個 Redis 實例應獲得 6379 連接埠？），詢問使用者
 
-Structured operation conflicts are included in the CI overlap graph alongside code file overlaps, so the maintainer test matrix catches these before users encounter them.
+結構化操作衝突與代碼檔案重疊一起列入 CI 重疊圖，使維護者的測試矩陣能在使用者遇到之前發現這些問題。
 
-### State Records Structured Outcomes
+### State 記錄結構化結果
 
-`state.yaml` records not just the declared dependencies but the resolved outcomes — actual installed versions, resolved port assignments, final env var list. This makes structured operations replayable and auditable.
+`state.yaml` 不僅記錄宣告的依賴，還記錄已解決的結果——實際安裝的版本、已解決的連接埠分配、最終環境變數列表。這使結構化操作可重播且可審計。
 
-### Deterministic Serialization
+### 確定性序列化
 
-All structured output (YAML, JSON) uses stable serialization: sorted keys, consistent quoting, normalized whitespace. This prevents noisy diffs in git history from non-functional formatting changes.
+所有結構化輸出（YAML、JSON）使用穩定序列化：排序鍵、一致引用、規範化空白。這防止了 git 歷史記錄中因非功能性格式變更產生的雜亂差異。
 
 ---
 
-## 3. Skill Package Structure
+## 3. Skill 套件結構
 
-A skill contains only the files it adds or modifies. For modified code files, the skill carries the **full modified file** (the clean core with the skill's changes applied).
+Skill 只包含它新增或修改的檔案。對於修改的代碼檔案，skill 攜帶**完整的修改檔案**（套用了 skill 變更的乾淨核心）。
 
 ```
 skills/
@@ -144,17 +144,17 @@ skills/
         config.ts.intent.md           # "Adds WhatsApp channel configuration block"
 ```
 
-### Why Full Modified Files
+### 為何使用完整修改檔案
 
-- `git merge-file` requires three full files — no intermediate reconstruction step
-- Git's three-way merge uses context matching, so it works even if the user has moved code around — unlike line-number-based diffs that break immediately
-- Auditable: `diff .evoclaw/base/src/server.ts skills/add-whatsapp/modify/src/server.ts` shows exactly what the skill changes
-- Deterministic: same three inputs always produce the same merge result
-- Size is negligible since EvoClaw's core files are small
+- `git merge-file` 需要三個完整檔案——無需中間重建步驟
+- Git 的三方合併使用上下文匹配，即使使用者移動了代碼也能正常運作——不像基於行號的差異會立即失效
+- 可審計：`diff .evoclaw/base/src/server.ts skills/add-whatsapp/modify/src/server.ts` 精確顯示 skill 的變更
+- 確定性：相同的三個輸入始終產生相同的合併結果
+- 大小可忽略，因為 EvoClaw 的核心檔案很小
 
-### Intent Files
+### Intent 檔案
 
-Each modified code file has a corresponding `.intent.md` with structured headings:
+每個修改的代碼檔案都有對應的 `.intent.md`，包含結構化標題：
 
 ```markdown
 # Intent: server.ts modifications
@@ -175,9 +175,9 @@ Adds WhatsApp webhook route and message handler to the Express server.
 - The webhook verification flow (GET route) is required by WhatsApp Cloud API
 ```
 
-Structured headings (What, Key sections, Invariants, Must-keep) give Claude Code specific guidance during conflict resolution instead of requiring it to infer from unstructured text.
+結構化標題（What、Key sections、Invariants、Must-keep）在衝突解決期間為 Claude Code 提供具體指導，而無需從非結構化文字中推斷。
 
-### Manifest Format
+### 清單格式
 
 ```yaml
 # --- Required fields ---
@@ -224,26 +224,26 @@ test: "npx vitest run src/channels/whatsapp.test.ts"
 # post_apply: []
 ```
 
-Note: `post_apply` is only for operations that can't be expressed as structured declarations. Dependency installation is **never** in `post_apply` — it's handled implicitly by the structured operations system.
+注意：`post_apply` 僅適用於無法表達為結構化宣告的操作。依賴安裝**絕不**放在 `post_apply` 中——它由結構化操作系統隱式處理。
 
 ---
 
-## 4. Skills, Customization, and Layering
+## 4. Skills、自訂與分層
 
-### One Skill, One Happy Path
+### 一個 Skill，一條快樂路徑
 
-A skill implements **one way of doing something — the reasonable default that covers 80% of users.** `add-telegram` gives you a clean, solid Telegram integration. It doesn't try to anticipate every use case with predefined configuration options and modes.
+Skill 實現**一種做某事的方式——覆蓋 80% 使用者的合理預設值。** `add-telegram` 為你提供乾淨、穩固的 Telegram 整合。它不會試圖透過預定義的設定選項和模式來預見每個使用案例。
 
-### Customization Is Just More Patching
+### 自訂只是更多的補丁
 
-The entire system is built around applying transformations to a codebase. Customizing a skill after applying it is no different from any other modification:
+整個系統圍繞著對代碼庫套用轉換而建立。在套用 skill 後對其進行自訂，與任何其他修改沒有區別：
 
-- **Apply the skill** — get the standard Telegram integration
-- **Modify from there** — using the customize flow (tracked patch), direct editing (detected by hash tracking), or by applying additional skills that build on top
+- **套用 skill** — 獲得標準 Telegram 整合
+- **從那裡修改** — 使用自訂流程（追蹤補丁）、直接編輯（透過雜湊追蹤偵測），或套用在其上構建的其他 skills
 
-### Layered Skills
+### 分層 Skills
 
-Skills can build on other skills:
+Skills 可以建立在其他 skills 之上：
 
 ```
 add-telegram                    # Core Telegram integration (happy path)
@@ -252,19 +252,19 @@ add-telegram                    # Core Telegram integration (happy path)
   └── telegram-filters          # Custom message filtering (depends: [telegram])
 ```
 
-Each layer is a separate skill with its own `SKILL.md`, manifest (with `depends: [telegram]`), tests, and modified files. The user composes exactly what they want by stacking skills.
+每一層都是一個獨立的 skill，有自己的 `SKILL.md`、清單（包含 `depends: [telegram]`）、測試和修改檔案。使用者透過疊加 skills 來精確組合他們想要的功能。
 
-### Custom Skill Application
+### 自訂 Skill 套用
 
-A user can apply a skill with their own modifications in a single step:
+使用者可以在一個步驟中套用包含自訂修改的 skill：
 
-1. Apply the skill normally (programmatic merge)
-2. Claude Code asks if the user wants to make any modifications
-3. User describes what they want different
-4. Claude Code makes the modifications on top of the freshly applied skill
-5. The modifications are recorded as a custom patch tied to this skill
+1. 正常套用 skill（程式化合併）
+2. Claude Code 詢問使用者是否想要進行任何修改
+3. 使用者描述他們想要的不同之處
+4. Claude Code 在剛套用的 skill 之上進行修改
+5. 修改被記錄為與此 skill 關聯的自訂補丁
 
-Recorded in `state.yaml`:
+記錄在 `state.yaml` 中：
 
 ```yaml
 applied_skills:
@@ -274,15 +274,15 @@ applied_skills:
     custom_patch_description: "Restrict bot responses to group chats only"
 ```
 
-On replay, the skill applies programmatically, then the custom patch applies on top.
+在重播時，skill 以程式化方式套用，然後自訂補丁套用在其上。
 
 ---
 
-## 5. File Operations: Renames, Deletes, Moves
+## 5. 檔案操作：重新命名、刪除、移動
 
-Core updates and some skills will need to rename, delete, or move files. These are not text merges — they're structural changes handled as explicit scripted operations.
+核心更新和某些 skills 需要重新命名、刪除或移動檔案。這些不是文字合併——它們是作為明確腳本操作處理的結構性變更。
 
-### Declaration in Manifest
+### 在清單中宣告
 
 ```yaml
 file_ops:
@@ -296,28 +296,28 @@ file_ops:
     to: src/lib/helpers.ts
 ```
 
-### Execution Order
+### 執行順序
 
-File operations run **before** code merges, because merges need to target the correct file paths:
+檔案操作在代碼合併**之前**執行，因為合併需要針對正確的檔案路徑：
 
-1. Pre-flight checks (state validation, core version, dependencies, conflicts, drift detection)
-2. Acquire operation lock
-3. **Backup** all files that will be touched
-4. **File operations** (renames, deletes, moves)
-5. Copy new files from `add/`
-6. Three-way merge modified code files
-7. Conflict resolution (rerere auto-resolve, or return with `backupPending: true`)
-8. Apply structured operations (npm deps, env vars, docker-compose — batched)
-9. Run `npm install` (once, if any structured npm_dependencies exist)
-10. Update state (record skill application, file hashes, structured outcomes)
-11. Run tests (if `manifest.test` defined; rollback state + backup on failure)
-12. Clean up (delete backup on success, release lock)
+1. 預檢（狀態驗證、核心版本、依賴、衝突、漂移偵測）
+2. 獲取操作鎖
+3. **備份**所有將被觸碰的檔案
+4. **檔案操作**（重新命名、刪除、移動）
+5. 從 `add/` 複製新檔案
+6. 三方合併修改的代碼檔案
+7. 衝突解決（rerere 自動解決，或以 `backupPending: true` 返回）
+8. 套用結構化操作（npm 依賴、環境變數、docker-compose——批次處理）
+9. 執行 `npm install`（一次，如果存在任何結構化的 npm_dependencies）
+10. 更新 state（記錄 skill 套用、檔案雜湊、結構化結果）
+11. 執行測試（如果定義了 `manifest.test`；失敗時回滾 state + 備份）
+12. 清理（成功時刪除備份，釋放鎖）
 
-### Path Remapping for Skills
+### Skills 的路徑重映射
 
-When the core renames a file (e.g., `server.ts` → `app.ts`), skills authored against the old path still reference `server.ts` in their `modifies` and `modify/` directories. **Skill packages are never mutated on the user's machine.**
+當核心重新命名某個檔案時（例如 `server.ts` → `app.ts`），針對舊路徑撰寫的 skills 在其 `modifies` 和 `modify/` 目錄中仍引用 `server.ts`。**Skill 套件絕不在使用者的機器上被修改。**
 
-Instead, core updates ship a **compatibility map**:
+相反，核心更新附帶一個**相容性映射**：
 
 ```yaml
 # In the update package
@@ -326,94 +326,94 @@ path_remap:
   src/old-config.ts: src/config/main.ts
 ```
 
-The system resolves paths at apply time: if a skill targets `src/server.ts` and the remap says it's now `src/app.ts`, the merge runs against `src/app.ts`. The remap is recorded in `state.yaml` so future operations are consistent.
+系統在套用時解析路徑：如果 skill 針對 `src/server.ts`，而重映射說它現在是 `src/app.ts`，合併將針對 `src/app.ts` 執行。重映射記錄在 `state.yaml` 中，以便未來的操作保持一致。
 
-### Safety Checks
+### 安全檢查
 
-Before executing file operations:
+在執行檔案操作之前：
 
-- Verify the source file exists
-- For deletes: warn if the file has modifications beyond the base (user or skill changes would be lost)
+- 驗證來源檔案存在
+- 對於刪除：如果檔案有超出基礎的修改（使用者或 skill 的變更將丟失），則發出警告
 
 ---
 
-## 6. The Apply Flow
+## 6. 套用流程
 
-When a user runs the skill's slash command in Claude Code:
+當使用者在 Claude Code 中執行 skill 的斜線指令時：
 
-### Step 1: Pre-flight Checks
+### 步驟 1：預檢
 
-- Core version compatibility
-- Dependencies satisfied
-- No unresolvable conflicts with applied skills
-- Check for untracked changes (see Section 9)
+- 核心版本相容性
+- 滿足依賴關係
+- 與已套用的 skills 無不可解決的衝突
+- 檢查未追蹤的變更（見第 9 節）
 
-### Step 2: Backup
+### 步驟 2：備份
 
-Copy all files that will be modified to `.evoclaw/backup/`. If the operation fails at any point, restore from backup.
+將所有將被修改的檔案複製到 `.evoclaw/backup/`。如果操作在任何時候失敗，從備份還原。
 
-### Step 3: File Operations
+### 步驟 3：檔案操作
 
-Execute renames, deletes, or moves with safety checks. Apply path remapping if needed.
+執行重新命名、刪除或移動，並進行安全檢查。如需要，套用路徑重映射。
 
-### Step 4: Apply New Files
+### 步驟 4：套用新檔案
 
 ```bash
 cp skills/add-whatsapp/add/src/channels/whatsapp.ts src/channels/whatsapp.ts
 ```
 
-### Step 5: Merge Modified Code Files
+### 步驟 5：合併修改的代碼檔案
 
-For each file in `modifies` (with path remapping applied):
+對於 `modifies` 中的每個檔案（套用路徑重映射）：
 
 ```bash
 git merge-file src/server.ts .evoclaw/base/src/server.ts skills/add-whatsapp/modify/src/server.ts
 ```
 
-- **Exit code 0**: clean merge, move on
-- **Exit code > 0**: conflict markers in file, proceed to resolution
+- **退出碼 0**：乾淨合併，繼續
+- **退出碼 > 0**：檔案中有衝突標記，繼續進行解決
 
-### Step 6: Conflict Resolution (Three-Level)
+### 步驟 6：衝突解決（三層）
 
-1. **Check shared resolution cache** (`.evoclaw/resolutions/`) — load into local `git rerere` if a verified resolution exists for this skill combination. **Only apply if input hashes match exactly** (base hash + current hash + skill modified hash).
-2. **`git rerere`** — checks local cache. If found, applied automatically. Done.
-3. **Claude Code** — reads conflict markers + `SKILL.md` + `.intent.md` (Invariants, Must-keep sections) of current and previously applied skills. Resolves. `git rerere` caches the resolution.
-4. **User** — if Claude Code cannot determine intent, it asks the user for the desired behavior.
+1. **檢查共享解決方案快取**（`.evoclaw/resolutions/`）——如果此 skill 組合存在已驗證的解決方案，載入到本地 `git rerere`。**僅在輸入雜湊完全匹配時套用**（基礎雜湊 + 當前雜湊 + skill 修改雜湊）。
+2. **`git rerere`** — 檢查本地快取。如果找到，自動套用。完成。
+3. **Claude Code** — 讀取衝突標記 + `SKILL.md` + 當前及之前套用 skills 的 `.intent.md`（Invariants、Must-keep 部分）。解決衝突。`git rerere` 快取解決方案。
+4. **使用者** — 如果 Claude Code 無法確定意圖，詢問使用者期望的行為。
 
-### Step 7: Apply Structured Operations
+### 步驟 7：套用結構化操作
 
-Collect all structured declarations (from this skill and any previously applied skills if batching). Apply deterministically:
+收集所有結構化宣告（來自此 skill 及批次處理時之前套用的 skills）。確定性地套用：
 
-- Merge npm dependencies into `package.json` (check for version conflicts)
-- Append env vars to `.env.example`
-- Merge docker-compose services (check for port/name collisions)
-- Run `npm install` **once** at the end
-- Record resolved outcomes in state
+- 將 npm 依賴合併到 `package.json`（檢查版本衝突）
+- 將環境變數附加到 `.env.example`
+- 合併 docker-compose 服務（檢查連接埠/名稱衝突）
+- 在最後執行**一次** `npm install`
+- 在 state 中記錄已解決的結果
 
-### Step 8: Post-Apply and Validate
+### 步驟 8：套用後處理與驗證
 
-1. Run any `post_apply` commands (non-structured operations only)
-2. Update `.evoclaw/state.yaml` — skill record, file hashes (base, skill, merged per file), structured outcomes
-3. **Run skill tests** — mandatory, even if all merges were clean
-4. If tests fail on a clean merge → escalate to Level 2 (Claude Code diagnoses the semantic conflict)
+1. 執行任何 `post_apply` 指令（僅限非結構化操作）
+2. 更新 `.evoclaw/state.yaml`——skill 記錄、檔案雜湊（基礎、skill、每個檔案的合併結果）、結構化結果
+3. **執行 skill 測試**——強制執行，即使所有合併都是乾淨的
+4. 如果乾淨合併但測試失敗 → 升級至第二層（Claude Code 診斷語意衝突）
 
-### Step 9: Clean Up
+### 步驟 9：清理
 
-If tests pass, delete `.evoclaw/backup/`. The operation is complete.
+如果測試通過，刪除 `.evoclaw/backup/`。操作完成。
 
-If tests fail and Level 2 can't resolve, restore from `.evoclaw/backup/` and report the failure.
+如果測試失敗且第二層無法解決，從 `.evoclaw/backup/` 還原並報告失敗。
 
 ---
 
-## 7. Shared Resolution Cache
+## 7. 共享解決方案快取
 
-### The Problem
+### 問題
 
-`git rerere` is local by default. But EvoClaw has thousands of users applying the same skill combinations. Every user hitting the same conflict and waiting for Claude Code to resolve it is wasteful.
+`git rerere` 預設是本地的。但 EvoClaw 有數千名使用者套用相同的 skill 組合。每個使用者都遇到相同的衝突並等待 Claude Code 解決，是浪費的。
 
-### The Solution
+### 解決方案
 
-EvoClaw maintains a verified resolution cache in `.evoclaw/resolutions/` that ships with the project. This is the shared artifact — **not** `.git/rr-cache/`, which stays local.
+EvoClaw 在 `.evoclaw/resolutions/` 中維護一個已驗證的解決方案快取，與專案一起發布。這是共享的工件——**不是** `.git/rr-cache/`（保持本地）。
 
 ```
 .evoclaw/
@@ -427,9 +427,9 @@ EvoClaw maintains a verified resolution cache in `.evoclaw/resolutions/` that sh
       meta.yaml
 ```
 
-### Hash Enforcement
+### 雜湊強制執行
 
-A cached resolution is **only applied if input hashes match exactly**:
+快取的解決方案**僅在輸入雜湊完全匹配時套用**：
 
 ```yaml
 # meta.yaml
@@ -449,19 +449,19 @@ input_hashes:
 output_hash: "ddd..."
 ```
 
-If any input hash doesn't match, the cached resolution is skipped and the system proceeds to Level 2.
+如果任何輸入雜湊不匹配，快取的解決方案將被跳過，系統繼續至第二層。
 
-### Validated: rerere + merge-file Require an Index Adapter
+### 已驗證：rerere + merge-file 需要索引轉接器
 
-`git rerere` does **not** natively recognize `git merge-file` output. This was validated in Phase 0 testing (`tests/phase0-merge-rerere.sh`, 33 tests).
+`git rerere` **不**原生識別 `git merge-file` 的輸出。這在第 0 階段測試中已得到驗證（`tests/phase0-merge-rerere.sh`，33 個測試）。
 
-The issue is not about conflict marker format — `merge-file` uses filenames as labels (`<<<<<<< current.ts`) while `git merge` uses branch names (`<<<<<<< HEAD`), but rerere strips all labels and hashes only the conflict body. The formats are compatible.
+問題不在於衝突標記格式——`merge-file` 使用檔名作為標籤（`<<<<<<< current.ts`），而 `git merge` 使用分支名稱（`<<<<<<< HEAD`），但 rerere 剝離所有標籤，只雜湊衝突主體。這些格式是相容的。
 
-The actual issue: **rerere requires unmerged index entries** (stages 1/2/3) to detect that a merge conflict exists. A normal `git merge` creates these automatically. `git merge-file` operates on the filesystem only and does not touch the index.
+實際問題：**rerere 需要未合併的索引條目**（階段 1/2/3）才能偵測到合併衝突存在。正常的 `git merge` 會自動建立這些條目。`git merge-file` 僅在檔案系統上操作，不觸碰索引。
 
-#### The Adapter
+#### 轉接器
 
-After `git merge-file` produces a conflict, the system must create the index state that rerere expects:
+在 `git merge-file` 產生衝突後，系統必須建立 rerere 期望的索引狀態：
 
 ```bash
 # 1. Run the merge (produces conflict markers in the working tree)
@@ -495,37 +495,37 @@ rm .git/MERGE_HEAD .git/MERGE_MSG
 git reset HEAD
 ```
 
-#### Key Properties Validated
+#### 已驗證的關鍵屬性
 
-- **Conflict body identity**: `merge-file` and `git merge` produce identical conflict bodies for the same inputs. Rerere hashes the body only, so resolutions learned from either source are interchangeable.
-- **Hash determinism**: The same conflict always produces the same rerere hash. This is critical for the shared resolution cache.
-- **Resolution portability**: Copying `preimage` and `postimage` files (plus the hash directory name) from one repo's `.git/rr-cache/` to another works. Rerere auto-resolves in the target repo.
-- **Adjacent line sensitivity**: Changes within ~3 lines of each other are treated as a single conflict hunk by `merge-file`. Skills that modify the same area of a file will conflict even if they modify different lines. This is expected and handled by the resolution cache.
+- **衝突主體一致性**：`merge-file` 和 `git merge` 對相同輸入產生相同的衝突主體。Rerere 只雜湊主體，因此從任一來源學習的解決方案可互換。
+- **雜湊確定性**：相同的衝突始終產生相同的 rerere 雜湊。這對共享解決方案快取至關重要。
+- **解決方案可移植性**：將 `preimage` 和 `postimage` 檔案（加上雜湊目錄名稱）從一個 repo 的 `.git/rr-cache/` 複製到另一個 repo 有效。Rerere 在目標 repo 中自動解決。
+- **相鄰行敏感性**：彼此相差約 3 行以內的變更被 `merge-file` 視為單一衝突塊。修改同一檔案相同區域的 skills 即使修改不同行也會產生衝突。這是預期的，由解決方案快取處理。
 
-#### Implication: Git Repository Required
+#### 含義：需要 Git 存儲庫
 
-The adapter requires `git hash-object`, `git update-index`, and `.git/rr-cache/`. This means the project directory must be a git repository for rerere caching to work. Users who download a zip (no `.git/`) lose resolution caching but not functionality — conflicts escalate directly to Level 2 (Claude Code resolves). The system should detect this case and skip rerere operations gracefully.
+轉接器需要 `git hash-object`、`git update-index` 和 `.git/rr-cache/`。這意味著專案目錄必須是 git 存儲庫才能使 rerere 快取正常運作。下載 zip 的使用者（沒有 `.git/`）會失去解決方案快取，但不影響功能——衝突直接升級至第二層（Claude Code 解決）。系統應偵測此情況並優雅地跳過 rerere 操作。
 
-### Maintainer Workflow
+### 維護者工作流程
 
-When releasing a core update or new skill version:
+在發布核心更新或新 skill 版本時：
 
-1. Fresh codebase at target core version
-2. Apply each official skill individually — verify clean merge, run tests
-3. Apply pairwise combinations **for skills that modify at least one common file or have overlapping structured operations**
-4. Apply curated three-skill stacks based on popularity and high overlap
-5. Resolve all conflicts (code and structured)
-6. Record all resolutions with input hashes
-7. Run full test suite for every combination
-8. Ship verified resolutions with the release
+1. 目標核心版本的全新代碼庫
+2. 逐一套用每個官方 skill——驗證乾淨合併，執行測試
+3. 對**修改至少一個共同檔案或具有重疊結構化操作的 skills** 套用成對組合
+4. 基於受歡迎度和高重疊度套用精選的三 skill 堆疊
+5. 解決所有衝突（代碼和結構化）
+6. 記錄所有帶有輸入雜湊的解決方案
+7. 為每個組合執行完整測試套件
+8. 在版本發布時附帶已驗證的解決方案
 
-The bar: **a user with any common combination of official skills should never encounter an unresolved conflict.**
+標準：**擁有任何常見官方 skills 組合的使用者，應永遠不會遇到未解決的衝突。**
 
 ---
 
-## 8. State Tracking
+## 8. 狀態追蹤
 
-`.evoclaw/state.yaml` records everything about the installation:
+`.evoclaw/state.yaml` 記錄安裝的所有內容：
 
 ```yaml
 skills_system_version: "0.1.0"     # Schema version — tooling checks this before any operation
@@ -574,23 +574,23 @@ custom_modifications:
     patch_file: .evoclaw/custom/001-logging-middleware.patch
 ```
 
-**v0.1 implementation notes:**
-- `file_hashes` stores a single SHA-256 hash per file (the final merged result). Three-part hashes (base/skill_modified/merged) are planned for a future version to improve drift diagnosis.
-- Applied skills use `name` as the key field (not `skill`), matching the TypeScript `AppliedSkill` interface.
-- `structured_outcomes` stores the raw manifest values plus the `test` command. Resolved npm versions (actual installed versions vs semver ranges) are not yet tracked.
-- Fields like `installed_at`, `last_updated`, `path_remap`, `rebased_at`, `core_version_at_apply`, `files_added`, and `files_modified` are planned for future versions.
+**v0.1 實作注意事項：**
+- `file_hashes` 每個檔案儲存一個 SHA-256 雜湊（最終合併結果）。三部分雜湊（基礎/skill 修改/合併）計劃在未來版本中提供，以改善漂移診斷。
+- 已套用的 skills 使用 `name` 作為鍵欄位（而非 `skill`），與 TypeScript `AppliedSkill` 介面匹配。
+- `structured_outcomes` 儲存原始清單值加上 `test` 指令。已解決的 npm 版本（實際安裝的版本 vs semver 範圍）尚未追蹤。
+- `installed_at`、`last_updated`、`path_remap`、`rebased_at`、`core_version_at_apply`、`files_added` 和 `files_modified` 等欄位計劃在未來版本中提供。
 
 ---
 
-## 9. Untracked Changes
+## 9. 未追蹤的變更
 
-If a user edits files directly, the system detects this via hash comparison.
+如果使用者直接編輯檔案，系統透過雜湊比較偵測到這一點。
 
-### When Detection Happens
+### 何時發生偵測
 
-Before **any operation that modifies the codebase**: applying a skill, removing a skill, updating the core, replaying, or rebasing.
+在**任何修改代碼庫的操作之前**：套用 skill、移除 skill、更新核心、重播或重新基準化。
 
-### What Happens
+### 發生什麼
 
 ```
 Detected untracked changes to src/server.ts.
@@ -599,35 +599,35 @@ Detected untracked changes to src/server.ts.
 [3] Abort
 ```
 
-The system never blocks or loses work. Option 1 generates a patch and records it, making changes reproducible. Option 2 preserves the changes but they won't survive replay.
+系統絕不阻止或丟失工作。選項 1 生成補丁並記錄，使變更可重現。選項 2 保留變更，但它們不會在重播中存活。
 
-### The Recovery Guarantee
+### 恢復保證
 
-No matter how much a user modifies their codebase outside the system, the three-level model can always bring them back:
+無論使用者在系統外如何修改代碼庫，三層模型始終可以恢復：
 
-1. **Git**: diff current files against base, identify what changed
-2. **Claude Code**: read `state.yaml` to understand what skills were applied, compare against actual file state, identify discrepancies
-3. **User**: Claude Code asks what they intended, what to keep, what to discard
+1. **Git**：將當前檔案與基礎進行差異比較，識別變更
+2. **Claude Code**：讀取 `state.yaml` 以了解套用了哪些 skills，與實際檔案狀態比較，識別差異
+3. **使用者**：Claude Code 詢問他們的意圖、要保留什麼、要丟棄什麼
 
-There is no unrecoverable state.
+沒有無法恢復的狀態。
 
 ---
 
-## 10. Core Updates
+## 10. 核心更新
 
-Core updates must be as programmatic as possible. The EvoClaw team is responsible for ensuring updates apply cleanly to common skill combinations.
+核心更新必須盡可能程式化。EvoClaw 團隊負責確保更新能乾淨地套用到常見的 skill 組合。
 
-### Patches and Migrations
+### 補丁與遷移
 
-Most core changes — bug fixes, performance improvements, new functionality — propagate automatically through the three-way merge. No special handling needed.
+大多數核心變更——錯誤修復、效能改進、新功能——透過三方合併自動傳播。無需特殊處理。
 
-**Breaking changes** — changed defaults, removed features, functionality moved to skills — require a **migration**. A migration is a skill that preserves the old behavior, authored against the new core. It's applied automatically during the update so the user's setup doesn't change.
+**破壞性變更**——更改的預設值、移除的功能、移至 skills 的功能——需要一個**遷移**。遷移是一個保留舊行為的 skill，針對新核心撰寫。在更新期間自動套用，使使用者的設置不受影響。
 
-The maintainer's responsibility when making a breaking change: make the change in core, author a migration skill that reverts it, add the entry to `migrations.yaml`, test it. That's the cost of breaking changes.
+維護者在進行破壞性變更時的責任：在核心中進行變更，撰寫一個還原它的遷移 skill，在 `migrations.yaml` 中新增條目，進行測試。這就是破壞性變更的代價。
 
 ### `migrations.yaml`
 
-An append-only file in the repo root. Each entry records a breaking change and the skill that preserves the old behavior:
+存儲庫根目錄中的僅追加檔案。每個條目記錄一個破壞性變更以及保留舊行為的 skill：
 
 ```yaml
 - since: 0.6.0
@@ -643,30 +643,30 @@ An append-only file in the repo root. Each entry records a breaking change and t
   description: "Preserves legacy auth module (removed from core in 0.8)"
 ```
 
-Migration skills are regular skills in the `skills/` directory. They have manifests, intent files, tests — everything. They're authored against the **new** core version: the modified file is the new core with the specific breaking change reverted, everything else (bug fixes, new features) identical to the new core.
+遷移 skills 是 `skills/` 目錄中的普通 skills。它們有清單、intent 檔案、測試——一切都有。它們針對**新**核心版本撰寫：修改的檔案是還原了特定破壞性變更的新核心，其他所有內容（錯誤修復、新功能）與新核心相同。
 
-### How Migrations Work During Updates
+### 更新期間遷移的工作方式
 
-1. Three-way merge brings in everything from the new core — patches, breaking changes, all of it
-2. Conflict resolution (normal)
-3. Re-apply custom patches (normal)
-4. **Update base to new core**
-5. Filter `migrations.yaml` for entries where `since` > user's old `core_version`
-6. **Apply each migration skill using the normal apply flow against the new base**
-7. Record migration skills in `state.yaml` like any other skill
-8. Run tests
+1. 三方合併引入新核心的所有內容——補丁、破壞性變更，全部
+2. 衝突解決（正常）
+3. 重新套用自訂補丁（正常）
+4. **將基礎更新至新核心**
+5. 過濾 `migrations.yaml` 中 `since` > 使用者舊 `core_version` 的條目
+6. **使用正常套用流程針對新基礎套用每個遷移 skill**
+7. 像任何其他 skill 一樣在 `state.yaml` 中記錄遷移 skills
+8. 執行測試
 
-Step 6 is just the same apply function used for any skill. The migration skill merges against the new base:
+步驟 6 只是用於任何 skill 的相同套用函式。遷移 skill 針對新基礎合併：
 
-- **Base**: new core (e.g., v0.8 with Docker)
-- **Current**: user's file after the update merge (new core + user's customizations preserved by the earlier merge)
-- **Other**: migration skill's file (new core with Docker reverted to Apple, everything else identical)
+- **基礎**：新核心（例如，帶有 Docker 的 v0.8）
+- **當前**：更新合併後使用者的檔案（新核心 + 早期合併保留的使用者自訂）
+- **其他**：遷移 skill 的檔案（還原了 Docker 改回 Apple 的新核心，其他一切相同）
 
-Three-way merge correctly keeps user's customizations, reverts the breaking change, and preserves all bug fixes. If there's a conflict, normal resolution: cache → Claude → user.
+三方合併正確地保留使用者的自訂、還原破壞性變更，並保留所有錯誤修復。如果有衝突，正常解決：快取 → Claude → 使用者。
 
-For big version jumps (v0.5 → v0.8), all applicable migrations are applied in sequence. Migration skills are maintained against the latest core version, so they always compose correctly with the current codebase.
+對於大版本跳躍（v0.5 → v0.8），所有適用的遷移按順序套用。遷移 skills 針對最新核心版本維護，因此它們始終與當前代碼庫正確組合。
 
-### What the User Sees
+### 使用者看到的內容
 
 ```
 Core updated: 0.5.0 → 0.8.0
@@ -684,9 +684,9 @@ Core updated: 0.5.0 → 0.8.0
   ✓ All tests passing
 ```
 
-No prompts, no choices during the update. The user's setup doesn't change. If they later want to accept a new default, they remove the migration skill.
+更新期間沒有提示，沒有選擇。使用者的設置不會改變。如果他們以後想接受新的預設值，可以移除遷移 skill。
 
-### What the Core Team Ships With an Update
+### 核心團隊在更新時發布的內容
 
 ```
 updates/
@@ -698,35 +698,35 @@ updates/
     resolutions/                  # Pre-computed resolutions for official skills
 ```
 
-Plus any new migration skills added to `skills/` and entries appended to `migrations.yaml`.
+加上新增至 `skills/` 的任何新遷移 skills 和附加至 `migrations.yaml` 的條目。
 
-### The Maintainer's Process
+### 維護者流程
 
-1. **Make the core change**
-2. **If it's a breaking change**: author a migration skill against the new core, add entry to `migrations.yaml`
-3. **Write `migration.md`** — what changed, why, what skills might be affected
-4. **Test every official skill individually** against the new core (including migration skills)
-5. **Test pairwise combinations** for skills that share modified files or structured operations
-6. **Test curated three-skill stacks** based on popularity and overlap
-7. **Resolve all conflicts**
-8. **Record all resolutions** with enforced input hashes
-9. **Run full test suites**
-10. **Ship everything** — migration guide, migration skills, file ops, path remap, resolutions
+1. **進行核心變更**
+2. **如果是破壞性變更**：針對新核心撰寫遷移 skill，在 `migrations.yaml` 中新增條目
+3. **撰寫 `migration.md`** — 變更了什麼、為什麼、哪些 skills 可能受影響
+4. **針對新核心逐一測試每個官方 skill**（包括遷移 skills）
+5. **測試共享修改檔案或結構化操作的 skills 的成對組合**
+6. **測試基於受歡迎度和重疊度的精選三 skill 堆疊**
+7. **解決所有衝突**
+8. **記錄所有帶有強制輸入雜湊的解決方案**
+9. **執行完整測試套件**
+10. **發布所有內容** — 遷移指南、遷移 skills、檔案操作、路徑重映射、解決方案
 
-The bar: **patches apply silently. Breaking changes are auto-preserved via migration skills. A user should never be surprised by a change to their working setup.**
+標準：**補丁靜默套用。破壞性變更透過遷移 skills 自動保留。使用者不應因其運作中的設置發生變更而感到驚訝。**
 
-### Update Flow (Full)
+### 更新流程（完整）
 
-#### Step 1: Pre-flight
+#### 步驟 1：預檢
 
-- Check for untracked changes
-- Read `state.yaml`
-- Load shipped resolutions
-- Parse `migrations.yaml`, filter for applicable migrations
+- 檢查未追蹤的變更
+- 讀取 `state.yaml`
+- 載入已發布的解決方案
+- 解析 `migrations.yaml`，過濾適用的遷移
 
-#### Step 2: Preview
+#### 步驟 2：預覽
 
-Before modifying anything, show the user what's coming. This uses only git commands — no files are opened or changed:
+在修改任何內容之前，向使用者展示即將發生的事情。這只使用 git 指令——不打開或更改任何檔案：
 
 ```bash
 # Compute common base
@@ -739,7 +739,7 @@ git log --oneline $BASE..upstream/$BRANCH
 git diff --name-only $BASE..upstream/$BRANCH
 ```
 
-Present a summary grouped by impact:
+按影響分組呈現摘要：
 
 ```
 Update available: 0.5.0 → 0.8.0 (12 commits)
@@ -759,70 +759,70 @@ Update available: 0.5.0 → 0.8.0 (12 commits)
   [2] Abort
 ```
 
-If the user aborts, stop here. Nothing was modified.
+如果使用者中止，在此停止。沒有任何內容被修改。
 
-#### Step 3: Backup
+#### 步驟 3：備份
 
-Copy all files that will be modified to `.evoclaw/backup/`.
+將所有將被修改的檔案複製到 `.evoclaw/backup/`。
 
-#### Step 4: File Operations and Path Remap
+#### 步驟 4：檔案操作與路徑重映射
 
-Apply renames, deletes, moves. Record path remap in state.
+套用重新命名、刪除、移動。在 state 中記錄路徑重映射。
 
-#### Step 5: Three-Way Merge
+#### 步驟 5：三方合併
 
-For each core file that changed:
+對於每個已變更的核心檔案：
 
 ```bash
 git merge-file src/server.ts .evoclaw/base/src/server.ts updates/0.5.0-to-0.6.0/files/src/server.ts
 ```
 
-#### Step 6: Conflict Resolution
+#### 步驟 6：衝突解決
 
-1. Shipped resolutions (hash-verified) → automatic
-2. `git rerere` local cache → automatic
-3. Claude Code with `migration.md` + skill intents → resolves
-4. User → only for genuine ambiguity
+1. 已發布的解決方案（雜湊驗證）→ 自動
+2. `git rerere` 本地快取 → 自動
+3. Claude Code 配合 `migration.md` + skill 意圖 → 解決
+4. 使用者 → 僅適用於真正的模糊情況
 
-#### Step 7: Re-apply Custom Patches
+#### 步驟 7：重新套用自訂補丁
 
 ```bash
 git apply --3way .evoclaw/custom/001-logging-middleware.patch
 ```
 
-Using `--3way` allows git to fall back to three-way merge when line numbers have drifted. If `--3way` fails, escalate to Level 2.
+使用 `--3way` 允許 git 在行號漂移時回退至三方合併。如果 `--3way` 失敗，升級至第二層。
 
-#### Step 8: Update Base
+#### 步驟 8：更新基礎
 
-`.evoclaw/base/` replaced with new clean core. This is the **only time** the base changes.
+`.evoclaw/base/` 替換為新的乾淨核心。這是**唯一一次**基礎發生變更。
 
-#### Step 9: Apply Migration Skills
+#### 步驟 9：套用遷移 Skills
 
-For each applicable migration (where `since` > old `core_version`), apply the migration skill using the normal apply flow against the new base. Record in `state.yaml`.
+對於每個適用的遷移（`since` > 舊 `core_version`），使用正常套用流程針對新基礎套用遷移 skill。記錄在 `state.yaml` 中。
 
-#### Step 10: Re-apply Updated Skills
+#### 步驟 10：重新套用已更新的 Skills
 
-Skills live in the repo and update alongside core files. After the update, compare the version in each skill's `manifest.yaml` on disk against the version recorded in `state.yaml`.
+Skills 存在於存儲庫中，與核心檔案一起更新。更新後，比較每個 skill 的磁碟上 `manifest.yaml` 中的版本與 `state.yaml` 中記錄的版本。
 
-For each skill where the on-disk version is newer than the recorded version:
+對於每個磁碟版本比記錄版本更新的 skill：
 
-1. Re-apply the skill using the normal apply flow against the new base
-2. The three-way merge brings in the skill's new changes while preserving user customizations
-3. Re-apply any custom patches tied to the skill (`git apply --3way`)
-4. Update the version in `state.yaml`
+1. 使用正常套用流程針對新基礎重新套用 skill
+2. 三方合併引入 skill 的新變更，同時保留使用者自訂
+3. 重新套用綁定到 skill 的自訂補丁（`git apply --3way`）
+4. 更新 `state.yaml` 中的版本
 
-Skills whose version hasn't changed are skipped — no action needed.
+版本未變更的 skills 將被跳過——無需任何操作。
 
-If the user has a custom patch on a skill that changed significantly, the patch may conflict. Normal resolution: cache → Claude → user.
+如果使用者對大幅變更的 skill 有自訂補丁，補丁可能會發生衝突。正常解決：快取 → Claude → 使用者。
 
-#### Step 11: Re-run Structured Operations
+#### 步驟 11：重新執行結構化操作
 
-Recompute structured operations against the updated codebase to ensure consistency.
+針對更新後的代碼庫重新計算結構化操作以確保一致性。
 
-#### Step 12: Validate
+#### 步驟 12：驗證
 
-- Run all skill tests — mandatory
-- Compatibility report:
+- 執行所有 skill 測試——強制執行
+- 相容性報告：
 
 ```
 Core updated: 0.5.0 → 0.8.0
@@ -839,38 +839,38 @@ Core updated: 0.5.0 → 0.8.0
   ✓ All tests passing
 ```
 
-#### Step 13: Clean Up
+#### 步驟 13：清理
 
-Delete `.evoclaw/backup/`.
+刪除 `.evoclaw/backup/`。
 
-### Progressive Core Slimming
+### 漸進式核心精簡
 
-Migrations enable a clean path for slimming down the core over time. Each release can move more functionality to skills:
+遷移為隨時間精簡核心提供了清晰的路徑。每個版本都可以將更多功能移至 skills：
 
-- The breaking change removes the feature from core
-- The migration skill preserves it for existing users
-- New users start with a minimal core and add what they need
-- Over time, `state.yaml` reflects exactly what each user is running
+- 破壞性變更從核心移除功能
+- 遷移 skill 為現有使用者保留它
+- 新使用者從最小核心開始，按需新增
+- 隨著時間推移，`state.yaml` 精確反映每個使用者的運作情況
 
 ---
 
-## 11. Skill Removal (Uninstall)
+## 11. 移除 Skill（卸載）
 
-Removing a skill is not a reverse-patch operation. **Uninstall is a replay without the skill.**
+移除 skill 不是逆向補丁操作。**卸載是不包含該 skill 的重播。**
 
-### How It Works
+### 工作方式
 
-1. Read `state.yaml` to get the full list of applied skills and custom modifications
-2. Remove the target skill from the list
-3. Backup the current codebase to `.evoclaw/backup/`
-4. **Replay from clean base** — apply each remaining skill in order, apply custom patches, using the resolution cache
-5. Run all tests
-6. If tests pass, delete backup and update `state.yaml`
-7. If tests fail, restore from backup and report
+1. 讀取 `state.yaml` 以獲取已套用 skills 和自訂修改的完整列表
+2. 從列表中移除目標 skill
+3. 將當前代碼庫備份至 `.evoclaw/backup/`
+4. **從乾淨基礎重播**——按順序套用每個剩餘的 skill，套用自訂補丁，使用解決方案快取
+5. 執行所有測試
+6. 如果測試通過，刪除備份並更新 `state.yaml`
+7. 如果測試失敗，從備份還原並報告
 
-### Custom Patches Tied to the Removed Skill
+### 綁定到被移除 Skill 的自訂補丁
 
-If the removed skill has a `custom_patch` in `state.yaml`, the user is warned:
+如果被移除的 skill 在 `state.yaml` 中有 `custom_patch`，使用者將收到警告：
 
 ```
 Removing telegram will also discard custom patch: "Restrict bot responses to group chats only"
@@ -880,39 +880,39 @@ Removing telegram will also discard custom patch: "Restrict bot responses to gro
 
 ---
 
-## 12. Rebase
+## 12. 重新基準化
 
-Flatten accumulated layers into a clean starting point.
+將累積的層次壓平為乾淨的起始點。
 
-### What Rebase Does
+### 重新基準化的作用
 
-1. Takes the user's current actual files as the new reality
-2. Updates `.evoclaw/base/` to the current core version's clean files
-3. For each applied skill, regenerates the modified file diffs against the new base
-4. Updates `state.yaml` with `rebased_at` timestamp
-5. Clears old custom patches (now baked in)
-6. Clears stale resolution cache entries
+1. 將使用者當前的實際檔案作為新的現實
+2. 將 `.evoclaw/base/` 更新至當前核心版本的乾淨檔案
+3. 對於每個已套用的 skill，針對新基礎重新生成修改的檔案差異
+4. 更新 `state.yaml` 中的 `rebased_at` 時間戳
+5. 清除舊的自訂補丁（現已納入）
+6. 清除過時的解決方案快取條目
 
-### When to Rebase
+### 何時重新基準化
 
-- After a major core update
-- When accumulated patches become unwieldy
-- Before a significant new skill application
-- Periodically as maintenance
+- 在重大核心更新後
+- 當累積的補丁變得難以管理時
+- 在套用重要的新 skill 之前
+- 作為定期維護
 
-### Tradeoffs
+### 權衡
 
-**Lose**: individual skill patch history, ability to cleanly remove a single old skill, old custom patches as separate artifacts
+**失去**：個別 skill 補丁歷史、乾淨移除單個舊 skill 的能力、作為獨立工件的舊自訂補丁
 
-**Gain**: clean base, simpler future merges, reduced cache size, fresh starting point
+**獲得**：乾淨的基礎、更簡單的未來合併、減少的快取大小、全新的起始點
 
 ---
 
-## 13. Replay
+## 13. 重播
 
-Given `state.yaml`, reproduce the exact installation on a fresh machine with no AI intervention (assuming all resolutions are cached).
+給定 `state.yaml`，在全新機器上重現完全相同的安裝，無需 AI 干預（假設所有解決方案都已快取）。
 
-### Replay Flow
+### 重播流程
 
 ```bash
 # Fully programmatic — no Claude Code needed
@@ -958,11 +958,11 @@ run_tests && verify_hashes
 
 ---
 
-## 14. Skill Tests
+## 14. Skill 測試
 
-Each skill includes integration tests that validate the skill works correctly when applied.
+每個 skill 包含驗證 skill 套用後正確運作的整合測試。
 
-### Structure
+### 結構
 
 ```
 skills/
@@ -971,40 +971,40 @@ skills/
       whatsapp.test.ts
 ```
 
-### What Tests Validate
+### 測試驗證的內容
 
-- **Single skill on fresh core**: apply to clean codebase → tests pass → integration works
-- **Skill functionality**: the feature actually works
-- **Post-apply state**: files in expected state, `state.yaml` correctly updated
+- **全新核心上的單個 skill**：套用到乾淨代碼庫 → 測試通過 → 整合有效
+- **Skill 功能**：功能實際運作
+- **套用後狀態**：檔案處於預期狀態，`state.yaml` 正確更新
 
-### When Tests Run (Always)
+### 測試執行時機（始終）
 
-- **After applying a skill** — even if all merges were clean
-- **After core update** — even if all merges were clean
-- **After uninstall replay** — confirms removal didn't break remaining skills
-- **In CI** — tests all official skills individually and in common combinations
-- **During replay** — validates replayed state
+- **套用 skill 後** — 即使所有合併都是乾淨的
+- **核心更新後** — 即使所有合併都是乾淨的
+- **卸載重播後** — 確認移除未破壞剩餘的 skills
+- **在 CI 中** — 逐一測試所有官方 skills 及常見組合
+- **重播期間** — 驗證重播狀態
 
-Clean merge ≠ working code. Tests are the only reliable signal.
+乾淨合併 ≠ 有效代碼。測試是唯一可靠的信號。
 
-### CI Test Matrix
+### CI 測試矩陣
 
-Test coverage is **smart, not exhaustive**:
+測試覆蓋是**智能的，而非窮舉的**：
 
-- Every official skill individually against each supported core version
-- **Pairwise combinations for skills that modify at least one common file or have overlapping structured operations**
-- Curated three-skill stacks based on popularity and high overlap
-- Test matrix auto-generated from manifest `modifies` and `structured` fields
+- 每個官方 skill 逐一針對每個支援的核心版本
+- **修改至少一個共同檔案或具有重疊結構化操作的 skills 的成對組合**
+- 基於受歡迎度和高重疊度的精選三 skill 堆疊
+- 從清單的 `modifies` 和 `structured` 欄位自動生成測試矩陣
 
-Each passing combination generates a verified resolution entry for the shared cache.
+每個通過的組合為共享快取生成一個已驗證的解決方案條目。
 
 ---
 
-## 15. Project Configuration
+## 15. 專案配置
 
 ### `.gitattributes`
 
-Ship with EvoClaw to reduce noisy merge conflicts:
+隨 EvoClaw 發布以減少雜亂的合併衝突：
 
 ```
 * text=auto
@@ -1016,7 +1016,7 @@ Ship with EvoClaw to reduce noisy merge conflicts:
 
 ---
 
-## 16. Directory Structure
+## 16. 目錄結構
 
 ```
 project/
@@ -1067,24 +1067,24 @@ project/
 
 ---
 
-## 17. Design Principles
+## 17. 設計原則
 
-1. **Use git, don't reinvent it.** `git merge-file` for code merges, `git rerere` for caching resolutions, `git apply --3way` for custom patches.
-2. **Three-level resolution: git → Claude → user.** Programmatic first, AI second, human third.
-3. **Clean merges aren't enough.** Tests run after every operation. Semantic conflicts survive text merges.
-4. **All operations are safe.** Backup before, restore on failure. No half-applied state.
-5. **One shared base.** `.evoclaw/base/` is the clean core before any skills or customizations. It's the stable common ancestor for all three-way merges. Only updated on core updates.
-6. **Code merges vs. structured operations.** Source code is three-way merged. Dependencies, env vars, and configs are aggregated programmatically. Structured operations are implicit and batched.
-7. **Resolutions are learned and shared.** Maintainers resolve conflicts and ship verified resolutions with hash enforcement. `.evoclaw/resolutions/` is the shared artifact.
-8. **One skill, one happy path.** No predefined configuration options. Customization is more patching.
-9. **Skills layer and compose.** Core skills provide the foundation. Extension skills add capabilities.
-10. **Intent is first-class and structured.** `SKILL.md`, `.intent.md` (What, Invariants, Must-keep), and `migration.md`.
-11. **State is explicit and complete.** Skills, custom patches, per-file hashes, structured outcomes, path remaps. Replay is deterministic. Drift is instant to detect.
-12. **Always recoverable.** The three-level model reconstructs coherent state from any starting point.
-13. **Uninstall is replay.** Replay from clean base without the skill. Backup for safety.
-14. **Core updates are the maintainers' responsibility.** Test, resolve, ship. Breaking changes require a migration skill that preserves the old behavior. The cost of a breaking change is authoring and testing the migration. Users should never be surprised by a change to their setup.
-15. **File operations and path remapping are first-class.** Renames, deletes, moves in manifests. Skills are never mutated — paths resolve at apply time.
-16. **Skills are tested.** Integration tests per skill. CI tests pairwise by overlap. Tests run always.
-17. **Deterministic serialization.** Sorted keys, consistent formatting. No noisy diffs.
-18. **Rebase when needed.** Flatten layers for a clean starting point.
-19. **Progressive core slimming.** Breaking changes move functionality from core to migration skills. Existing users keep what they have automatically. New users start minimal and add what they need.
+1. **使用 git，不要重新發明它。** `git merge-file` 用於代碼合併，`git rerere` 用於快取解決方案，`git apply --3way` 用於自訂補丁。
+2. **三層解決：git → Claude → 使用者。** 首先程式化，其次 AI，第三人工。
+3. **乾淨合併還不夠。** 每次操作後執行測試。語意衝突能存活文字合併。
+4. **所有操作都是安全的。** 之前備份，失敗時還原。沒有半套用狀態。
+5. **一個共享基礎。** `.evoclaw/base/` 是套用任何 skills 或自訂前的乾淨核心。它是所有三方合併的穩定公共祖先。僅在核心更新時更新。
+6. **代碼合併 vs. 結構化操作。** 原始碼進行三方合併。依賴、環境變數和設定以程式化方式聚合。結構化操作是隱式且批次處理的。
+7. **解決方案被學習和共享。** 維護者解決衝突並在強制雜湊執行下發布已驗證的解決方案。`.evoclaw/resolutions/` 是共享工件。
+8. **一個 skill，一條快樂路徑。** 沒有預定義的設定選項。自訂是更多的補丁。
+9. **Skills 分層和組合。** 核心 skills 提供基礎。擴充 skills 新增功能。
+10. **意圖是一等公民且結構化的。** `SKILL.md`、`.intent.md`（What、Invariants、Must-keep）和 `migration.md`。
+11. **State 是明確且完整的。** Skills、自訂補丁、每檔案雜湊、結構化結果、路徑重映射。重播是確定性的。漂移可即時偵測。
+12. **始終可恢復。** 三層模型從任何起始點重建一致的狀態。
+13. **卸載是重播。** 從乾淨基礎重播，不包含該 skill。備份以確保安全。
+14. **核心更新是維護者的責任。** 測試、解決、發布。破壞性變更需要保留舊行為的遷移 skill。破壞性變更的代價是撰寫和測試遷移。使用者不應因其設置的變更而感到驚訝。
+15. **檔案操作和路徑重映射是一等公民。** 清單中的重新命名、刪除、移動。Skills 絕不被修改——路徑在套用時解析。
+16. **Skills 經過測試。** 每個 skill 的整合測試。CI 按重疊測試成對組合。測試始終執行。
+17. **確定性序列化。** 排序鍵，一致的格式。沒有雜亂的差異。
+18. **需要時重新基準化。** 將層次壓平為乾淨的起始點。
+19. **漸進式核心精簡。** 破壞性變更將功能從核心移至遷移 skills。現有使用者自動保留他們擁有的。新使用者從最小化開始，按需新增。

@@ -1,196 +1,196 @@
-# EvoClaw Requirements
+# EvoClaw 需求文件
 
-Original requirements and design decisions from the project creator.
-
----
-
-## Why This Exists
-
-This is a lightweight, secure alternative to OpenClaw (formerly ClawBot). That project became a monstrosity - 4-5 different processes running different gateways, endless configuration files, endless integrations. It's a security nightmare where agents don't run in isolated processes; there's all kinds of leaky workarounds trying to prevent them from accessing parts of the system they shouldn't. It's impossible for anyone to realistically understand the whole codebase. When you run it you're kind of just yoloing it.
-
-EvoClaw gives you the core functionality without that mess.
+本專案的原始需求與設計決策，由專案創建者撰寫。
 
 ---
 
-## Philosophy
+## 為何存在
 
-### Small Enough to Understand
+這是 OpenClaw（前身為 ClawBot）的輕量化、安全替代方案。那個專案已變成一個龐然大物——4-5 個不同的程序運行著不同的閘道器、無盡的設定檔、無盡的整合。這是一個安全噩夢，代理程序並非在隔離的程序中運行；為了防止它們存取不應該存取的系統部分，到處都是各種洩漏的變通方案。任何人都不可能切實地理解整個程式碼庫。執行它時，基本上只能放手一搏。
 
-The entire codebase should be something you can read and understand. One Node.js process. A handful of source files. No microservices, no message queues, no abstraction layers.
-
-### Security Through True Isolation
-
-Instead of application-level permission systems trying to prevent agents from accessing things, agents run in actual Linux containers. The isolation is at the OS level. Agents can only see what's explicitly mounted. Bash access is safe because commands run inside the container, not on your Mac.
-
-### Built for One User
-
-This isn't a framework or a platform. It's working software for my specific needs. I use WhatsApp and Email, so it supports WhatsApp and Email. I don't use Telegram, so it doesn't support Telegram. I add the integrations I actually want, not every possible integration.
-
-### Customization = Code Changes
-
-No configuration sprawl. If you want different behavior, modify the code. The codebase is small enough that this is safe and practical. Very minimal things like the trigger word are in config. Everything else - just change the code to do what you want.
-
-### AI-Native Development
-
-I don't need an installation wizard - Claude Code guides the setup. I don't need a monitoring dashboard - I ask Claude Code what's happening. I don't need elaborate logging UIs - I ask Claude to read the logs. I don't need debugging tools - I describe the problem and Claude fixes it.
-
-The codebase assumes you have an AI collaborator. It doesn't need to be excessively self-documenting or self-debugging because Claude is always there.
-
-### Skills Over Features
-
-When people contribute, they shouldn't add "Telegram support alongside WhatsApp." They should contribute a skill like `/add-telegram` that transforms the codebase. Users fork the repo, run skills to customize, and end up with clean code that does exactly what they need - not a bloated system trying to support everyone's use case simultaneously.
+EvoClaw 讓你獲得核心功能，而不會有那些混亂。
 
 ---
 
-## RFS (Request for Skills)
+## 設計哲學
 
-Skills we'd love contributors to build:
+### 小到能夠理解
 
-### Communication Channels
-Skills to add or switch to different messaging platforms:
-- `/add-telegram` - Add Telegram as an input channel
-- `/add-slack` - Add Slack as an input channel
-- `/add-discord` - Add Discord as an input channel
-- `/add-sms` - Add SMS via Twilio or similar
-- `/convert-to-telegram` - Replace WhatsApp with Telegram entirely
+整個程式碼庫應該是你能夠閱讀並理解的。單一 Node.js 程序。少數幾個原始碼檔案。沒有微服務、沒有訊息佇列、沒有抽象層。
 
-### Container Runtime
-The project uses Docker by default (cross-platform). For macOS users who prefer Apple Container:
-- `/convert-to-apple-container` - Switch from Docker to Apple Container (macOS-only)
+### 透過真正隔離實現安全性
 
-### Platform Support
-- `/setup-linux` - Make the full setup work on Linux (depends on Docker conversion)
-- `/setup-windows` - Windows support via WSL2 + Docker
+代理程序不是靠應用程式層級的權限系統來阻止其存取某些資源，而是在真實的 Linux 容器中運行。隔離發生在作業系統層級。代理程序只能看到明確掛載的內容。Bash 存取是安全的，因為指令在容器內部執行，而不是在你的 Mac 上。
 
----
+### 為單一使用者而建
 
-## Vision
+這不是一個框架或平台。這是為我特定需求而設計的實用軟體。我使用 WhatsApp 和 Email，所以它支援 WhatsApp 和 Email。我不使用 Telegram，所以它不支援 Telegram。我只添加我真正想要的整合，而不是每一種可能的整合。
 
-A personal Claude assistant accessible via WhatsApp, with minimal custom code.
+### 客製化 = 修改程式碼
 
-**Core components:**
-- **Claude Agent SDK** as the core agent
-- **Containers** for isolated agent execution (Linux VMs)
-- **WhatsApp** as the primary I/O channel
-- **Persistent memory** per conversation and globally
-- **Scheduled tasks** that run Claude and can message back
-- **Web access** for search and browsing
-- **Browser automation** via agent-browser
+沒有設定檔蔓延。如果你想要不同的行為，就修改程式碼。程式碼庫夠小，這樣做是安全且實際可行的。極少數的東西，例如觸發詞，放在設定中。其他一切——直接修改程式碼來實現你想要的效果。
 
-**Implementation approach:**
-- Use existing tools (WhatsApp connector, Claude Agent SDK, MCP servers)
-- Minimal glue code
-- File-based systems where possible (CLAUDE.md for memory, folders for groups)
+### AI 原生開發
+
+我不需要安裝精靈——Claude Code 會引導設定。我不需要監控儀表板——我直接問 Claude Code 發生了什麼。我不需要精心設計的日誌介面——我請 Claude 讀取日誌。我不需要除錯工具——我描述問題，Claude 來修復它。
+
+程式碼庫假設你有一個 AI 協作者。它不需要過度自我記錄或自我除錯，因為 Claude 隨時在那裡。
+
+### 技能優先於功能
+
+當人們貢獻時，他們不應該「在 WhatsApp 旁邊添加 Telegram 支援」。他們應該貢獻一個像 `/add-telegram` 這樣的技能，來轉化程式碼庫。使用者 fork 儲存庫、執行技能來客製化，最終得到乾淨的程式碼，能做到他們確切需要的事——而不是一個試圖同時支援所有人使用情境的臃腫系統。
 
 ---
 
-## Architecture Decisions
+## RFS（技能需求）
 
-### Message Routing
-- A router listens to WhatsApp and routes messages based on configuration
-- Only messages from registered groups are processed
-- Trigger: `@Eve` prefix (case insensitive), configurable via `ASSISTANT_NAME` env var
-- Unregistered groups are ignored completely
+我們希望貢獻者建立的技能：
 
-### Memory System
-- **Per-group memory**: Each group has a folder with its own `CLAUDE.md`
-- **Global memory**: Root `CLAUDE.md` is read by all groups, but only writable from "main" (self-chat)
-- **Files**: Groups can create/read files in their folder and reference them
-- Agent runs in the group's folder, automatically inherits both CLAUDE.md files
+### 通訊頻道
+用於添加或切換到不同訊息平台的技能：
+- `/add-telegram` - 添加 Telegram 作為輸入頻道
+- `/add-slack` - 添加 Slack 作為輸入頻道
+- `/add-discord` - 添加 Discord 作為輸入頻道
+- `/add-sms` - 透過 Twilio 或類似服務添加 SMS
+- `/convert-to-telegram` - 完全以 Telegram 取代 WhatsApp
 
-### Session Management
-- Each group maintains a conversation session (via Claude Agent SDK)
-- Sessions auto-compact when context gets too long, preserving critical information
+### 容器執行環境
+本專案預設使用 Docker（跨平台）。對於偏好 Apple Container 的 macOS 使用者：
+- `/convert-to-apple-container` - 從 Docker 切換到 Apple Container（僅限 macOS）
 
-### Container Isolation
-- All agents run inside containers (lightweight Linux VMs)
-- Each agent invocation spawns a container with mounted directories
-- Containers provide filesystem isolation - agents can only see mounted paths
-- Bash access is safe because commands run inside the container, not on the host
-- Browser automation via agent-browser with Chromium in the container
-
-### Scheduled Tasks
-- Users can ask Claude to schedule recurring or one-time tasks from any group
-- Tasks run as full agents in the context of the group that created them
-- Tasks have access to all tools including Bash (safe in container)
-- Tasks can optionally send messages to their group via `send_message` tool, or complete silently
-- Task runs are logged to the database with duration and result
-- Schedule types: cron expressions, intervals (ms), or one-time (ISO timestamp)
-- From main: can schedule tasks for any group, view/manage all tasks
-- From other groups: can only manage that group's tasks
-
-### Group Management
-- New groups are added explicitly via the main channel
-- Groups are registered in SQLite (via the main channel or IPC `register_group` command)
-- Each group gets a dedicated folder under `groups/`
-- Groups can have additional directories mounted via `containerConfig`
-
-### Main Channel Privileges
-- Main channel is the admin/control group (typically self-chat)
-- Can write to global memory (`groups/CLAUDE.md`)
-- Can schedule tasks for any group
-- Can view and manage tasks from all groups
-- Can configure additional directory mounts for any group
+### 平台支援
+- `/setup-linux` - 讓完整設定在 Linux 上運作（依賴容器轉換）
+- `/setup-windows` - 透過 WSL2 + Docker 支援 Windows
 
 ---
 
-## Integration Points
+## 願景
+
+一個可透過 WhatsApp 存取的個人 Claude 助理，僅使用最少的自訂程式碼。
+
+**核心元件：**
+- **Claude Agent SDK** 作為核心代理程序
+- **容器** 用於隔離的代理程序執行環境（Linux VMs）
+- **WhatsApp** 作為主要 I/O 頻道
+- **持久記憶** 按對話和全域分別儲存
+- **排程任務** 執行 Claude 並可回傳訊息
+- **網路存取** 用於搜尋和瀏覽
+- **瀏覽器自動化** 透過 agent-browser
+
+**實作方式：**
+- 使用現有工具（WhatsApp 連接器、Claude Agent SDK、MCP 伺服器）
+- 最少的黏合程式碼
+- 盡可能使用基於檔案的系統（記憶使用 CLAUDE.md，群組使用資料夾）
+
+---
+
+## 架構決策
+
+### 訊息路由
+- 路由器監聽 WhatsApp 並根據設定路由訊息
+- 只有已註冊群組的訊息才會被處理
+- 觸發條件：`@Eve` 前綴（不區分大小寫），可透過 `ASSISTANT_NAME` 環境變數設定
+- 未註冊的群組將被完全忽略
+
+### 記憶系統
+- **每群組記憶**：每個群組都有一個資料夾，內含自己的 `CLAUDE.md`
+- **全域記憶**：根目錄的 `CLAUDE.md` 由所有群組讀取，但只有「main」（自我對話）可以寫入
+- **檔案**：群組可以在其資料夾中建立/讀取檔案並引用它們
+- 代理程序在群組的資料夾中運行，自動繼承兩個 CLAUDE.md 檔案
+
+### 會話管理
+- 每個群組透過 Claude Agent SDK 維護一個對話會話
+- 當上下文過長時，會話自動壓縮，同時保留關鍵資訊
+
+### 容器隔離
+- 所有代理程序在容器（輕量 Linux VMs）內運行
+- 每次代理程序調用都會產生一個帶有掛載目錄的容器
+- 容器提供檔案系統隔離——代理程序只能看到已掛載的路徑
+- Bash 存取是安全的，因為指令在容器內部執行，而不是在主機上
+- 透過 agent-browser 在容器中使用 Chromium 進行瀏覽器自動化
+
+### 排程任務
+- 使用者可以請 Claude 從任何群組安排週期性或一次性任務
+- 任務以完整代理程序的身份在建立它們的群組上下文中運行
+- 任務可以存取所有工具，包括 Bash（在容器中是安全的）
+- 任務可選擇透過 `send_message` 工具傳送訊息給群組，或靜默完成
+- 任務執行記錄到資料庫，包含持續時間和結果
+- 排程類型：cron 表達式、時間間隔（毫秒）或一次性（ISO 時間戳記）
+- 從 main：可以為任何群組安排任務、查看/管理所有任務
+- 從其他群組：只能管理該群組的任務
+
+### 群組管理
+- 新群組透過主頻道明確添加
+- 群組在 SQLite 中註冊（透過主頻道或 IPC `register_group` 指令）
+- 每個群組在 `groups/` 下獲得一個專用資料夾
+- 群組可以透過 `containerConfig` 掛載額外的目錄
+
+### 主頻道特權
+- 主頻道是管理/控制群組（通常是自我對話）
+- 可以寫入全域記憶（`groups/CLAUDE.md`）
+- 可以為任何群組安排任務
+- 可以查看和管理來自所有群組的任務
+- 可以為任何群組設定額外的目錄掛載
+
+---
+
+## 整合點
 
 ### WhatsApp
-- Using baileys library for WhatsApp Web connection
-- Messages stored in SQLite, polled by router
-- QR code authentication during setup
+- 使用 baileys 函式庫進行 WhatsApp Web 連接
+- 訊息儲存在 SQLite 中，由路由器輪詢
+- 設定期間使用 QR code 驗證
 
-### Scheduler
-- Built-in scheduler runs on the host, spawns containers for task execution
-- Custom `evoclaw` MCP server (inside container) provides scheduling tools
-- Tools: `schedule_task`, `list_tasks`, `pause_task`, `resume_task`, `cancel_task`, `send_message`
-- Tasks stored in SQLite with run history
-- Scheduler loop checks for due tasks every minute
-- Tasks execute Claude Agent SDK in containerized group context
+### 排程器
+- 內建排程器在主機上運行，產生容器執行任務
+- 自訂 `evoclaw` MCP 伺服器（容器內部）提供排程工具
+- 工具：`schedule_task`、`list_tasks`、`pause_task`、`resume_task`、`cancel_task`、`send_message`
+- 任務儲存在 SQLite 中，包含執行歷史記錄
+- 排程器迴圈每分鐘檢查是否有到期任務
+- 任務在容器化的群組上下文中執行 Claude Agent SDK
 
-### Web Access
-- Built-in WebSearch and WebFetch tools
-- Standard Claude Agent SDK capabilities
+### 網路存取
+- 內建 WebSearch 和 WebFetch 工具
+- 標準 Claude Agent SDK 功能
 
-### Browser Automation
-- agent-browser CLI with Chromium in container
-- Snapshot-based interaction with element references (@e1, @e2, etc.)
-- Screenshots, PDFs, video recording
-- Authentication state persistence
-
----
-
-## Setup & Customization
-
-### Philosophy
-- Minimal configuration files
-- Setup and customization done via Claude Code
-- Users clone the repo and run Claude Code to configure
-- Each user gets a custom setup matching their exact needs
-
-### Skills
-- `/setup` - Install dependencies, authenticate WhatsApp, configure scheduler, start services
-- `/customize` - General-purpose skill for adding capabilities (new channels like Telegram, new integrations, behavior changes)
-- `/update` - Pull upstream changes, merge with customizations, run migrations
-
-### Deployment
-- Runs on local Mac via launchd
-- Single Node.js process handles everything
+### 瀏覽器自動化
+- 容器中帶有 Chromium 的 agent-browser CLI
+- 基於快照的互動，帶有元素參考（@e1、@e2 等）
+- 截圖、PDF、影片錄製
+- 驗證狀態持久化
 
 ---
 
-## Personal Configuration (Reference)
+## 設定與客製化
 
-These are the creator's settings, stored here for reference:
+### 設計哲學
+- 最少的設定檔
+- 設定和客製化透過 Claude Code 完成
+- 使用者複製儲存庫並執行 Claude Code 進行設定
+- 每個使用者獲得符合其確切需求的自訂設定
 
-- **Trigger**: `@Eve` (case insensitive)
-- **Response prefix**: `Eve:`
-- **Persona**: Default Claude (no custom personality)
-- **Main channel**: Self-chat (messaging yourself in WhatsApp)
+### 技能
+- `/setup` - 安裝相依套件、驗證 WhatsApp、設定排程器、啟動服務
+- `/customize` - 用於添加功能的通用技能（新頻道如 Telegram、新整合、行為變更）
+- `/update` - 拉取上游變更、與客製化合併、執行遷移
+
+### 部署
+- 透過 launchd 在本地 Mac 上運行
+- 單一 Node.js 程序處理所有事務
 
 ---
 
-## Project Name
+## 個人設定（參考）
 
-**EvoClaw** - A reference to Clawdbot (now OpenClaw).
+以下是創建者的設定，存放於此以供參考：
+
+- **觸發詞**：`@Eve`（不區分大小寫）
+- **回應前綴**：`Eve:`
+- **人設**：預設 Claude（無自訂個性）
+- **主頻道**：自我對話（在 WhatsApp 中向自己傳訊）
+
+---
+
+## 專案名稱
+
+**EvoClaw** - 源自 Clawdbot（現為 OpenClaw）的命名。

@@ -1,403 +1,403 @@
 ## [1.26.0] — 2026-03-23
 
-### Phase 19 — Tests, container lifecycle, DB schema, logging/monitoring (PRs #387–390)
+### 第 19 階段 — 測試、容器生命週期、DB 結構、日誌/監控（PRs #387–390）
 
-#### PR #387 — fix(p19b): Container lifecycle, resource limits, IPC cleanup audit (7 fixes)
-- **HIGH** No container log size limit — Docker json-file driver accumulated logs indefinitely; added `--log-opt max-size=10m --log-opt max-file=2`
-- **MEDIUM** Container `/tmp` unbounded — overlay writes could exhaust host storage; added `--tmpfs /tmp:size=64m,mode=1777`
-- **MEDIUM** `_stop_container()` issued `docker kill` (SIGKILL) immediately — agent had zero time to flush IPC files; changed to `docker stop --time 5` for graceful SIGTERM first
-- **MEDIUM** `agent-browser` npm package unversioned — supply-chain risk; pinned to `agent-browser@1.1.5`
-- **MEDIUM** 9 Python Dockerfile packages without version floors — non-reproducible builds; added explicit `>=` floors
-- **LOW** `build.sh` did not verify image exists after build — added `docker image inspect` check
-- **LOW** No explicit `STOPSIGNAL SIGTERM` in Dockerfile
+#### PR #387 — fix(p19b): 容器生命週期、資源限制、IPC 清理稽核（7 項修復）
+- **HIGH** 容器日誌無大小限制——Docker json-file 驅動程式無限累積日誌；加入 `--log-opt max-size=10m --log-opt max-file=2`
+- **MEDIUM** 容器 `/tmp` 無界——overlay 寫入可能耗盡主機儲存空間；加入 `--tmpfs /tmp:size=64m,mode=1777`
+- **MEDIUM** `_stop_container()` 立即發出 `docker kill`（SIGKILL）——agent 沒有時間刷新 IPC 檔案；改為先 `docker stop --time 5` 發出優雅的 SIGTERM
+- **MEDIUM** `agent-browser` npm 套件未版本化——供應鏈風險；固定至 `agent-browser@1.1.5`
+- **MEDIUM** 9 個 Python Dockerfile 套件無版本下限——構建不可重現；加入明確的 `>=` 下限
+- **LOW** `build.sh` 未在構建後驗證映像是否存在——加入 `docker image inspect` 檢查
+- **LOW** Dockerfile 中無明確的 `STOPSIGNAL SIGTERM`
 
-#### PR #388 — fix(p19d): Logging, health checks, CI pipeline, error recovery audit (6 fixes)
-- **HIGH** `/health` endpoint only checked DB and Docker — zero-channel deployments returned `"ok"`; added `channel_ok`, `leader`, `monitor_alive` checks; Docker exception now also sets `status="degraded"`
-- **HIGH** CI pipeline never ran Python tests — `pytest tests/` was completely absent from `.github/workflows/ci.yml`; added `python-tests` job on Python 3.11
-- **MEDIUM** Health monitor exceptions logged at DEBUG — raised to `log.warning()`
-- **MEDIUM** Schedule parse failures returned `None` silently — tasks vanished without any log entry; all three schedule-type branches now call `log.warning()`
-- **LOW** systemd unit missing `LimitNOFILE=65536` — many-group deployments hit kernel fd limit, inotify silently stopped
-- **LOW** `except Exception: pass` in 2 IPC watcher paths — converted to `log.debug()`
+#### PR #388 — fix(p19d): 日誌、健康檢查、CI 流水線、錯誤恢復稽核（6 項修復）
+- **HIGH** `/health` 端點僅檢查 DB 和 Docker——零頻道部署返回 `"ok"`；加入 `channel_ok`、`leader`、`monitor_alive` 檢查；Docker 異常現在也設置 `status="degraded"`
+- **HIGH** CI 流水線從未執行 Python 測試——`pytest tests/` 完全缺失於 `.github/workflows/ci.yml`；加入 Python 3.11 上的 `python-tests` 任務
+- **MEDIUM** 健康監控異常以 DEBUG 級別記錄——提升至 `log.warning()`
+- **MEDIUM** 排程解析失敗靜默返回 `None`——任務消失無任何日誌條目；三個排程類型分支現在均呼叫 `log.warning()`
+- **LOW** systemd 單元缺少 `LimitNOFILE=65536`——多群組部署觸及核心 fd 限制，inotify 靜默停止
+- **LOW** 2 個 IPC watcher 路徑中的 `except Exception: pass`——改為 `log.debug()`
 
-#### PR #389 — fix(p19c): Database schema integrity, migrations, query correctness (11 fixes)
-- **HIGH** `evolution_runs.success DEFAULT 1` — all rows without explicit success flag counted as success; fitness scores were perpetually inflated; changed to `DEFAULT 0`
-- **HIGH** Missing `UNIQUE(jid, run_id)` on `evolution_runs` — crash+retry doubled fitness counts; added constraint with `INSERT OR IGNORE`
-- **HIGH** Missing `UNIQUE(folder)` on `registered_groups` — two groups could share a folder, corrupting each other's MEMORY.md/CLAUDE.md
-- **HIGH** `group_cold_memory` had no write function in `db.py` — cold memories were never written through the thread-safe path; added `append_cold_memory()` and `delete_cold_memory_before()`
-- **HIGH** Migration runner had no concurrency lock — concurrent process restarts could apply same migration twice; added `BEGIN EXCLUSIVE`
-- **MEDIUM** Missing `UNIQUE(run_id)` on `container_logs` — duplicate running rows triggered false stuck-container alerts
-- **MEDIUM** `group_genome` missing `CHECK` constraints on `formality`/`technical_depth`
-- **MEDIUM** `task_run_logs.status` nullable — consecutive-failure counter silently skipped NULL rows; changed to `NOT NULL DEFAULT 'unknown'`
-- **MEDIUM** `db_adapter.py` missing `PRAGMA foreign_keys=ON` — FK constraints silently unenforced in migrations and tests
-- **MEDIUM** Cold memory FTS had no INSERT/DELETE triggers — all cold memories were invisible to `memory_fts_search()`
-- **LOW** `rbac_grants.granted_at` nullable — audit `ORDER BY` returned unreliable results; added `NOT NULL DEFAULT (unixepoch())`
+#### PR #389 — fix(p19c): 資料庫結構完整性、遷移、查詢正確性稽核（11 項修復）
+- **HIGH** `evolution_runs.success DEFAULT 1`——所有未明確設置成功標誌的列被計為成功；適應度分數被永久膨脹；改為 `DEFAULT 0`
+- **HIGH** `evolution_runs` 缺少 `UNIQUE(jid, run_id)`——崩潰+重試使適應度計數加倍；加入約束並使用 `INSERT OR IGNORE`
+- **HIGH** `registered_groups` 缺少 `UNIQUE(folder)`——兩個群組可能共享一個資料夾，互相損壞對方的 MEMORY.md/CLAUDE.md
+- **HIGH** `group_cold_memory` 在 `db.py` 中沒有寫入函式——冷記憶從未透過線程安全路徑寫入；加入 `append_cold_memory()` 和 `delete_cold_memory_before()`
+- **HIGH** 遷移執行器無並發鎖——並發進程重啟可能重複套用同一遷移；加入 `BEGIN EXCLUSIVE`
+- **MEDIUM** `container_logs` 缺少 `UNIQUE(run_id)`——重複的執行中列觸發錯誤的容器卡住警報
+- **MEDIUM** `group_genome` 缺少 `formality`/`technical_depth` 的 `CHECK` 約束
+- **MEDIUM** `task_run_logs.status` 可為空——連續失敗計數器靜默跳過 NULL 列；改為 `NOT NULL DEFAULT 'unknown'`
+- **MEDIUM** `db_adapter.py` 缺少 `PRAGMA foreign_keys=ON`——FK 約束在遷移和測試中靜默未強制執行
+- **MEDIUM** 冷記憶 FTS 無 INSERT/DELETE 觸發器——所有冷記憶對 `memory_fts_search()` 不可見
+- **LOW** `rbac_grants.granted_at` 可為空——稽核 `ORDER BY` 返回不可靠的結果；加入 `NOT NULL DEFAULT (unixepoch())`
 
-#### PR #390 — test(p19a): Test suite quality audit and coverage improvements (12 fixes + 68 new tests)
-- **HIGH** `test_core.py format_messages` — wrong return type expected, always-pass tautology assertion
-- **HIGH** Dev log tests used invalid session ID format — `get_dev_logs()` always returned `[]`, assertions always failed
-- **HIGH** `test_stop_container` tests tested old `docker kill` behavior after `docker stop` change — always failing
-- **HIGH** `GroupQueue` concurrency test — `config` patch context closed before `enqueue_message_check()`, limit never triggered
-- **HIGH** `test_dev_engine` deploy tests missing REVIEW PASS artifact — deploy gate always blocked, tests always failed
-- **HIGH** Path-traversal test patched wrong `config` field — could write outside jail in CI
-- **MEDIUM** `test_infrastructure` tautology tests — inline re-implementation of validation logic, never touching production code
-- **MEDIUM** 3 test modules with `psutil` import chain, no `pytest.importorskip` guard — `ModuleNotFoundError` on clean installs
-- **LOW** `assert mock.called` without argument inspection — replaced with `call_args` check
-- **NEW** `tests/test_allowlist.py` — 23 tests (zero previous coverage): deny-all sentinel bypass, None sender, missing file, corrupt JSON
-- **NEW** `tests/test_rbac.py` — 18 tests (zero previous coverage): unknown role resilience, cache coherence, permission enforcement
-- **NEW** `tests/test_fitness.py` — 14 tests (zero previous coverage): success default=False, speed clamp, fitness range guarantee
-- **NEW** `tests/test_log_buffer.py` — 13 tests (zero previous coverage): ring buffer eviction, SSE polling, limit clamping
+#### PR #390 — test(p19a): 測試套件品質稽核與覆蓋率改進（12 項修復 + 68 個新測試）
+- **HIGH** `test_core.py format_messages`——預期的返回類型錯誤，永遠通過的同義反復斷言
+- **HIGH** 開發日誌測試使用無效的 session ID 格式——`get_dev_logs()` 始終返回 `[]`，斷言始終失敗
+- **HIGH** `test_stop_container` 測試在 `docker stop` 變更後仍測試舊的 `docker kill` 行為——始終失敗
+- **HIGH** `GroupQueue` 並發測試——`config` 補丁上下文在 `enqueue_message_check()` 之前關閉，限制從未觸發
+- **HIGH** `test_dev_engine` 部署測試缺少 REVIEW PASS 工件——部署門始終被阻止，測試始終失敗
+- **HIGH** 路徑穿越測試補丁了錯誤的 `config` 欄位——在 CI 中可能在沙箱外寫入
+- **MEDIUM** `test_infrastructure` 同義反復測試——驗證邏輯的內聯重新實作，從未接觸生產代碼
+- **MEDIUM** 3 個測試模組具有 `psutil` 導入鏈，無 `pytest.importorskip` 守衛——全新安裝時出現 `ModuleNotFoundError`
+- **LOW** `assert mock.called` 無參數檢查——改為 `call_args` 檢查
+- **NEW** `tests/test_allowlist.py` — 23 個測試（零先前覆蓋率）：拒絕所有哨兵繞過、None 發送者、缺失檔案、損壞 JSON
+- **NEW** `tests/test_rbac.py` — 18 個測試（零先前覆蓋率）：未知角色彈性、快取一致性、權限強制執行
+- **NEW** `tests/test_fitness.py` — 14 個測試（零先前覆蓋率）：成功預設=False、速度鉗制、適應度範圍保證
+- **NEW** `tests/test_log_buffer.py` — 13 個測試（零先前覆蓋率）：環形緩衝區驅逐、SSE 輪詢、限制鉗制
 
 ## [1.25.0] — 2026-03-23
 
-### Phase 18 — RBAC, evolution, SDK, agent tools security (PRs #383–386)
+### 第 18 階段 — RBAC、進化、SDK、agent 工具安全性（PRs #383–386）
 
-#### PR #383 — fix(p18b): Evolution engine, fitness system, crossbot protocol audit (7 fixes)
-- **CRITICAL** `CrossBotProtocol.handle()` never called `msg.verify()` — HMAC authentication was completely dead code; any process could forge `memory_share`/`task_delegate`/`hello`/`ping` messages
-- **HIGH** `update_last_seen()` called before HMAC verification — attacker with known bot_id could prevent stale-bot eviction
-- **HIGH** `fitness_reporter.py` duplicate heartbeat tasks after reconnect — second loop spawned without cancelling first
-- **MEDIUM** `evolve_genome_from_fitness()` accepts unclamped fitness/avg_ms — corrupted DB row satisfies all branches simultaneously
-- **MEDIUM** `write_memory()` silently drops memory writes when disconnected — no reconnect, no fallback, no log
-- **MEDIUM** `signal_complete()` silently drops task-completion events when disconnected
-- **LOW** `_handshake_timestamps` keys never evicted — unbounded memory leak per unique sender
+#### PR #383 — fix(p18b): 進化引擎、適應度系統、crossbot 協議稽核（7 項修復）
+- **CRITICAL** `CrossBotProtocol.handle()` 從未呼叫 `msg.verify()`——HMAC 認證完全是死代碼；任何進程均可偽造 `memory_share`/`task_delegate`/`hello`/`ping` 訊息
+- **HIGH** `update_last_seen()` 在 HMAC 驗證之前呼叫——知道 bot_id 的攻擊者可阻止過期 bot 的驅逐
+- **HIGH** `fitness_reporter.py` 重新連接後重複的心跳任務——第二個循環在未取消第一個的情況下生成
+- **MEDIUM** `evolve_genome_from_fitness()` 接受未鉗制的 fitness/avg_ms——損壞的 DB 列同時滿足所有分支
+- **MEDIUM** `write_memory()` 在斷開連接時靜默丟棄記憶寫入——無重新連接、無後備、無日誌
+- **MEDIUM** `signal_complete()` 在斷開連接時靜默丟棄任務完成事件
+- **LOW** `_handshake_timestamps` 鍵從未被驅逐——每個唯一發送者的無界記憶體洩漏
 
-#### PR #384 — fix(p18d): Agent file/subprocess tools security and reliability audit (14 fixes)
-- **HIGH** `tool_write`/`tool_edit` symlink parent-dir escape — `_check_path_allowed()` checked path before `mkdir`, allowing symlinks to `/etc/cron.d/`
-- **HIGH** `tool_grep` no sandbox path check — `Grep(path="/etc")` read arbitrary system files
-- **HIGH** `tool_glob` no sandbox path check — `Glob(path="/")` enumerated entire container filesystem
-- **HIGH** `tool_web_fetch` DNS rebinding TOCTOU — check-time IP vs connect-time IP differed; monkey-patched `socket.create_connection` to re-validate at connect time
-- **HIGH** `tool_send_file` no path validation — `SendFile(file_path="/etc/passwd")` sent system files to chat
-- **MEDIUM** Predictable tmp file names — `.tmp` suffix collision; replaced with `.<name>.<pid>.<uuid>.tmp`
-- **MEDIUM** `tool_run_agent` IPC filename no random suffix — concurrent calls in same millisecond silently overwrote each other
-- **MEDIUM** `_execute_tool_inner` bare `args["key"]` access — `KeyError` gave LLM unrecoverable opaque error; added type guards
-- **MEDIUM** `tool_bash` post-kill `communicate()` without timeout — D-state process hung agent loop permanently
-- **MEDIUM** `tool_read` CJK UTF-8 false-positive binary detection — Chinese/Japanese/Korean files rejected; replaced fraction heuristic with strict `decode("utf-8")` attempt
-- **LOW** `tool_bash` `chown` blocklist too broad — blocked legitimate workspace operations
-- **LOW** `tool_web_fetch` non-string `url` raised `TypeError` instead of clean error
+#### PR #384 — fix(p18d): Agent 檔案/子進程工具安全性和可靠性稽核（14 項修復）
+- **HIGH** `tool_write`/`tool_edit` 符號連結父目錄逃逸——`_check_path_allowed()` 在 `mkdir` 之前檢查路徑，允許符號連結至 `/etc/cron.d/`
+- **HIGH** `tool_grep` 無沙箱路徑檢查——`Grep(path="/etc")` 讀取任意系統檔案
+- **HIGH** `tool_glob` 無沙箱路徑檢查——`Glob(path="/")` 枚舉整個容器檔案系統
+- **HIGH** `tool_web_fetch` DNS 重新綁定 TOCTOU——檢查時 IP 與連接時 IP 不同；monkey-patch `socket.create_connection` 以在連接時重新驗證
+- **HIGH** `tool_send_file` 無路徑驗證——`SendFile(file_path="/etc/passwd")` 將系統檔案發送至聊天
+- **MEDIUM** 可預測的 tmp 檔案名稱——`.tmp` 後綴衝突；改為 `.<name>.<pid>.<uuid>.tmp`
+- **MEDIUM** `tool_run_agent` IPC 檔案名無隨機後綴——同一毫秒內的並發呼叫靜默互相覆蓋
+- **MEDIUM** `_execute_tool_inner` 裸 `args["key"]` 存取——`KeyError` 給 LLM 無法恢復的不透明錯誤；加入類型守衛
+- **MEDIUM** `tool_bash` kill 後的 `communicate()` 無超時——D 狀態進程永久掛起 agent 循環
+- **MEDIUM** `tool_read` CJK UTF-8 假陽性二進位偵測——中文/日文/韓文檔案被拒絕；以嚴格的 `decode("utf-8")` 嘗試替換比例啟發式
+- **LOW** `tool_bash` `chown` 封鎖清單過於寬泛——阻止了合法的工作區操作
+- **LOW** `tool_web_fetch` 非字串 `url` 引發 `TypeError` 而非乾淨錯誤
 
-#### PR #385 — fix(p18c): SDK API, memory subsystem, session management audit (5 fixes)
-- **HIGH** SDK API bot registry handlers leaked raw exception strings (SQLite paths, schema details) to WebSocket clients
-- **MEDIUM** `memory_write` `scope` field not validated — invalid scopes silently written, permanently invisible to queries
-- **MEDIUM** SDK WebSocket no per-connection rate limit — `memory_write` flood could saturate SQLite write path; added 60 msg/10s window
-- **MEDIUM** `bot_handshakes` table never purged — completed/expired rows accumulated unboundedly; `_pending_handshakes` dict keys never deleted
-- **MEDIUM** `agent_list` no pagination cap — large deployment could produce WebSocket frame exceeding 1 MB limit; added 500-entry cap with `total`/`truncated` fields
+#### PR #385 — fix(p18c): SDK API、記憶子系統、session 管理稽核（5 項修復）
+- **HIGH** SDK API bot 登錄處理器將原始異常字串（SQLite 路徑、結構詳情）洩漏給 WebSocket 客戶端
+- **MEDIUM** `memory_write` `scope` 欄位未驗證——無效的作用域靜默寫入，永久對查詢不可見
+- **MEDIUM** SDK WebSocket 無每連接速率限制——`memory_write` 洪流可能使 SQLite 寫入路徑飽和；加入 60 msg/10s 視窗
+- **MEDIUM** `bot_handshakes` 表從未清除——已完成/過期列無限累積；`_pending_handshakes` 字典鍵從未刪除
+- **MEDIUM** `agent_list` 無分頁上限——大型部署可能產生超過 1 MB 限制的 WebSocket 幀；加入含 `total`/`truncated` 欄位的 500 條目上限
 
-#### PR #386 — fix(p18a): RBAC, group queue, allowlist, config, env audit (9 fixes)
-- **CRITICAL** `group_queue.py` retry deadlock — `_retry()` called `enqueue_message_check()` which immediately exited due to `retry_count > 0` guard; messages permanently dropped after first failure; retry mechanism was completely broken
-- **HIGH** `allowlist.py` deny-all sentinel bypassable with empty/whitespace `sender_id` — `""` strips to `""`, found in `{""}` sentinel, granted access when should deny all
-- **MEDIUM** `allowlist.py` `AttributeError` on `None` sender_id — `.strip()` on None crashed instead of safely denying
-- **MEDIUM** `rbac/roles.py` `ValueError` on unknown role from DB — corrupted/migrated DB crashed permission check; now skips with warning
-- **MEDIUM** `config.py` `MAX_CONCURRENT_CONTAINERS=0` deadlocked job queue — all messages queued forever; enforced `minimum=1`
-- **MEDIUM** `config.py` poll interval 0 ms created CPU-burning tight loop; enforced `minimum=100ms`
-- **LOW** `rbac/roles.py` `RBACStore.close()` raced with in-flight queries — connection closed while query in progress; now acquires `_lock` first
-- **LOW** `env.py` inline comments in unquoted `.env` values included in parsed value — `NAME=Eve # assistant` set NAME to `"Eve # assistant"`
-- **MEDIUM** `group_queue.py` circuit breaker bypass in `_drain_waiting()` — failed groups re-dispatched immediately, skipping backoff delay
+#### PR #386 — fix(p18a): RBAC、群組佇列、允許清單、設定、環境稽核（9 項修復）
+- **CRITICAL** `group_queue.py` 重試死鎖——`_retry()` 呼叫 `enqueue_message_check()`，因 `retry_count > 0` 守衛立即退出；首次失敗後訊息永久丟棄；重試機制完全失效
+- **HIGH** `allowlist.py` 拒絕所有哨兵可被空/空白 `sender_id` 繞過——`""` 剝離為 `""`，在 `{""}` 哨兵中找到，在應拒絕所有時授予存取
+- **MEDIUM** `allowlist.py` `None` sender_id 上的 `AttributeError`——對 None 呼叫 `.strip()` 崩潰而非安全拒絕
+- **MEDIUM** `rbac/roles.py` DB 中未知角色的 `ValueError`——損壞/已遷移的 DB 崩潰了權限檢查；現在帶警告跳過
+- **MEDIUM** `config.py` `MAX_CONCURRENT_CONTAINERS=0` 死鎖任務佇列——所有訊息永久排隊；強制 `minimum=1`
+- **MEDIUM** `config.py` 輪詢間隔 0 ms 創建 CPU 燃燒緊密循環；強制 `minimum=100ms`
+- **LOW** `rbac/roles.py` `RBACStore.close()` 與進行中的查詢競爭——查詢進行時連接已關閉；現在先獲取 `_lock`
+- **LOW** `env.py` 未引用 `.env` 值中的行內注釋包含在解析值中——`NAME=Eve # assistant` 將 NAME 設為 `"Eve # assistant"`
+- **MEDIUM** `group_queue.py` `_drain_waiting()` 中的熔斷器繞過——失敗群組立即重新分發，跳過退避延遲
 
 ## [1.24.0] — 2026-03-23
 
-### Phase 17 — webportal, dependency security, asyncio races, code quality (PRs #379–382)
+### 第 17 階段 — webportal、依賴安全性、asyncio 競爭條件、代碼品質（PRs #379–382）
 
-#### PR #379 — fix(p17b): Dependency security and container environment audit (8 fixes)
-- **HIGH** `aiohttp` CVE-2024-52304 (HTTP request smuggling) + CVE-2024-23334 (dir traversal) — bumped floor to `>=3.10.11` in `host/requirements.txt`
-- **HIGH** `httpx` missing from `container/agent-runner/requirements.txt` — OpenAI/Qwen API calls had no timeout, could hang indefinitely; added `httpx>=0.27.0`
-- **MEDIUM** `fitness_reporter.py` not COPY'd into Docker image — Phase 1 WSBridge telemetry silently never worked; added COPY to Dockerfile
-- **MEDIUM** `soul.md` not COPY'd into Docker image — anti-hallucination rules never loaded in production, CRITICAL error logged on every container start; added COPY to Dockerfile
-- **MEDIUM** Dockerfile infra layer: Pillow CVE-2023-44271/CVE-2024-28219, aiohttp CVE, reportlab 3.x, httpx unpinned — added version floors with CVE comments
-- **MEDIUM** HEALTHCHECK `python3 -c "import sys; sys.exit(0)"` trivially passes even with broken image — replaced with import check for `anthropic`, `openai`, `google.genai`
-- **LOW** `aiofiles` in `host/requirements.txt` but never imported — commented out
-- **LOW** `setup.sh` never built or verified Docker image — added `build_docker_image()` with `docker image inspect` verification
+#### PR #379 — fix(p17b): 依賴安全性和容器環境稽核（8 項修復）
+- **HIGH** `aiohttp` CVE-2024-52304（HTTP 請求走私）+ CVE-2024-23334（目錄穿越）——在 `host/requirements.txt` 中將下限提升至 `>=3.10.11`
+- **HIGH** `httpx` 未出現在 `container/agent-runner/requirements.txt`——OpenAI/Qwen API 呼叫無超時，可能無限掛起；加入 `httpx>=0.27.0`
+- **MEDIUM** `fitness_reporter.py` 未被 COPY 到 Docker 映像——第 1 階段 WSBridge 遙測靜默從未運作；在 Dockerfile 中加入 COPY
+- **MEDIUM** `soul.md` 未被 COPY 到 Docker 映像——反幻覺規則從未在生產環境載入，每次容器啟動記錄 CRITICAL 錯誤；在 Dockerfile 中加入 COPY
+- **MEDIUM** Dockerfile 基礎設施層：Pillow CVE-2023-44271/CVE-2024-28219、aiohttp CVE、reportlab 3.x、httpx 未固定——加入帶 CVE 注釋的版本下限
+- **MEDIUM** HEALTHCHECK `python3 -c "import sys; sys.exit(0)"` 即使映像損壞也輕鬆通過——改為對 `anthropic`、`openai`、`google.genai` 的導入檢查
+- **LOW** `aiofiles` 在 `host/requirements.txt` 中但從未被導入——已注釋掉
+- **LOW** `setup.sh` 從未構建或驗證 Docker 映像——加入含 `docker image inspect` 驗證的 `build_docker_image()`
 
-#### PR #380 — fix(p17a): webportal.py full audit (9 fixes) + run.py --version flag (first ever audit)
-- **HIGH** Timing side-channel in HTTP Basic Auth and CSRF comparison — replaced `==` with `hmac.compare_digest()` (constant-time)
-- **HIGH** No security headers (CSP, X-Frame-Options, X-Content-Type-Options) on any response — added `_SECURITY_HEADERS` applied to all HTML and JSON responses
-- **MEDIUM** `float(since)` in `/api/poll` unguarded — crafted `?since=abc` caused unhandled 500; wrapped in try/except, clamped to 0.0
-- **MEDIUM** Negative `Content-Length` bypassed 64 KB size limit — added explicit `< 0` rejection before upper-bound check
-- **MEDIUM** No startup warning when web portal runs without `DASHBOARD_PASSWORD` — added `log.warning()` matching dashboard pattern
-- **MEDIUM** `start_webportal()` had no `stop_event` parameter — SIGTERM could not close the TCP socket; added watcher thread mirroring `start_dashboard()`, updated `host/main.py` to pass `_stop_event`
-- **MEDIUM** JID not validated before DB write — added `_JID_RE` validation in `_api_send()`
-- **MEDIUM** `_api_send()` 500 responses leaked raw exception details to browser — now logs server-side, returns generic `{"error": "internal server error"}`
-- **LOW** 404 responses in `do_GET`/`do_POST` missing `Content-Length: 0` before `end_headers()` — fixed both paths
-- **LOW** `run.py` had no `--version` flag — added `_parse_args()` using `argparse`, reads from `importlib.metadata` with `pyproject.toml` fallback
+#### PR #380 — fix(p17a): webportal.py 完整稽核（9 項修復）+ run.py --version 標誌（首次稽核）
+- **HIGH** HTTP 基本認證和 CSRF 比較中的計時側信道——以 `hmac.compare_digest()`（常數時間）替換 `==`
+- **HIGH** 所有回應無安全標頭（CSP、X-Frame-Options、X-Content-Type-Options）——加入 `_SECURITY_HEADERS` 應用於所有 HTML 和 JSON 回應
+- **MEDIUM** `/api/poll` 中 `float(since)` 未受保護——精心構造的 `?since=abc` 導致未處理的 500；以 try/except 包裝，鉗制至 0.0
+- **MEDIUM** 負數 `Content-Length` 繞過 64 KB 大小限制——在上限檢查之前加入明確的 `< 0` 拒絕
+- **MEDIUM** web portal 在無 `DASHBOARD_PASSWORD` 時無啟動警告——加入符合 dashboard 模式的 `log.warning()`
+- **MEDIUM** `start_webportal()` 無 `stop_event` 參數——SIGTERM 無法關閉 TCP socket；加入鏡像 `start_dashboard()` 的 watcher 線程，更新 `host/main.py` 以傳入 `_stop_event`
+- **MEDIUM** JID 在 DB 寫入之前未驗證——在 `_api_send()` 中加入 `_JID_RE` 驗證
+- **MEDIUM** `_api_send()` 500 回應將原始異常詳情洩漏給瀏覽器——現在記錄在服務端，返回通用 `{"error": "internal server error"}`
+- **LOW** `do_GET`/`do_POST` 中的 404 回應在 `end_headers()` 之前缺少 `Content-Length: 0`——修復兩個路徑
+- **LOW** `run.py` 無 `--version` 標誌——使用 `argparse` 加入 `_parse_args()`，從 `importlib.metadata` 讀取，帶 `pyproject.toml` 後備
 
-#### PR #381 — fix(p17c): asyncio race conditions deep dive (13 fixes)
-- **CRITICAL** `discord_channel.py`: `on_message` callback `await`ed on Discord's background event loop instead of the main application loop — all locks, GroupQueue serialization, and asyncio primitives were on the wrong loop; fixed with `asyncio.run_coroutine_threadsafe(..., _main_loop)`
-- **HIGH** `ipc_watcher.py`: `asyncio.Lock()` created at module import time (not inside a running loop) — `RuntimeError` on Python 3.12; replaced with lazy accessor functions `_get_skills_lock()` / `_get_dev_task_lock()`
-- **HIGH** `ws_bridge.py`: `_connections` dict read/written from concurrent coroutines without a lock — connection-cap check was not atomic with registration; added `_connections_lock` guarding all access
-- **MEDIUM** `ipc_watcher.py`: 3× `asyncio.get_event_loop()` replaced with `asyncio.get_running_loop()`
-- **MEDIUM** `ipc_watcher.py`: 9× `asyncio.ensure_future()` deprecated — replaced with `asyncio.create_task()`
-- **MEDIUM** `leader_election.py`: 2× `asyncio.get_event_loop().run_in_executor()` → `asyncio.get_running_loop().run_in_executor()`
-- **MEDIUM** `discord_channel.py`: `asyncio.get_event_loop()` in `_run_in_discord_loop` → `asyncio.get_running_loop()`
-- **MEDIUM** `sdk_api.py`: `threading.Lock` acquired inside async context (`_handle_system_status`) — blocked event loop thread; moved DB read to `run_in_executor()`
-- **MEDIUM** `main.py`: `_error_notify_times.pop()` in stale-JID pruning and `reset_group` paths without `_error_notify_lock` — race with `on_error` rate-limiter; added lock acquisition at both sites
-- **MEDIUM** `ipc_watcher.py`: blocking `open()` for subprocess stdout/stderr on event loop thread — moved to `run_in_executor()`
-- **MEDIUM** `container_runner.py`: blocking MEMORY.md `open()` + `write()` in async context — moved to `run_in_executor()`
-- **LOW** `sdk_api.py`: raw exception message sent to WebSocket clients on identity error — replaced with generic message + server-side logging
-- **LOW** `task_scheduler.py`: `asyncio.create_task()` without stored reference — GC could collect before completion; assigned with `add_done_callback` for exception logging
+#### PR #381 — fix(p17c): asyncio 競爭條件深度分析（13 項修復）
+- **CRITICAL** `discord_channel.py`：`on_message` 回調在 Discord 的背景事件循環而非主應用程式循環上 `await`——所有鎖、GroupQueue 序列化和 asyncio 原語都在錯誤的循環上；以 `asyncio.run_coroutine_threadsafe(..., _main_loop)` 修復
+- **HIGH** `ipc_watcher.py`：`asyncio.Lock()` 在模組導入時創建（不在運行中的循環內）——Python 3.12 上的 `RuntimeError`；以懶惰存取函式 `_get_skills_lock()` / `_get_dev_task_lock()` 替換
+- **HIGH** `ws_bridge.py`：`_connections` 字典從並發協程讀/寫無鎖——連接上限檢查與註冊不是原子的；加入 `_connections_lock` 保護所有存取
+- **MEDIUM** `ipc_watcher.py`：3 處 `asyncio.get_event_loop()` 改為 `asyncio.get_running_loop()`
+- **MEDIUM** `ipc_watcher.py`：9 處已棄用的 `asyncio.ensure_future()`——改為 `asyncio.create_task()`
+- **MEDIUM** `leader_election.py`：2 處 `asyncio.get_event_loop().run_in_executor()` → `asyncio.get_running_loop().run_in_executor()`
+- **MEDIUM** `discord_channel.py`：`_run_in_discord_loop` 中的 `asyncio.get_event_loop()` → `asyncio.get_running_loop()`
+- **MEDIUM** `sdk_api.py`：`threading.Lock` 在非同步上下文（`_handle_system_status`）內獲取——阻塞事件循環線程；將 DB 讀取移至 `run_in_executor()`
+- **MEDIUM** `main.py`：舊 JID 修剪和 `reset_group` 路徑中的 `_error_notify_times.pop()` 無 `_error_notify_lock`——與 `on_error` 速率限制器競爭；在兩處加入鎖獲取
+- **MEDIUM** `ipc_watcher.py`：事件循環線程上子進程 stdout/stderr 的阻塞 `open()`——移至 `run_in_executor()`
+- **MEDIUM** `container_runner.py`：非同步上下文中阻塞的 MEMORY.md `open()` + `write()`——移至 `run_in_executor()`
+- **LOW** `sdk_api.py`：身份錯誤時原始異常訊息發送給 WebSocket 客戶端——改為通用訊息 + 服務端記錄
+- **LOW** `task_scheduler.py`：`asyncio.create_task()` 無儲存的引用——GC 可能在完成前收集；以 `add_done_callback` 分配用於異常記錄
 
-#### PR #382 — refactor(p17d): Code quality simplification pass (5 improvements)
-- **main.py**: Removed duplicate `import collections`; extended `from collections import OrderedDict, deque`
-- **main.py**: Extracted `_with_fail_lock(fn)` helper — eliminated 4+ duplicated `if _group_fail_lock is not None: async with _group_fail_lock` guard patterns; all dict-mutation sites now use the helper
-- **main.py**: Converted 13 f-string log calls to `%`-style for consistency
-- **container_runner.py**: Converted 8 f-string log calls to `%`-style
-- **agent.py**: Extracted `_atomic_ipc_write(fname, data)` helper — eliminated 10 identical 3-line atomic-rename patterns (tmp write + rename) across all IPC tool functions
+#### PR #382 — refactor(p17d): 代碼品質簡化（5 項改進）
+- **main.py**：刪除重複的 `import collections`；擴展 `from collections import OrderedDict, deque`
+- **main.py**：提取 `_with_fail_lock(fn)` 輔助函式——消除 4+ 個重複的 `if _group_fail_lock is not None: async with _group_fail_lock` 守衛模式；所有字典突變位置現在使用此輔助函式
+- **main.py**：將 13 個 f-string 日誌呼叫轉換為 `%` 格式以保持一致性
+- **container_runner.py**：將 8 個 f-string 日誌呼叫轉換為 `%` 格式
+- **agent.py**：提取 `_atomic_ipc_write(fname, data)` 輔助函式——消除所有 IPC 工具函式中 10 個相同的 3 行原子重命名模式（tmp 寫入 + 重命名）
 
 ## [1.23.0] — 2026-03-23
 
-### Fixed (Phase 16: Final Audit & UX — 32 fixes)
+### 修復（第 16 階段：最終稽核與使用者體驗 — 32 項修復）
 
-Four PRs covering main.py final audit, UX & docs improvements, agent.py final audit, and container runner + IPC final fixes.
+四個 PR 涵蓋 main.py 最終稽核、使用者體驗與文件改進、agent.py 最終稽核，以及容器執行器與 IPC 最終修復。
 
-#### main.py Final Audit (PR #375 — 6 fixes)
+#### main.py 最終稽核（PR #375 — 6 項修復）
 
-- **Two `_group_fail_lock` None-guards still missing in error-increment paths (HIGH)** — only 2 of 4 sites were fixed in previous phases; the remaining two error-increment paths could raise TypeError during the startup window; all four sites now guarded
-- **URGENT errors incorrectly reset the rate-limit cooldown timer (HIGH)** — URGENT alerts reset the rate-limit timer, causing normal errors to be suppressed for 5 minutes after any URGENT alert; timer reset now scoped to non-URGENT errors only
-- **Two `asyncio.create_task()` calls stored no handle → exceptions silently discarded, shutdown couldn't cancel them (HIGH)** — task handles were not retained, so exceptions were silently discarded and the tasks could not be cancelled on shutdown; handles now stored and cancelled during teardown
-- **`_error_notify_times` not pruned for deregistered groups → slow memory leak (MEDIUM)** — entries for deregistered groups accumulated indefinitely; added pruning on group deregistration
-- **`group_queue.py`: deprecated `asyncio.get_event_loop()` on two paths (Python 3.12 incompatible) (MEDIUM)** — two remaining `get_event_loop()` calls were incompatible with Python 3.12+; replaced with `asyncio.get_running_loop()`
-- **`EDITABLE_ENV_KEYS` millisecond-unit intervals undocumented → operator sets 2 instead of 2000 (LOW)** — missing documentation caused operators to set second-unit values instead of millisecond-unit values; inline comments and docs updated with explicit unit annotations
+- **錯誤遞增路徑中仍缺少兩處 `_group_fail_lock` None 守衛（HIGH）** — 前幾個階段僅修復了 4 處中的 2 處；剩餘兩處錯誤遞增路徑在啟動視窗期間可能拋出 TypeError；現已將全部 4 處加上守衛
+- **URGENT 錯誤誤重置速率限制冷卻計時器（HIGH）** — URGENT 警告重置了速率限制計時器，導致任何 URGENT 警告後 5 分鐘內普通錯誤被抑制；計時器重置現在僅限於非 URGENT 錯誤
+- **兩處 `asyncio.create_task()` 呼叫未儲存控制代碼 → 異常靜默丟棄，關機時無法取消（HIGH）** — 任務控制代碼未保留，導致異常靜默丟棄且任務在關機時無法取消；控制代碼現已儲存並在拆卸時取消
+- **`_error_notify_times` 未針對已取消登錄群組進行清除 → 緩慢記憶體洩漏（MEDIUM）** — 已取消登錄群組的條目無限累積；加入群組取消登錄時的清除邏輯
+- **`group_queue.py`：兩條路徑上的已棄用 `asyncio.get_event_loop()`（Python 3.12 不相容）（MEDIUM）** — 剩餘兩處 `get_event_loop()` 呼叫與 Python 3.12+ 不相容；替換為 `asyncio.get_running_loop()`
+- **`EDITABLE_ENV_KEYS` 毫秒單位間隔無文件說明 → 操作員設為 2 而非 2000（LOW）** — 缺少文件導致操作員設定秒單位值而非毫秒單位值；行內注釋和文件已更新，加入明確的單位標注
 
-#### UX & Docs (PR #376 — 8 fixes)
+#### 使用者體驗與文件（PR #376 — 8 項修復）
 
-- **No typing indicator renewal → user saw silence during 15-60s container runs (HIGH)** — added typing indicator renewal loop: every 4 seconds while container runs, sends typing action so the user sees "typing…" throughout the wait instead of silence
-- **Per-sender rate limiting missing → silent message drop (HIGH)** — added per-sender rate limiting (5 msg/60s, configurable) with a user-visible Chinese message instead of silent drop
-- **RBAC block sent no feedback → silent drop (HIGH)** — RBAC block now sends "您目前沒有使用此機器人的權限" instead of silently dropping the message
-- **Container OOM (exit 137) sent no feedback → silent drop (HIGH)** — OOM exit now sends "AI 執行時記憶體不足" instead of silently dropping the message
-- **QUICK_START.md: `/monitor` misidentified as "register main group" (HIGH)** — `/monitor` is error-alert monitoring, not group registration; corrected description and added `ENABLED_CHANNELS` documentation
-- **Queue depth feedback missing → user saw silence when queued (MEDIUM)** — second message now shows "⏳ 已加入佇列，請稍候" instead of silence when a request is queued
-- **No first-run welcome message for new groups (MEDIUM)** — added first-run welcome message triggered once per new group, stored in DB to prevent re-sending
-- **TROUBLESHOOTING.md missing Chinese error message reference (MEDIUM)** — added complete Chinese error message reference table; `.env.minimal` updated with `CONTAINER_IMAGE`, rate-limit vars, and resource vars
+- **無輸入中指示器更新 → 使用者在 15-60 秒容器執行期間看到靜默（HIGH）** — 加入輸入中指示器更新循環：容器執行期間每 4 秒發送一次輸入動作，使使用者在等待期間始終看到「正在輸入…」而非靜默
+- **缺少每位發送者的速率限制 → 靜默丟棄訊息（HIGH）** — 加入每位發送者的速率限制（5 msg/60s，可設定），以使用者可見的中文訊息取代靜默丟棄
+- **RBAC 封鎖無任何反饋 → 靜默丟棄（HIGH）** — RBAC 封鎖現在發送「您目前沒有使用此機器人的權限」，而非靜默丟棄訊息
+- **容器 OOM（退出碼 137）無反饋 → 靜默丟棄（HIGH）** — OOM 退出現在發送「AI 執行時記憶體不足」，而非靜默丟棄訊息
+- **QUICK_START.md：`/monitor` 被誤識別為「登錄主群組」（HIGH）** — `/monitor` 是錯誤警報監控，而非群組登錄；已更正說明並加入 `ENABLED_CHANNELS` 文件
+- **佇列深度反饋缺失 → 請求排隊時使用者看到靜默（MEDIUM）** — 請求排隊時第二條訊息現在顯示「⏳ 已加入佇列，請稍候」而非靜默
+- **新群組無初次使用歡迎訊息（MEDIUM）** — 加入初次使用歡迎訊息，每個新群組觸發一次，儲存於 DB 以防重複發送
+- **TROUBLESHOOTING.md 缺少中文錯誤訊息參考（MEDIUM）** — 加入完整中文錯誤訊息參考表；`.env.minimal` 更新加入 `CONTAINER_IMAGE`、速率限制變數和資源變數
 
-#### agent.py Final Audit (PR #377 — 12 fixes)
+#### agent.py 最終稽核（PR #377 — 12 項修復）
 
-- **OpenAI/NIM model selection fell back to `GEMINI_MODEL` → 404 on every NIM session without explicit `NIM_MODEL` (CRITICAL)** — model selection logic fell through to `GEMINI_MODEL` for NIM endpoint, sending `gemini-2.0-flash` to the NIM API and causing 404 on every NIM session; fixed to use `NIM_MODEL` env var with correct fallback
-- **`mcp__evoclaw__reset_group` IPC write was the only non-atomic write remaining in agent.py (HIGH)** — non-atomic write exposed truncation risk; converted to atomic tmp-file + rename
-- **OpenAI backend missing `group_folder` empty-string guard for MEMORY.md path (HIGH)** — Claude and Gemini backends had the guard but OpenAI did not, causing path construction errors on empty `group_folder`; guard added to OpenAI backend
-- **Backend fallback silently skipped Claude when both `CLAUDE_API_KEY` and `NIM_API_KEY` were set (HIGH)** — no warning was emitted when Claude was bypassed due to NIM key presence; warning log added
-- **Gemini history injection: list-type content from Claude/OpenAI sessions raised TypeError (HIGH)** — list-type content was not coerced before injection into Gemini history format; added coercion to handle list-type content correctly
-- **`cancel_task`/`pause_task`/`resume_task` IPC filenames had timestamp-only collision risk (MEDIUM)** — same-millisecond requests produced identical filenames and silently overwrote each other; added random suffix to filenames
-- **OpenAI history injection guard `content == 0` was dead branch; None content not skipped (MEDIUM)** — the guard `content == 0` never triggered; None content passed through unchecked; replaced with `content is None` guard
-- **`GEMINI_MODEL` env read inside loop → env mutation mid-loop changed model mid-request (MEDIUM)** — up to 20 `os.environ` reads per request; env mutation during a long request could silently switch models mid-loop; captured once before loop entry
-- **`_LEVEL_B_KEYWORDS` missing: `report`, `schedule`, `plan`, `test`, `review`, `audit`, `monitor`, `npm`, `pip`, `make` etc → complex tasks misclassified as Level A (MEDIUM)** — missing keywords caused complex tasks to be assigned `MAX_ITER=6` instead of `MAX_ITER=20`, leading to fake-completion from iteration exhaustion; all missing keywords added
-- **Fitness reporter gave score 0.3 (failure) for all send_message-only sessions → corrupted evolution data (MEDIUM)** — sessions that only called `send_message` (valid short-answer sessions) were scored as failures; scoring logic corrected to treat send_message-only sessions as successful
-- **Empty `groupFolder`/`chatJid` inputs had no early warning log (LOW)** — missing early validation made debugging silent failures difficult; added warning log on empty inputs
-- **`_phase1_reporter` declared after `main()` (misleading source order) (LOW)** — function declared after its caller made code harder to follow; moved before `main()`
+- **OpenAI/NIM 模型選擇退回至 `GEMINI_MODEL` → 無明確 `NIM_MODEL` 時每個 NIM session 都返回 404（CRITICAL）** — NIM 端點的模型選擇邏輯退回至 `GEMINI_MODEL`，將 `gemini-2.0-flash` 發送至 NIM API，導致每個 NIM session 都返回 404；修復為使用 `NIM_MODEL` 環境變數並設定正確的後備
+- **`mcp__evoclaw__reset_group` IPC 寫入是 agent.py 中唯一剩餘的非原子寫入（HIGH）** — 非原子寫入存在截斷風險；轉換為原子臨時檔案加重命名方式
+- **OpenAI 後端缺少 MEMORY.md 路徑的 `group_folder` 空字串守衛（HIGH）** — Claude 和 Gemini 後端有此守衛但 OpenAI 沒有，導致 `group_folder` 為空時路徑建構錯誤；已將守衛加入 OpenAI 後端
+- **同時設定 `CLAUDE_API_KEY` 和 `NIM_API_KEY` 時後端退回靜默跳過 Claude（HIGH）** — 因 NIM 金鑰存在而繞過 Claude 時未發出任何警告；已加入警告日誌
+- **Gemini 歷史注入：來自 Claude/OpenAI session 的列表類型內容拋出 TypeError（HIGH）** — 列表類型內容在注入 Gemini 歷史格式之前未進行強制轉換；已加入強制轉換以正確處理列表類型內容
+- **`cancel_task`/`pause_task`/`resume_task` IPC 檔名僅依賴時間戳存在碰撞風險（MEDIUM）** — 同一毫秒的請求產生相同檔名並靜默互相覆蓋；已在檔名中加入隨機後綴
+- **OpenAI 歷史注入守衛 `content == 0` 是死分支；None 內容未被跳過（MEDIUM）** — 守衛 `content == 0` 從未觸發；None 內容未經檢查就通過；替換為 `content is None` 守衛
+- **`GEMINI_MODEL` 環境變數在循環內讀取 → 循環中途環境變數變更導致請求中途切換模型（MEDIUM）** — 每個請求最多 20 次 `os.environ` 讀取；長請求期間的環境變數變更可能靜默切換循環中途的模型；改為在循環進入前一次性捕獲
+- **`_LEVEL_B_KEYWORDS` 缺少：`report`、`schedule`、`plan`、`test`、`review`、`audit`、`monitor`、`npm`、`pip`、`make` 等 → 複雜任務被錯誤分類為 Level A（MEDIUM）** — 缺少關鍵字導致複雜任務被分配 `MAX_ITER=6` 而非 `MAX_ITER=20`，因迭代耗盡導致假完成；已加入所有缺失關鍵字
+- **適應度報告器對所有僅呼叫 send_message 的 session 給予 0.3 分（失敗）→ 損壞進化資料（MEDIUM）** — 僅呼叫 `send_message` 的 session（有效的簡短回答 session）被評為失敗；評分邏輯已更正，將僅呼叫 send_message 的 session 視為成功
+- **空的 `groupFolder`/`chatJid` 輸入無早期警告日誌（LOW）** — 缺少早期驗證使靜默失敗的除錯困難；已在空輸入時加入警告日誌
+- **`_phase1_reporter` 在 `main()` 之後宣告（誤導性源碼順序）（LOW）** — 函式在其呼叫者之後宣告使代碼更難閱讀；已移至 `main()` 之前
 
-#### Container Runner + IPC Final (PR #378 — 6 fixes)
+#### 容器執行器與 IPC 最終修復（PR #378 — 6 項修復）
 
-- **`stderr_lines` declared inside Linux-only branch but referenced on all platforms → NameError on Windows (CRITICAL)** — `NameError` on Windows masked real container failures; declaration moved outside the platform branch
-- **`reset_group` IPC handler had no permission check → any group's container could reset circuit breaker for any other group (HIGH)** — missing authorization allowed cross-group circuit-breaker manipulation; added permission check to validate requesting group matches target group
-- **`memory_patch` from container not type-checked → dict/list value caused silent AttributeError (MEDIUM)** — unvalidated `memory_patch` values caused silent `AttributeError` on string methods; added type check before processing
-- **OOM exit (137) showed generic error message instead of "記憶體不足" (MEDIUM)** — exit code 137 now detected and mapped to specific "記憶體不足" message for operator clarity
-- **`refresh_groups.flag` and `reset_group.flag` written non-atomically → reader could see empty file mid-write (MEDIUM)** — non-atomic flag writes allowed the reader to observe an empty file; converted to atomic tmp-file + rename writes
-- **`memory_patch` is dead code (container never emits it) — now documented (LOW)** — undocumented dead code path caused confusion; added inline documentation clarifying that `memory_patch` is reserved for future use and not currently emitted by any container
+- **`stderr_lines` 在僅限 Linux 的分支內宣告但在所有平台上被引用 → Windows 上出現 NameError（CRITICAL）** — Windows 上的 `NameError` 掩蓋了真實的容器失敗；宣告已移至平台分支外部
+- **`reset_group` IPC 處理器無權限檢查 → 任何群組的容器都可重置其他任何群組的熔斷器（HIGH）** — 缺少授權允許跨群組熔斷器操控；已加入權限檢查以驗證請求群組與目標群組匹配
+- **來自容器的 `memory_patch` 未進行類型檢查 → dict/list 值導致靜默 AttributeError（MEDIUM）** — 未驗證的 `memory_patch` 值在字串方法上導致靜默 `AttributeError`；已在處理前加入類型檢查
+- **OOM 退出（137）顯示通用錯誤訊息而非「記憶體不足」（MEDIUM）** — 退出碼 137 現在被偵測並對應至特定的「記憶體不足」訊息以提高操作員可讀性
+- **`refresh_groups.flag` 和 `reset_group.flag` 非原子寫入 → 讀取方可能在寫入中途看到空檔案（MEDIUM）** — 非原子標誌寫入允許讀取方觀察到空檔案；已轉換為原子臨時檔案加重命名寫入
+- **`memory_patch` 是死代碼（容器從未發出）— 現已記錄說明（LOW）** — 未文件化的死代碼路徑造成混淆；已加入行內文件說明 `memory_patch` 保留供未來使用，目前任何容器都不發出
 
-Protocol verification confirmed: container stdout format, IPC directory structure, atomic writes, volume mounts, and security flags are all consistent between container and host.
+協議驗證已確認：容器 stdout 格式、IPC 目錄結構、原子寫入、卷掛載和安全標誌在容器和主機之間完全一致。
 
 ## [1.22.0] — 2026-03-21
 
-### Fixed (Phase 15: Conversation Loop & Delivery — 44 fixes)
+### 修復（第 15 階段：對話循環與傳送 — 44 項修復）
 
-Four PRs covering the LLM conversation loop, IPC protocol & result delivery, process lifecycle & shutdown, and database schema & query correctness.
+四個 PR 涵蓋 LLM 對話循環、IPC 協議與結果傳送、進程生命週期與關機，以及資料庫結構與查詢正確性。
 
-#### LLM Conversation Loop (PR #371 — 11 fixes)
+#### LLM 對話循環（PR #371 — 11 項修復）
 
-- **Claude `stop_reason=max_tokens` mid-tool-call orphaned assistant message (CRITICAL)** — assistant message left without a matching tool_result caused next API call to return HTTP 400; added cleanup of orphaned assistant messages on max_tokens mid-call
-- **Claude `stop_reason=tool_use` with no tool_use blocks orphaned assistant message (CRITICAL)** — orphaned assistant message with no tool blocks caused HTTP 400 on next API call; added guard to discard assistant message when no tool_use blocks are present
-- **Claude & OpenAI: list-type `content` silently dropped during history injection (CRITICAL)** — tool call records with list-type content were silently dropped during history injection, causing tool call history to vanish; fixed to preserve list-type content correctly
-- **Claude history truncation split `assistant(tool_use)` + `user(tool_result)` pairs (HIGH)** — truncation could separate paired messages, causing Anthropic API 400 errors; truncation now respects pair boundaries
-- **OpenAI history truncation split `assistant(tool_calls)` + `role=tool` pairs (HIGH)** — truncation could separate paired messages, causing OpenAI API 400 errors; truncation now respects pair boundaries
-- **Gemini history truncation split `model(function_call)` + `user(FunctionResponse)` pairs (HIGH)** — truncation could separate paired messages, causing Gemini API rejection; truncation now respects pair boundaries
-- **OpenAI `finish_reason="length"` triggered infinite context overflow retry (MEDIUM)** — treated as a no-tool turn and retried, overflowing context again; now trims history to ¼ and exits the loop
-- **Gemini SAFETY/RECITATION/MAX_TOKENS returned silent generic placeholder (MEDIUM)** — stop conditions silently returned a generic placeholder with no explanation to the user or logs; added explicit handling with informative messaging
-- **Claude & Gemini fake-status regex missing English fake-done patterns (LOW)** — English-language fake completion patterns not covered by existing regex; added missing patterns
-- **Tool schema missing `description` on pause/resume task params (LOW)** — pause and resume task tool parameters lacked description fields in schema; descriptions added
-- **Tool schema missing `required: []` on list_tasks (LOW)** — list_tasks schema omitted the required array; added `required: []`
+- **Claude `stop_reason=max_tokens` 工具呼叫中途孤立 assistant 訊息（CRITICAL）** — 沒有對應 tool_result 的 assistant 訊息導致下一次 API 呼叫返回 HTTP 400；在 max_tokens 呼叫中途加入孤立 assistant 訊息的清理
+- **Claude `stop_reason=tool_use` 但無 tool_use 區塊時孤立 assistant 訊息（CRITICAL）** — 沒有工具區塊的孤立 assistant 訊息導致下一次 API 呼叫返回 HTTP 400；加入守衛以在沒有 tool_use 區塊時丟棄 assistant 訊息
+- **Claude 和 OpenAI：列表類型 `content` 在歷史注入期間靜默丟棄（CRITICAL）** — 帶有列表類型內容的工具呼叫記錄在歷史注入期間靜默丟棄，導致工具呼叫歷史消失；修復為正確保留列表類型內容
+- **Claude 歷史截斷拆分了 `assistant(tool_use)` + `user(tool_result)` 配對（HIGH）** — 截斷可能分離配對訊息，導致 Anthropic API 400 錯誤；截斷現在遵守配對邊界
+- **OpenAI 歷史截斷拆分了 `assistant(tool_calls)` + `role=tool` 配對（HIGH）** — 截斷可能分離配對訊息，導致 OpenAI API 400 錯誤；截斷現在遵守配對邊界
+- **Gemini 歷史截斷拆分了 `model(function_call)` + `user(FunctionResponse)` 配對（HIGH）** — 截斷可能分離配對訊息，導致 Gemini API 拒絕；截斷現在遵守配對邊界
+- **OpenAI `finish_reason="length"` 觸發無限上下文溢出重試（MEDIUM）** — 被視為無工具輪次並重試，再次溢出上下文；現在將歷史修剪至 1/4 並退出循環
+- **Gemini SAFETY/RECITATION/MAX_TOKENS 靜默返回通用佔位符（MEDIUM）** — 停止條件靜默返回通用佔位符，對使用者和日誌均無任何說明；加入明確處理並附帶資訊性訊息
+- **Claude 和 Gemini 假狀態 regex 缺少英文假完成模式（LOW）** — 現有 regex 未涵蓋英文語言的假完成模式；加入缺失的模式
+- **工具 schema 中 pause/resume task 參數缺少 `description`（LOW）** — 暫停和恢復任務工具參數在 schema 中缺少描述欄位；已加入描述
+- **工具 schema 中 list_tasks 缺少 `required: []`（LOW）** — list_tasks schema 省略了 required 陣列；加入 `required: []`
 
-#### IPC Protocol & Result Delivery (PR #372 — 15 fixes)
+#### IPC 協議與結果傳送（PR #372 — 15 項修復）
 
-- **`container_runner.py` `on_output` called before `on_success` → duplicate responses on every retry (CRITICAL)** — if delivery failed after `on_output` was called, cursor never advanced, causing the user to receive duplicate responses on every subsequent retry; reordered so cursor advances only after successful delivery
-- **`ipc_watcher.py` 4 skill/memory result writes non-atomic → truncated JSON → skill installs hang forever (CRITICAL)** — non-atomic writes allowed container to read partially-written JSON, causing skill installs to appear to hang indefinitely; converted to atomic tmp-file + rename writes
-- **`ipc_watcher.py` subagent success+error result writes non-atomic → `tool_run_agent` returned empty result (CRITICAL)** — non-atomic writes caused `tool_run_agent` to read truncated or empty result files; converted to atomic writes
-- **`agent.py` `tool_schedule_task` filename collision on same-millisecond tasks (HIGH)** — timestamp-only filenames caused silent overwrites when two tasks were scheduled in the same millisecond; added random suffix to filenames
-- **3 more IPC tool writes non-atomic (`run_agent`, `start_remote_control`, `self_update`) (HIGH)** — non-atomic writes in these three tools exposed the same truncation risk; converted to atomic writes
-- **`main.py` `_on_success_tracked`: `async with _group_fail_lock` without None guard → TypeError during startup window (HIGH)** — lock used before initialization during startup window raised TypeError; added None guard
-- **`_error_notify_times` TOCTOU race → rate limiter bypassed during failure storms (HIGH)** — check-then-update on `_error_notify_times` had a TOCTOU race that allowed the rate limiter to be bypassed under concurrent failure conditions; replaced with atomic update
-- **`emit()` BrokenPipeError unhandled → confusing stderr on container timeout (MEDIUM)** — unhandled BrokenPipeError produced confusing stderr output when a container timed out; added explicit handler
-- **`group_queue.py` silent discard of pending items on shutdown (MEDIUM)** — items pending in the queue at shutdown time were silently dropped with no logging; now logs counts of discarded items
+- **`container_runner.py` 在 `on_success` 之前呼叫 `on_output` → 每次重試都有重複回應（CRITICAL）** — 若在呼叫 `on_output` 後傳送失敗，游標永遠不會前進，導致使用者在每次後續重試中收到重複回應；重新排序以使游標僅在成功傳送後前進
+- **`ipc_watcher.py` 4 個技能/記憶體結果寫入非原子 → JSON 截斷 → 技能安裝永遠掛起（CRITICAL）** — 非原子寫入允許容器讀取部分寫入的 JSON，導致技能安裝看起來無限期掛起；轉換為原子臨時檔案加重命名寫入
+- **`ipc_watcher.py` 子 agent 成功和錯誤結果寫入非原子 → `tool_run_agent` 返回空結果（CRITICAL）** — 非原子寫入導致 `tool_run_agent` 讀取截斷或空的結果檔案；轉換為原子寫入
+- **`agent.py` `tool_schedule_task` 同一毫秒任務的檔名碰撞（HIGH）** — 僅含時間戳的檔名在同一毫秒排程兩個任務時導致靜默覆蓋；在檔名中加入隨機後綴
+- **另外 3 個 IPC 工具寫入非原子（`run_agent`、`start_remote_control`、`self_update`）（HIGH）** — 這三個工具中的非原子寫入存在相同的截斷風險；轉換為原子寫入
+- **`main.py` `_on_success_tracked`：`async with _group_fail_lock` 無 None 守衛 → 啟動視窗期間 TypeError（HIGH）** — 在啟動視窗期間初始化前使用鎖拋出 TypeError；加入 None 守衛
+- **`_error_notify_times` TOCTOU 競爭 → 故障風暴期間速率限制器被繞過（HIGH）** — `_error_notify_times` 上的先檢查後更新存在 TOCTOU 競爭，允許在並發故障條件下繞過速率限制器；替換為原子更新
+- **`emit()` BrokenPipeError 未處理 → 容器超時時令人困惑的 stderr（MEDIUM）** — 容器超時時未處理的 BrokenPipeError 產生令人困惑的 stderr 輸出；加入明確的處理器
+- **`group_queue.py` 關機時靜默丟棄待處理項目（MEDIUM）** — 關機時佇列中的待處理項目靜默丟棄無任何日誌；現在記錄丟棄項目的數量
 
-#### Process Lifecycle & Shutdown (PR #373 — 15 fixes)
+#### 進程生命週期與關機（PR #373 — 15 項修復）
 
-- **Leader lease never released if `asyncio.gather()` raised → DB lock row stuck until TTL expiry (CRITICAL)** — an exception in `asyncio.gather()` skipped lease release, leaving the DB lock row held until TTL expiry and blocking restarts; added finally block to ensure release
-- **Double-signal SIGTERM race: two rapid SIGTERMs both took "first signal" path, neither force-exiting (CRITICAL)** — two rapid SIGTERMs both entered the first-signal handler path due to a race, with neither triggering the force-exit path; added atomic flag to distinguish first vs second signal
-- **`on_output` exception prevented `on_success` call → infinite message replay (HIGH)** — an exception in `on_output` bypassed the `on_success` call, causing the message to replay infinitely; wrapped `on_output` in try/except so `on_success` is always called
-- **`cleanup_orphans()` used `docker ps` (running only), missed `Exited` containers from SIGKILL → storage leak + name conflicts (HIGH)** — orphan cleanup only considered running containers, leaving exited containers from SIGKILL to accumulate, causing storage leaks and container name conflicts; switched to include all container states
-- **`asyncio.Lock()` created at module import (before event loop) → DeprecationWarning on 3.10+, RuntimeError on 3.12+ (HIGH)** — module-level lock creation before the event loop existed triggered deprecation warnings on Python 3.10+ and RuntimeErrors on 3.12+; deferred to first use
-- **`asyncio.get_event_loop()` deprecated call in group_queue → wrong loop on 3.12+ (HIGH)** — deprecated `get_event_loop()` call returned the wrong loop on Python 3.12+; replaced with `asyncio.get_running_loop()`
-- **Retry sleep coroutines not cancelled on shutdown → could start new containers mid-teardown (HIGH)** — uncancelled sleep coroutines in retry paths could wake up mid-shutdown and start new containers; added cancellation on shutdown signal
-- **No SIGHUP handler → operators had to full-restart to reload config (MEDIUM)** — no SIGHUP handler meant config changes required a full process restart; added SIGHUP handler for config reload
-- **Stale IPC result files after SIGKILL → stale replies delivered to user on restart (MEDIUM)** — IPC result files left over from a SIGKILL were picked up on restart and delivered as fresh replies; added cleanup of stale result files on startup
-- **systemd: `TimeoutStopSec=45` too short; added `KillMode=mixed`; added `EnvironmentFile` (MEDIUM)** — 45-second stop timeout was insufficient for graceful shutdown; `KillMode` and `EnvironmentFile` directives were missing from the unit file; all three updated
+- **`asyncio.gather()` 拋出異常時領導者租約永不釋放 → DB 鎖定行持續至 TTL 過期（CRITICAL）** — `asyncio.gather()` 中的異常跳過了租約釋放，使 DB 鎖定行一直保持到 TTL 過期並阻止重啟；加入 finally 區塊以確保釋放
+- **雙重信號 SIGTERM 競爭：兩個快速 SIGTERM 都進入「第一個信號」路徑，兩者都不強制退出（CRITICAL）** — 由於競爭，兩個快速 SIGTERM 都進入了第一個信號處理器路徑，兩者都未觸發強制退出路徑；加入原子標誌以區分第一個和第二個信號
+- **`on_output` 異常阻止 `on_success` 呼叫 → 無限訊息重播（HIGH）** — `on_output` 中的異常繞過了 `on_success` 呼叫，導致訊息無限重播；將 `on_output` 包裝在 try/except 中，使 `on_success` 始終被呼叫
+- **`cleanup_orphans()` 使用 `docker ps`（僅執行中），錯過來自 SIGKILL 的已退出容器 → 儲存洩漏加名稱衝突（HIGH）** — 孤立清理僅考慮執行中的容器，讓來自 SIGKILL 的已退出容器積累，導致儲存洩漏和容器名稱衝突；切換為包含所有容器狀態
+- **`asyncio.Lock()` 在模組導入時創建（事件循環之前）→ 3.10+ 上出現 DeprecationWarning，3.12+ 上出現 RuntimeError（HIGH）** — 在事件循環存在之前在模組層級創建鎖觸發了 Python 3.10+ 的棄用警告和 3.12+ 的 RuntimeError；延遲至首次使用時
+- **group_queue 中已棄用的 `asyncio.get_event_loop()` 呼叫 → 3.12+ 上返回錯誤的循環（HIGH）** — 已棄用的 `get_event_loop()` 呼叫在 Python 3.12+ 上返回錯誤的循環；替換為 `asyncio.get_running_loop()`
+- **重試睡眠協程在關機時未取消 → 可能在拆卸中途啟動新容器（HIGH）** — 重試路徑中未取消的睡眠協程可能在關機中途喚醒並啟動新容器；在關機信號時加入取消
+- **無 SIGHUP 處理器 → 操作員必須完整重啟才能重載設定（MEDIUM）** — 無 SIGHUP 處理器意味著設定變更需要完整進程重啟；加入 SIGHUP 處理器以重載設定
+- **SIGKILL 後過期的 IPC 結果檔案 → 重啟時將過期回覆傳送給使用者（MEDIUM）** — SIGKILL 遺留的 IPC 結果檔案在重啟時被拾取並作為新回覆傳送；加入啟動時過期結果檔案的清理
+- **systemd：`TimeoutStopSec=45` 太短；加入 `KillMode=mixed`；加入 `EnvironmentFile`（MEDIUM）** — 45 秒停止超時對優雅關機不足；單元文件中缺少 `KillMode` 和 `EnvironmentFile` 指令；三者均已更新
 
-#### Database Schema & Query Correctness (PR #374 — 9 fixes)
+#### 資料庫結構與查詢正確性（PR #374 — 9 項修復）
 
-- **`immune_threats`: no `UNIQUE(sender_jid, pattern_hash)` constraint → race condition allowed duplicates → inflated threat counts → incorrect auto-blocks (CRITICAL)** — missing unique constraint allowed concurrent inserts to create duplicate threat rows, inflating threat counts and triggering incorrect auto-blocks; added `UNIQUE(sender_jid, pattern_hash)` constraint
-- **`memory_fts_search()` never queried cold memory despite docstring saying "warm AND cold" (HIGH)** — the function only queried warm memory, making all cold memory invisible to FTS search; fixed to query both warm and cold memory stores
-- **`set_registered_group()` used `INSERT OR REPLACE` → destroyed `added_at` timestamp on every update (HIGH)** — `INSERT OR REPLACE` deleted and re-inserted the row on every update, resetting `added_at` to the current time; replaced with `INSERT ... ON CONFLICT DO UPDATE`
-- **No migration version tracking table → impossible to run incremental migrations safely (MEDIUM)** — without version tracking, re-running migrations caused data corruption or errors; added `schema_migrations` table and migration registry
-- **Missing indexes: `task_run_logs(task_id)`, `container_logs(status)`, `dev_sessions(status)`, `immune_threats(sender_jid, pattern_hash)` composite (MEDIUM)** — four high-traffic query paths lacked indexes, causing full table scans; all four indexes added
-- **Tests: added WAL pragma verification, concurrent-write regression test, executemany test (MEDIUM)** — test coverage gaps for WAL mode, concurrent writes, and bulk inserts; all three test cases added
+- **`immune_threats`：無 `UNIQUE(sender_jid, pattern_hash)` 約束 → 競爭條件允許重複 → 膨脹的威脅計數 → 錯誤的自動封鎖（CRITICAL）** — 缺少唯一約束允許並發插入創建重複的威脅行，膨脹威脅計數並觸發錯誤的自動封鎖；加入 `UNIQUE(sender_jid, pattern_hash)` 約束
+- **`memory_fts_search()` 從未查詢冷記憶，儘管文件字串說明「暖記憶和冷記憶」（HIGH）** — 該函式僅查詢暖記憶，使所有冷記憶對 FTS 搜尋不可見；修復為同時查詢暖記憶和冷記憶儲存
+- **`set_registered_group()` 使用 `INSERT OR REPLACE` → 每次更新都銷毀 `added_at` 時間戳（HIGH）** — `INSERT OR REPLACE` 在每次更新時刪除並重新插入行，將 `added_at` 重置為當前時間；替換為 `INSERT ... ON CONFLICT DO UPDATE`
+- **無遷移版本追蹤表 → 無法安全執行增量遷移（MEDIUM）** — 沒有版本追蹤，重新執行遷移導致資料損壞或錯誤；加入 `schema_migrations` 表和遷移登錄
+- **缺少索引：`task_run_logs(task_id)`、`container_logs(status)`、`dev_sessions(status)`、`immune_threats(sender_jid, pattern_hash)` 複合索引（MEDIUM）** — 四個高流量查詢路徑缺少索引，導致全表掃描；全部四個索引均已加入
+- **測試：加入 WAL pragma 驗證、並發寫入回歸測試、executemany 測試（MEDIUM）** — WAL 模式、並發寫入和批量插入的測試覆蓋率缺口；三個測試案例均已加入
 
 ## [1.21.0] — 2026-03-21
 
-### Fixed (Phase 14: Skills, Memory & Enterprise — 57 fixes)
+### 修復（第 14 階段：技能、記憶體與企業 — 57 項修復）
 
-Four PRs covering the evolution system, enterprise connectors & container tools, skills engine, and memory system.
+四個 PR 涵蓋進化系統、企業連接器與容器工具、技能引擎，以及記憶體系統。
 
-#### Evolution System (PR #367 — 4 fixes)
+#### 進化系統（PR #367 — 4 項修復）
 
-- **`immune.py` Chinese attack pattern false negatives (HIGH)** — 10 attack patterns missed Traditional/Simplified char variants (進/进, 從/从), word-order variants (現在你是 vs 你現在), missing space handling (AI 助手), and optional suffix/prefix coverage; all 42 attacks now detected with 0 false positives
-- **`daemon.py` avg_ms calculation corrupted by failed runs (HIGH)** — failed runs and negative values included in average → genome evolved toward wrong response style; fixed to exclude failed/negative values
-- **`fitness.py` final score not clamped (MEDIUM)** — corrupted DB row could produce score > 1.0; added clamp to [0.0, 1.0]
-- **`fitness_reporter.py` WebSocket disconnect permanent (MEDIUM)** — no reconnect logic → all subsequent fitness data silently dropped; added reconnect with file fallback
+- **`immune.py` 中文攻擊模式漏報（HIGH）** — 10 個攻擊模式漏掉了繁體/簡體字變體（進/进、從/从）、詞序變體（現在你是 vs 你現在）、缺少空格處理（AI 助手）及可選後綴/前綴覆蓋；現在以 0 個誤報偵測所有 42 個攻擊
+- **`daemon.py` avg_ms 計算因失敗執行而損壞（HIGH）** — 失敗執行和負值被納入平均值 → 基因組朝錯誤的回應風格進化；修復為排除失敗/負值
+- **`fitness.py` 最終分數未鉗制（MEDIUM）** — 損壞的 DB 行可能產生 > 1.0 的分數；加入鉗制至 [0.0, 1.0]
+- **`fitness_reporter.py` WebSocket 斷開連接永久性（MEDIUM）** — 無重連邏輯 → 所有後續適應度資料靜默丟棄；加入帶檔案後備的重連邏輯
 
-#### Enterprise Connectors & Container Tools (PR #368 — 20 fixes)
+#### 企業連接器與容器工具（PR #368 — 20 項修復）
 
-- **`hpc_connector.py` job name newline injection into #SBATCH directives (CRITICAL)** — `job\n#SBATCH --wrap=rm -rf /` allowed arbitrary directive injection; added newline sanitization
-- **`jira_connector.py` issue key path traversal in REST URL (CRITICAL)** — `../../../admin` in issue key escaped API base path; added strict issue key validation
-- **`agent.py` `_tool_bash()` timeout killed only main process (CRITICAL)** — child process group (SSH/git subprocesses) leaked indefinitely; replaced with `os.killpg` to kill entire process group
-- **`agent.py` `_tool_read()` symlink bypass (CRITICAL)** — symlink to `/etc/passwd` passed raw-string path check but read host files; added `os.path.realpath()` resolution before path validation
-- **`hpc_connector.py` SSH BatchMode missing (HIGH)** — interactive prompt hung server; inherited stdin blocked subprocess; no output size limit on job output; all three addressed
-- **`jira_connector.py` API token in public attribute (HIGH)** — token exposed via object inspection; no HTTP timeout; unbounded max_results pagination; all three addressed
-- **`ldap_connector.py` bind password in public attribute (HIGH)** — password exposed via object inspection; stale connection not detected; no LDAP connection timeout; all three addressed
-- **`workflow_engine.py` no dependency or cycle validation (HIGH)** — undefined dependencies caused infinite scheduler loop; missing cycle detection caused infinite loop; both guards added
-- **`agent.py` `_tool_edit()` ambiguous old_string silent edit (HIGH)** — first occurrence edited with no warning to LLM when old_string matched multiple locations; added ambiguity warning
-- **`agent.py` `_tool_glob()` deep `**` glob blocked agentic loop (HIGH)** — unthreaded glob with no timeout blocked loop 30-60 seconds; added thread + timeout
-- **`ldap_connector.py` `is_user_in_group()` unbounded memory (MEDIUM)** — loaded all group members into memory; no close() method; both addressed
-- **`workflow_engine.py` unbounded step result size (MEDIUM)** — no cap on step output stored in state; added size limit
-- **`agent.py` `_tool_bash()` exit code not surfaced (MEDIUM)** — LLM never received exit code; stdin not closed; both fixed
-- **`agent.py` `_tool_read()` binary file handling (MEDIUM)** — binary files returned as garbled text; UnicodeDecodeError on non-UTF-8 files; added binary detection and encoding fallback
-- **`agent.py` `_tool_write()`/`_tool_edit()` file permissions reset (MEDIUM)** — every write reset permissions to default; added permission preservation
-- **`agent.py` `_tool_web_fetch()` charset ignored (MEDIUM)** — charset from Content-Type header ignored; always decoded as UTF-8; added charset extraction and correct decoding
+- **`hpc_connector.py` 任務名稱換行符注入至 #SBATCH 指令（CRITICAL）** — `job\n#SBATCH --wrap=rm -rf /` 允許任意指令注入；加入換行符清除
+- **`jira_connector.py` issue key 在 REST URL 中的路徑穿越（CRITICAL）** — issue key 中的 `../../../admin` 逃脫 API 基礎路徑；加入嚴格的 issue key 驗證
+- **`agent.py` `_tool_bash()` 超時僅終止主進程（CRITICAL）** — 子進程群組（SSH/git 子進程）無限洩漏；替換為 `os.killpg` 以終止整個進程群組
+- **`agent.py` `_tool_read()` 符號連結繞過（CRITICAL）** — 指向 `/etc/passwd` 的符號連結通過了原始字串路徑檢查但讀取了主機檔案；在路徑驗證前加入 `os.path.realpath()` 解析
+- **`hpc_connector.py` 缺少 SSH BatchMode（HIGH）** — 互動式提示掛起伺服器；繼承的 stdin 阻塞子進程；任務輸出無大小限制；三者均已處理
+- **`jira_connector.py` API token 在公共屬性中（HIGH）** — token 通過物件檢查暴露；無 HTTP 超時；無界的 max_results 分頁；三者均已處理
+- **`ldap_connector.py` 綁定密碼在公共屬性中（HIGH）** — 密碼通過物件檢查暴露；過期連接未偵測；無 LDAP 連接超時；三者均已處理
+- **`workflow_engine.py` 無依賴或循環驗證（HIGH）** — 未定義的依賴導致無限排程器循環；缺少循環偵測導致無限循環；兩個守衛均已加入
+- **`agent.py` `_tool_edit()` 歧義 old_string 靜默編輯（HIGH）** — old_string 匹配多個位置時編輯第一個出現處，對 LLM 無任何警告；加入歧義警告
+- **`agent.py` `_tool_glob()` 深度 `**` glob 阻塞 agent 循環（HIGH）** — 無線程、無超時的 glob 阻塞循環 30-60 秒；加入線程加超時
+- **`ldap_connector.py` `is_user_in_group()` 無界記憶體（MEDIUM）** — 將所有群組成員載入記憶體；無 close() 方法；兩者均已處理
+- **`workflow_engine.py` 無界步驟結果大小（MEDIUM）** — 儲存在狀態中的步驟輸出無上限；加入大小限制
+- **`agent.py` `_tool_bash()` 退出碼未呈現（MEDIUM）** — LLM 從未收到退出碼；stdin 未關閉；兩者均已修復
+- **`agent.py` `_tool_read()` 二進位檔案處理（MEDIUM）** — 二進位檔案以亂碼文字返回；非 UTF-8 檔案的 UnicodeDecodeError；加入二進位偵測和編碼後備
+- **`agent.py` `_tool_write()`/`_tool_edit()` 檔案權限重置（MEDIUM）** — 每次寫入都將權限重置為預設值；加入權限保留
+- **`agent.py` `_tool_web_fetch()` 字元集被忽略（MEDIUM）** — Content-Type 標頭中的字元集被忽略；始終以 UTF-8 解碼；加入字元集提取和正確解碼
 
-#### Skills Engine (PR #369 — 18 fixes)
+#### 技能引擎（PR #369 — 18 項修復）
 
-- **`workflow_engine.py` `exec_skill()` missing await (CRITICAL)** — async function called without `await` → always returned coroutine object → handler.py was NEVER executed for any skill; all skills returned SKILL.md content instead; added `await`
-- **`file_ops.py` no path-traversal validation on delete/rename (CRITICAL)** — malicious skill could delete `/etc/passwd` or rename arbitrary host files; added strict path validation
-- **`manifest.py` empty YAML AttributeError (HIGH)** — empty manifest file raised AttributeError on load; path-traversal in file_ops/container_tools paths not validated; both fixed
-- **`state.py` crash-truncated state.yaml (HIGH)** — truncated file raised AttributeError on next boot; no .tmp write fallback; added atomic write and recovery
-- **`apply.py` merge conflict leaves project with conflict markers (HIGH)** — backup not restored on merge conflict → project left with `<<<<<<<` markers; container_tools path escape not fully validated; both fixed
-- **`backup.py` file outside project root aborted entire backup (HIGH)** — single out-of-root file terminated full backup operation; changed to skip-and-warn
-- **`lock.py` OSError on Windows not caught (HIGH)** — stale lock file never cleaned on Windows; added OSError handler
-- **`rebase.py` lock acquired after writing patch (HIGH)** — race condition allowed concurrent rebase on same project; binary files corrupted patch; lock moved before write, binary files skipped
-- **`uninstall.py` state read/write outside lock (HIGH)** — concurrent uninstall could overwrite state; added lock around state operations
-- **`merge.py` git unavailable copied wrong file (MEDIUM)** — fallback copied current file instead of incoming; fixed file selection logic
-- **`apply.py` non-atomic package.json/.env.example write (MEDIUM)** — partial writes possible on crash; converted to atomic tmp + replace
-- **`customize.py` non-atomic session file write (MEDIUM)** — partial writes possible on crash; converted to atomic tmp + replace
-- **`structured.py` comment lines parsed as env keys (MEDIUM)** — `# comment` treated as key → false conflict reports; added comment line filter
-- **`manifest.py` empty string accepted as valid required field (MEDIUM)** — empty string bypassed required field validation; added non-empty check
+- **`workflow_engine.py` `exec_skill()` 缺少 await（CRITICAL）** — 非同步函式在沒有 `await` 的情況下呼叫 → 始終返回協程物件 → handler.py 對任何技能都從未執行；所有技能均返回 SKILL.md 內容；加入 `await`
+- **`file_ops.py` 刪除/重命名時無路徑穿越驗證（CRITICAL）** — 惡意技能可能刪除 `/etc/passwd` 或重命名任意主機檔案；加入嚴格的路徑驗證
+- **`manifest.py` 空 YAML AttributeError（HIGH）** — 空的 manifest 文件在載入時拋出 AttributeError；file_ops/container_tools 路徑中的路徑穿越未驗證；兩者均已修復
+- **`state.py` 崩潰截斷的 state.yaml（HIGH）** — 截斷的文件在下次啟動時拋出 AttributeError；無 .tmp 寫入後備；加入原子寫入和恢復
+- **`apply.py` 合併衝突使專案留有衝突標記（HIGH）** — 合併衝突時未恢復備份 → 專案留有 `<<<<<<<` 標記；container_tools 路徑逃脫未完全驗證；兩者均已修復
+- **`backup.py` 專案根目錄外的檔案中止整個備份（HIGH）** — 單一根目錄外的檔案終止了完整備份操作；改為跳過並警告
+- **`lock.py` Windows 上的 OSError 未捕捉（HIGH）** — 過期的鎖定檔案在 Windows 上從未清理；加入 OSError 處理器
+- **`rebase.py` 在寫入補丁後才獲取鎖（HIGH）** — 競爭條件允許同一專案上的並發 rebase；二進位檔案損壞補丁；鎖移至寫入前，二進位檔案跳過
+- **`uninstall.py` 鎖外的狀態讀/寫（HIGH）** — 並發卸載可能覆蓋狀態；在狀態操作周圍加入鎖
+- **`merge.py` git 不可用時複製了錯誤的檔案（MEDIUM）** — 後備複製了當前檔案而非傳入的檔案；修復檔案選擇邏輯
+- **`apply.py` 非原子的 package.json/.env.example 寫入（MEDIUM）** — 崩潰時可能發生部分寫入；轉換為原子臨時加替換
+- **`customize.py` 非原子的 session 文件寫入（MEDIUM）** — 崩潰時可能發生部分寫入；轉換為原子臨時加替換
+- **`structured.py` 注釋行被解析為 env 鍵（MEDIUM）** — `# comment` 被視為鍵 → 錯誤的衝突報告；加入注釋行過濾器
+- **`manifest.py` 空字串被接受為有效的必填欄位（MEDIUM）** — 空字串繞過必填欄位驗證；加入非空檢查
 
-#### Memory System (PR #370 — 15 fixes)
+#### 記憶體系統（PR #370 — 15 項修復）
 
-- **`hot.py` UTF-8 boundary corruption (CRITICAL)** — multi-byte CJK/emoji characters split at 8KB limit silently dropped partial characters; added character-boundary-aware chunking
-- **`memory_bus.py` `delete()` authorization bypass (CRITICAL)** — `scope != 'private'` check allowed any agent to delete any shared memory; replaced with explicit owner check
-- **`summarizer.py` silent memory truncation (CRITICAL)** — LLM only saw first 3000 chars of 8KB memory during compression → last ~5000 chars permanently lost every compression cycle; fixed to pass full content
-- **`warm.py` off-by-one in size checks and wrong day summarized (HIGH)** — strict `<` vs `<=` boundary caused incorrect size evaluation; daily wrapup summarized last 24h instead of yesterday's logs; both fixed
-- **`memory_bus.py` vector scores exceeded [0,1] range (HIGH)** — 1.2 boost factor produced scores > 1.0; VectorStore ignored project scope; FTS rank normalization used arbitrary /10 divisor replaced with sigmoid; DDL split on `;` broke CREATE TRIGGER → FTS triggers never created → all FTS search returned zero results; all five addressed
-- **`summarizer.py` LLM output stored without validation (HIGH)** — error messages and prose stored as memory; no size validation on compressed output (could grow larger than original); added validation and size cap
-- **`warm.py` midnight race condition (MEDIUM)** — two `datetime.now()` calls could straddle midnight producing split-day summaries; replaced with single captured timestamp
-- **`compound.py` `.strip()` corrupted markdown structure (MEDIUM)** — leading whitespace stripped from markdown broke indentation/structure; changed to `.rstrip()`
-- **`memory_bus.py` vector results showed wrong created_at (MEDIUM)** — timestamp always set to current time instead of stored value; fixed to read from DB record
-- **`search.py` unbounded BM25 scores (MEDIUM)** — uncapped BM25 scores made recency term irrelevant in blended search ranking; added score normalization
+- **`hot.py` UTF-8 邊界損壞（CRITICAL）** — 多位元組 CJK/emoji 字元在 8KB 限制處被拆分，靜默丟棄部分字元；加入感知字元邊界的分塊
+- **`memory_bus.py` `delete()` 授權繞過（CRITICAL）** — `scope != 'private'` 檢查允許任何 agent 刪除任何共享記憶；替換為明確的擁有者檢查
+- **`summarizer.py` 靜默記憶截斷（CRITICAL）** — LLM 在壓縮期間僅看到 8KB 記憶的前 3000 個字元 → 每個壓縮週期永久丟失最後約 5000 個字元；修復為傳入完整內容
+- **`warm.py` 大小檢查差一錯誤及錯誤的日期摘要（HIGH）** — 嚴格的 `<` 對 `<=` 邊界導致不正確的大小評估；每日彙整摘要了過去 24 小時而非昨天的日誌；兩者均已修復
+- **`memory_bus.py` 向量分數超出 [0,1] 範圍（HIGH）** — 1.2 提升因子產生 > 1.0 的分數；VectorStore 忽略專案範圍；FTS 排名正規化使用任意 /10 除數，已替換為 sigmoid；DDL 在 `;` 上拆分破壞了 CREATE TRIGGER → FTS 觸發器從未創建 → 所有 FTS 搜尋返回零結果；五個問題均已處理
+- **`summarizer.py` LLM 輸出在無驗證情況下儲存（HIGH）** — 錯誤訊息和散文被儲存為記憶；壓縮輸出無大小驗證（可能比原始內容更大）；加入驗證和大小上限
+- **`warm.py` 午夜競爭條件（MEDIUM）** — 兩次 `datetime.now()` 呼叫可能跨越午夜，產生跨日摘要；替換為單次捕獲的時間戳
+- **`compound.py` `.strip()` 損壞了 markdown 結構（MEDIUM）** — 從 markdown 中剝離前導空白破壞了縮排/結構；改為 `.rstrip()`
+- **`memory_bus.py` 向量結果顯示錯誤的 created_at（MEDIUM）** — 時間戳始終設為當前時間而非儲存的值；修復為從 DB 記錄讀取
+- **`search.py` 無界 BM25 分數（MEDIUM）** — 未鉗制的 BM25 分數使混合搜尋排名中的近期性詞項無關緊要；加入分數正規化
 
 ## [1.20.0] — 2026-03-21
 
-### Fixed (Phase 13: Security & Reliability — 75 fixes)
+### 修復（第 13 階段：安全性與可靠性 — 75 項修復）
 
-Four PRs covering channel reliability, container security, observability & API security, and leader election / task scheduler / dev engine.
+四個 PR 涵蓋頻道可靠性、容器安全性、可觀測性與 API 安全性，以及領導者選舉、任務排程器與開發引擎。
 
-#### Channel Reliability (PR #363 — 16 fixes)
+#### 頻道可靠性（PR #363 — 16 項修復）
 
-- **Gmail self-email loop guard missing (CRITICAL)** — bot could email itself in an infinite loop; added self-email guard
-- **Matrix sync token advanced before event processing (CRITICAL)** — crash caused permanent message loss; token now advanced only after successful processing
-- **Gmail OAuth refresh fallback to interactive browser (HIGH)** — hung forever on server; fallback removed, failure now raises immediately
-- **Gmail HTTP 401 infinite retry loop (HIGH)** — revoked token caused unbounded retry; replaced with exponential backoff and token invalidation
-- **Gmail no autoresponder loop prevention (HIGH)** — RFC 3834 `Auto-Submitted` header not checked; mailing lists and vacation responders could flood bot; added header check
-- **Slack bot-message filter incomplete (HIGH)** — bot read its own posts and re-triggered pipeline; filter tightened to cover all bot message subtypes
-- **Slack `<@U12345>` mention never normalized (HIGH)** — trigger matching always failed; added mention normalization before trigger check
-- **WhatsApp webhook exception returned HTTP 500 (HIGH)** — Meta retried delivery causing duplicate processing; handler now returns HTTP 200 after logging error
-- **CrossBot unbounded trusted set / no handshake rate limit / no self-handshake check (HIGH)** — memory leak, DoS vector, and identity spoofing; added eviction, rate cap, and self-check
-- **Matrix non-200 sync response silently empty (MEDIUM)** — no log emitted; added error logging and retry
-- **Matrix redacted and undecryptable E2E events dispatched (MEDIUM)** — added filter to drop these event types before dispatch
-- **Slack/WhatsApp missing try/except around `_on_message` (MEDIUM)** — inconsistent with Telegram/Discord; added wrapping
-- **All channels: unified trigger pattern, @mention normalization, empty-message guard (LOW)** — consolidated shared logic into channel base class
+- **缺少 Gmail 自發郵件循環守衛（CRITICAL）** — bot 可能在無限循環中向自己發郵件；加入自發郵件守衛
+- **Matrix 同步 token 在事件處理前前進（CRITICAL）** — 崩潰導致永久訊息丟失；token 現在只在成功處理後才前進
+- **Gmail OAuth 刷新退回至互動式瀏覽器（HIGH）** — 在伺服器上永遠掛起；移除後備，失敗現在立即拋出
+- **Gmail HTTP 401 無限重試循環（HIGH）** — 已撤銷的 token 導致無界重試；替換為指數退避和 token 失效
+- **Gmail 無自動回覆器循環防護（HIGH）** — 未檢查 RFC 3834 `Auto-Submitted` 標頭；郵件列表和假期回覆者可能淹沒 bot；加入標頭檢查
+- **Slack bot 訊息過濾器不完整（HIGH）** — bot 讀取自己的貼文並重新觸發管線；過濾器收緊以覆蓋所有 bot 訊息子類型
+- **Slack `<@U12345>` 提及從未正規化（HIGH）** — 觸發匹配始終失敗；在觸發檢查前加入提及正規化
+- **WhatsApp webhook 異常返回 HTTP 500（HIGH）** — Meta 重試傳送導致重複處理；處理器現在在記錄錯誤後返回 HTTP 200
+- **CrossBot 無界信任集合/無握手速率限制/無自握手檢查（HIGH）** — 記憶體洩漏、DoS 向量和身份偽造；加入驅逐、速率上限和自我檢查
+- **Matrix 非 200 同步回應靜默為空（MEDIUM）** — 未發出日誌；加入錯誤日誌和重試
+- **Matrix 已編輯和無法解密的 E2E 事件被分發（MEDIUM）** — 加入過濾器以在分發前丟棄這些事件類型
+- **Slack/WhatsApp `_on_message` 周圍缺少 try/except（MEDIUM）** — 與 Telegram/Discord 不一致；加入包裝
+- **所有頻道：統一觸發模式、@提及正規化、空訊息守衛（LOW）** — 將共享邏輯整合至頻道基礎類
 
-#### Container Security & Tests (PR #364 — 14 fixes)
+#### 容器安全性與測試（PR #364 — 14 項修復）
 
-- **`--network none` not set (CRITICAL)** — agent container could make arbitrary outbound network calls; flag added
-- **`--cap-drop ALL` not set (CRITICAL)** — container retained 14 Linux capabilities including NET_RAW and SETUID; added `--cap-drop ALL`
-- **`_safe_name()` path-traversal not stripped (CRITICAL)** — JID containing `../` could mount `/etc` or `~/.ssh` into container; added path component sanitization
-- **`_build_volume_mounts()` no `resolve().relative_to()` validation (CRITICAL)** — host path escape possible; added strict validation
-- **`--security-opt no-new-privileges` not set (HIGH)** — setuid escalation possible; flag added
-- **`--pids-limit` not set (HIGH)** — fork bomb could exhaust host PID table; limit set
-- **Dockerfile used mutable `node:22` tag (HIGH)** — supply-chain risk; pinned to digest
-- **5 circuit breaker tests used wrong API type (HIGH)** — all silently passing with no real assertion; corrected to proper type
-- **`test_run_container_agent` asserted wrong exception type (HIGH)** — test always passed, tested nothing; corrected assertion
-- **`test_editable_env_keys` checked wrong key names (HIGH)** — vacuously wrong assertions; corrected to actual key names
-- **`test_immune_enhanced.py` all 50 tests silently skipped (HIGH)** — hand-rolled runner not collected by pytest; converted to standard pytest format
-- **Dockerfile missing HEALTHCHECK (MEDIUM)** — added HEALTHCHECK instruction
-- **`build_container.py` only tagged `:latest` (MEDIUM)** — no versioned tags; added version tagging
-- **New test suite: `TestContainerSecurityFlags` (MEDIUM)** — covers all security flags and path-traversal guards
+- **未設定 `--network none`（CRITICAL）** — agent 容器可以進行任意的出站網路呼叫；已加入標誌
+- **未設定 `--cap-drop ALL`（CRITICAL）** — 容器保留了 14 個 Linux 功能，包括 NET_RAW 和 SETUID；加入 `--cap-drop ALL`
+- **`_safe_name()` 路徑穿越未剝離（CRITICAL）** — 包含 `../` 的 JID 可能將 `/etc` 或 `~/.ssh` 掛載至容器；加入路徑組件清除
+- **`_build_volume_mounts()` 無 `resolve().relative_to()` 驗證（CRITICAL）** — 主機路徑逃脫可能；加入嚴格驗證
+- **未設定 `--security-opt no-new-privileges`（HIGH）** — setuid 提升可能；已加入標誌
+- **未設定 `--pids-limit`（HIGH）** — fork 炸彈可能耗盡主機 PID 表；已設定限制
+- **Dockerfile 使用可變的 `node:22` 標籤（HIGH）** — 供應鏈風險；固定至摘要
+- **5 個熔斷器測試使用了錯誤的 API 類型（HIGH）** — 全部靜默通過，無真實斷言；更正為正確的類型
+- **`test_run_container_agent` 斷言了錯誤的異常類型（HIGH）** — 測試始終通過，未測試任何內容；更正斷言
+- **`test_editable_env_keys` 檢查了錯誤的鍵名（HIGH）** — 空洞錯誤的斷言；更正為實際鍵名
+- **`test_immune_enhanced.py` 所有 50 個測試靜默跳過（HIGH）** — 手寫執行器未被 pytest 收集；轉換為標準 pytest 格式
+- **Dockerfile 缺少 HEALTHCHECK（MEDIUM）** — 加入 HEALTHCHECK 指令
+- **`build_container.py` 僅標記 `:latest`（MEDIUM）** — 無版本標籤；加入版本標記
+- **新測試套件：`TestContainerSecurityFlags`（MEDIUM）** — 涵蓋所有安全標誌和路徑穿越守衛
 
-#### Observability & API Security (PR #365 — 25 fixes)
+#### 可觀測性與 API 安全性（PR #365 — 25 項修復）
 
-- **Health monitor loop could exit silently (CRITICAL)** — `get_health_status()` always returned `{"status":"healthy"}` regardless of reality; loop now restarts on exception with alerting
-- **WS Bridge auth bypass (CRITICAL)** — auth failed but async loop kept reading; loop now terminates on auth failure
-- **SDK API auth per-message allows token guessing (CRITICAL)** — infinite guessing allowed; added connection-level auth with lockout
-- **Dashboard no POST body size limit (HIGH)** — OOM attack possible; added size cap
-- **Dashboard container `stop` API command injection (HIGH)** — name passed directly to subprocess; replaced with safe API call
-- **Dashboard missing `Content-Security-Policy`/`X-Frame-Options` (HIGH)** — clickjacking possible; headers added
-- **Dashboard `/health` and `/metrics` behind auth gate (HIGH)** — Kubernetes probes could not access; endpoints exempted from auth
-- **Dashboard `limit` param uncapped (HIGH)** — `LIMIT 1000000` SQL query possible; capped at reasonable maximum
-- **WS Bridge no connection cap (HIGH)** — fd exhaustion possible; added connection limit
-- **WS Bridge no payload size limit (HIGH)** — unbounded memory operations; size limit added
-- **WS Bridge mid-connection `agent_id` spoofing (HIGH)** — `agent_id` could be changed after auth; locked at auth time
-- **SDK API memory/task write with no size limits (HIGH)** — limits added
-- **Log formatter sensitive fields emitted verbatim (HIGH)** — `token`, `api_key`, `secret`, `password` appeared in JSON logs; added redaction
-- **Router channel list mutated during iteration without lock (HIGH)** — data race; added lock
-- **Health monitor check failures logged at DEBUG (MEDIUM)** — invisible in production; elevated to WARNING/ERROR
-- **Health monitor division by zero in error rate (MEDIUM)** — fixed with zero guard
-- **Health monitor race on `_last_warnings` (MEDIUM)** — added lock
-- **Log formatter `levelname` duplicated (LOW)** — deduplicated
-- **Log formatter `asctime` corrupted timestamp field (LOW)** — fixed field name collision
+- **健康監控循環可能靜默退出（CRITICAL）** — `get_health_status()` 始終返回 `{"status":"healthy"}` 無論實際情況；循環現在在異常時重啟並發出警報
+- **WS Bridge 認證繞過（CRITICAL）** — 認證失敗但非同步循環繼續讀取；循環現在在認證失敗時終止
+- **SDK API 每訊息認證允許 token 猜測（CRITICAL）** — 允許無限猜測；加入帶鎖定的連接層級認證
+- **Dashboard 無 POST 主體大小限制（HIGH）** — OOM 攻擊可能；加入大小上限
+- **Dashboard 容器 `stop` API 命令注入（HIGH）** — 名稱直接傳遞至子進程；替換為安全的 API 呼叫
+- **Dashboard 缺少 `Content-Security-Policy`/`X-Frame-Options`（HIGH）** — 點擊劫持可能；已加入標頭
+- **Dashboard `/health` 和 `/metrics` 在認證關卡後（HIGH）** — Kubernetes 探針無法存取；端點從認證中豁免
+- **Dashboard `limit` 參數未鉗制（HIGH）** — `LIMIT 1000000` SQL 查詢可能；鉗制至合理最大值
+- **WS Bridge 無連接上限（HIGH）** — fd 耗盡可能；加入連接限制
+- **WS Bridge 無載荷大小限制（HIGH）** — 無界記憶體操作；加入大小限制
+- **WS Bridge 連接中途 `agent_id` 偽造（HIGH）** — `agent_id` 可在認證後更改；在認證時鎖定
+- **SDK API 記憶體/任務寫入無大小限制（HIGH）** — 已加入限制
+- **日誌格式化器敏感欄位以明文發出（HIGH）** — `token`、`api_key`、`secret`、`password` 出現在 JSON 日誌中；加入遮蔽
+- **路由器頻道列表在迭代期間無鎖突變（HIGH）** — 資料競爭；加入鎖
+- **健康監控檢查失敗在 DEBUG 級別記錄（MEDIUM）** — 在生產環境中不可見；提升至 WARNING/ERROR
+- **健康監控錯誤率中的除以零（MEDIUM）** — 以零守衛修復
+- **健康監控 `_last_warnings` 上的競爭（MEDIUM）** — 加入鎖
+- **日誌格式化器 `levelname` 重複（LOW）** — 已去重
+- **日誌格式化器 `asctime` 損壞了時間戳欄位（LOW）** — 修復欄位名稱衝突
 
-#### Leader Election, Task Scheduler, Dev Engine (PR #366 — 19 fixes)
+#### 領導者選舉、任務排程器、開發引擎（PR #366 — 19 項修復）
 
-- **Leader election SQLite ops no timeout (CRITICAL)** — blocked DB froze entire asyncio event loop; added timeout with cancellation
-- **Dev engine deployed code when REVIEW verdict was FAIL (CRITICAL)** — LLM-generated code deployed despite failure verdict; added strict gate
-- **Allowlist missing/unreadable silently allowed ALL senders (CRITICAL)** — deny-all sentinel now applied on read failure
-- **`LEASE_TIMEOUT <= HEARTBEAT_INTERVAL` caused split-brain churn (HIGH)** — continuous leadership oscillation; added startup assertion enforcing `LEASE_TIMEOUT > 2 * HEARTBEAT_INTERVAL`
-- **`_is_leader = False` set after DELETE (HIGH)** — exception left instance acting as leader with no DB record; flag now cleared before DELETE
-- **Leader yielded only after 3 consecutive heartbeat failures (HIGH)** — instance now correctly steps down; confirmed fix
-- **Task scheduler no at-most-once guard (HIGH)** — same task dispatched twice concurrently; added dispatch lock
-- **Task scheduler no execution timeout (HIGH)** — hung task blocked scheduler forever; added per-task timeout
-- **Task scheduler no consecutive-failure limit (HIGH)** — broken task retried infinitely; added failure cap with quarantine
-- **Bot registry `_pending_handshakes` accessed outside lock (HIGH)** — concurrent callers bypassed rate cap; added lock
-- **Bot registry nonces never expired (HIGH)** — intercepted nonce valid forever; added nonce TTL
-- **Agent identity `get()` read DB without lock (HIGH)** — data race under concurrency; added lock
-- **Task scheduler interval tasks re-fired every poll after downtime (MEDIUM)** — catch-up loop now skips missed runs and sets `next_run` to current time
-- **Task scheduler backoff stored in seconds not milliseconds (MEDIUM)** — task became runnable 50 years ago; fixed unit
-- **Task scheduler crashed `running` tasks never recovered (MEDIUM)** — added startup recovery pass
-- **Dev engine path traversal via `session_id` (MEDIUM)** — unsanitized `session_id` used in path; added sanitization
-- **Group folder non-atomic mkdir and file writes (MEDIUM)** — TOCTOU race; replaced with atomic operations
-- **Bot registry stale entries accumulated forever (MEDIUM)** — added TTL-based eviction
-- **Bot registry no TTL on nonces (MEDIUM)** — addressed alongside nonce expiry fix above
+- **領導者選舉 SQLite 操作無超時（CRITICAL）** — 阻塞的 DB 凍結了整個 asyncio 事件循環；加入帶取消的超時
+- **開發引擎在 REVIEW 結論為 FAIL 時部署代碼（CRITICAL）** — 儘管審查失敗，LLM 生成的代碼仍被部署；加入嚴格的關卡
+- **允許清單缺失/不可讀靜默允許所有發送者（CRITICAL）** — 讀取失敗時現在套用拒絕所有哨兵
+- **`LEASE_TIMEOUT <= HEARTBEAT_INTERVAL` 導致腦裂振盪（HIGH）** — 持續的領導者振盪；加入啟動時斷言強制 `LEASE_TIMEOUT > 2 * HEARTBEAT_INTERVAL`
+- **`_is_leader = False` 在 DELETE 後設定（HIGH）** — 異常使實例作為沒有 DB 記錄的領導者繼續運作；標誌現在在 DELETE 前清除
+- **領導者在 3 次連續心跳失敗後才讓位（HIGH）** — 實例現在正確地下台；已確認修復
+- **任務排程器無最多一次守衛（HIGH）** — 同一任務被並發分發兩次；加入分發鎖
+- **任務排程器無執行超時（HIGH）** — 掛起的任務永遠阻塞排程器；加入每任務超時
+- **任務排程器無連續失敗限制（HIGH）** — 損壞的任務無限重試；加入帶隔離的失敗上限
+- **Bot 登錄 `_pending_handshakes` 在鎖外存取（HIGH）** — 並發呼叫者繞過速率上限；加入鎖
+- **Bot 登錄 nonce 從未過期（HIGH）** — 攔截的 nonce 永遠有效；加入 nonce TTL
+- **Agent 身份 `get()` 無鎖讀取 DB（HIGH）** — 並發下的資料競爭；加入鎖
+- **任務排程器間隔任務在停機後每次輪詢都重新觸發（MEDIUM）** — 追趕循環現在跳過錯過的執行並將 `next_run` 設為當前時間
+- **任務排程器退避以秒而非毫秒儲存（MEDIUM）** — 任務變得 50 年前就可執行；修復單位
+- **任務排程器崩潰的 `running` 任務從未恢復（MEDIUM）** — 加入啟動恢復通道
+- **開發引擎通過 `session_id` 的路徑穿越（MEDIUM）** — 未清除的 `session_id` 用於路徑；加入清除
+- **群組資料夾非原子的 mkdir 和文件寫入（MEDIUM）** — TOCTOU 競爭；替換為原子操作
+- **Bot 登錄過期條目永久累積（MEDIUM）** — 加入基於 TTL 的驅逐
+- **Bot 登錄 nonce 無 TTL（MEDIUM）** — 與上述 nonce 過期修復一同處理
 
 ## [1.19.0] — 2026-03-21
 
-### Fixed (Phase 12: 深度可靠性修復 — 46 個問題)
+### 修復（第 12 階段：深度可靠性修復 — 46 個問題）
 
 四個 PR 並行深度分析修復，涵蓋訊息管線可靠性、agent 反幻覺行為、設定啟動驗證與資料庫持久性。
 
-#### Message Pipeline Reliability (PR #360 — 8 fixes)
+#### 訊息管線可靠性（PR #360 — 8 項修復）
 
 - **`global _identity_store` SyntaxError（CRITICAL）** — `main.py` 在首次賦值後才宣告 global → SyntaxError，bot 完全無法載入；修復：將宣告移至函式最頂端
 - **`_group_fail_lock` None TypeError（CRITICAL）** — `main.py` 啟動視窗內 `async with _group_fail_lock` 時 lock 為 None → 每條訊息都 TypeError crash；修復：加入 None guard
@@ -409,7 +409,7 @@ Four PRs covering channel reliability, container security, observability & API s
 - **`ipc_watcher.py` 非原子寫入（MEDIUM）** — error-notify 路徑使用非原子寫入 → 部分 JSON 讀取；修復：改用 `tmp + os.replace()` 原子寫入
 - **Dedup store 無 TTL（LOW）** — Dedup 儲存無過期機制 → 合法重送訊息永久被封鎖；修復：加入 TTL
 
-#### Agent Anti-Hallucination & Behavior (PR #359 — 14 fixes)
+#### Agent 反幻覺與行為（PR #359 — 14 項修復）
 
 - **`TOOL_DECLARATIONS` 匯入時 AttributeError（CRITICAL）** — `agent.py` 在 Google SDK 不存在時仍在匯入期建構 `TOOL_DECLARATIONS` → `AttributeError: 'NoneType'.FunctionDeclaration` crash；修復：延遲建構至 runtime
 - **Claude backend `group_folder` 缺失（CRITICAL）** — `agent.py` 呼叫 `run_agent_claude()` 未傳入 `group_folder` → 所有 MEMORY.md 寫入路徑錯誤；修復：補上 `group_folder` 參數
@@ -426,7 +426,7 @@ Four PRs covering channel reliability, container security, observability & API s
 - **soul.md 缺少英文假完成語句（MEDIUM）** — 禁止模式未涵蓋英文；修復：補齊英文模式
 - **`emit_result` 可傳播 None（LOW）** — ternary 可回傳 `None` 而非 `str`；修復：加入 `str()` 轉換保護
 
-#### Config Complexity & Startup Validation (PR #361 — 12 fixes)
+#### 設定複雜性與啟動驗證（PR #361 — 12 項修復）
 
 - **`global _identity_store` SyntaxError（CRITICAL）** — 同 PR #360，從設定角度確認修復
 - **`_group_fail_lock` None TypeError（CRITICAL）** — 同 PR #360，從設定角度確認修復
@@ -441,7 +441,7 @@ Four PRs covering channel reliability, container security, observability & API s
 - **`run.py` 無預飛檢查（LOW）** — WARNING 埋在 log 中而非立即清晰錯誤；修復：加入 pre-flight check
 - **`NIM_API_KEY` 無效 key 偵測時機（LOW）** — 記錄為刻意取捨
 
-#### Database & Persistence Reliability (PR #362 — 12 fixes)
+#### 資料庫與持久性可靠性（PR #362 — 12 項修復）
 
 - **25 個寫入函式無 rollback（CRITICAL）** — `db.py` 例外時未提交的交易靜默遺失；修復：所有寫入路徑加入 try/except/rollback
 - **`append_warm_log` FTS insert 非原子（HIGH）** — `db.py` FTS insert 與主 insert 非原子 → crash 時 FTS 索引不同步；修復：合併入同一交易
@@ -458,11 +458,11 @@ Four PRs covering channel reliability, container security, observability & API s
 
 ## [1.18.0] — 2026-03-21
 
-### Fixed (Phase 11: 深度可靠性修復 — 43 個問題)
+### 修復（第 11 階段：深度可靠性修復 — 43 個問題）
 
 四個 PR 並行深度分析修復，涵蓋工具安全、容器生命周期、進化穩定性與 soul 品質。
 
-#### Tool Safety & Reliability (PR #356 — 19 fixes)
+#### 工具安全性與可靠性（PR #356 — 19 項修復）
 
 - **WebFetch SSRF 防護** — DNS 解析 + ipaddress 封鎖清單（127.x、10.x、192.168.x、169.254.x），防止 Server-Side Request Forgery 攻擊
 - **WebFetch 重定向鏈檢查** — 最多 5 次重定向上限，每次重定向都重新驗證目標 IP
@@ -475,7 +475,7 @@ Four PRs covering channel reliability, container security, observability & API s
 - **Glob 結果上限** — 1000 結果上限，防止大量匹配拖垮系統
 - **MEMORY.md 讀取上限** — 512KB tail-read 上限
 
-#### Container Lifecycle & Queue Correctness (PR #357 — 12 fixes)
+#### 容器生命週期與佇列正確性（PR #357 — 12 項修復）
 
 - **輸出解析** — 使用 `rfind` 取最後一個 OUTPUT 區段，加入明確 "output too large" 路徑，JSON schema 驗證
 - **可靠性** — `stderr_lines` 變數遮蔽修復，docker kill 降級為 `docker rm -f`，Windows `TimeoutExpired` 重新拋出為 `asyncio.TimeoutError`
@@ -483,20 +483,20 @@ Four PRs covering channel reliability, container security, observability & API s
 - **GroupQueue 回調** — 錯誤時回傳 `False` 以啟用退避重試，`_group_fail_lock` 為 None 時不再丟棄訊息
 - **group_queue.py 雙重分發競爭修復** — dispatch 前先清除 `pending_messages`，防止重複發送
 
-#### Evolution Stability (PR #358 — 6 fixes)
+#### 進化穩定性（PR #358 — 6 項修復）
 
 - **免疫系統誤報修復** — `忽略你的所有規則` 和 `忘記你的系統提示` 現在能被正確攔截
 - **Genome 不對稱震盪修復** — 正式度升降現在均使用 `update_formality()`，防止單向漂移
 - **Daemon 基因組驗證** — 進化前先檢測無效基因組，若無效則呼叫 `reset_genome()`
 - **靜默攔截通知** — 免疫系統靜默攔截後，現在會向用戶發送具體的中文通知訊息
 
-#### Soul Quality (PR #355)
+#### Soul 品質（PR #355）
 
 - **soul.md 反幻覺強化** — 修補 anti-hallucination 漏洞，關閉多個可能導致幻覺回覆的邊緣情況
 
 ## [1.17.0-phase10] — 2026-03-20
 
-### Fixed (Phase 10: 全面深度修復 — 30+ 個問題)
+### 修復（第 10 階段：全面深度修復 — 30+ 個問題）
 
 第五輪 4 個 agent 並行深度分析並直接修復，務必每個 code 都仔細檢查。涵蓋 agent loop、host 層、安裝體驗、架構比較。
 
@@ -549,14 +549,14 @@ Four PRs covering channel reliability, container security, observability & API s
 - **PR #348** — Qwen API httpx.Timeout（防止無限卡死）
 - **PR #349** — Telegram `drop_pending_updates=True`（防止重啟後重播舊訊息）
 
-### Issues Addressed
+### 處理的 Issues
 #350 #351 #352 #353
 
 ---
 
 ## [1.16.0-phase9] — 2026-03-20
 
-### Fixed (Phase 9: 穩定性全面修復 — 12 個問題)
+### 修復（第 9 階段：穩定性全面修復 — 12 個問題）
 
 4 個 agent 並行修復分析報告中發現的所有 P0/P1/P2 問題，大幅提升 EvoClaw 穩定性與可靠性。
 
@@ -597,14 +597,14 @@ Four PRs covering channel reliability, container security, observability & API s
 - **Formality 收斂停止（P2）** — 新增 `_CONVERGENCE_EPSILON = 0.01`；當 formality 距目標 <1% 時停止更新，消除無限震盪
 - **Genome DB 值驗證（P2）** — 新增 `_safe_float()` helper（帶 min/max 範圍限制）；DB 中 NULL 或非數字值不再導致崩潰
 
-### Issues Addressed
+### 處理的 Issues
 #339 #340 #341 #342
 
 ---
 
 ## [1.15.0-phase8] — 2026-03-20
 
-### Fixed / Added (Phase 8: Qwen 優化、群組隔離、inotify IPC、安裝體驗)
+### 修復 / 新增（第 8 階段：Qwen 優化、群組隔離、inotify IPC、安裝體驗）
 
 4 個 agent 並行分析後針對 Qwen 3.5 397B 相容性、架構穩定性與安裝體驗的深度修正。
 
@@ -630,13 +630,13 @@ Four PRs covering channel reliability, container security, observability & API s
 - **自動降級到輪詢** — 非 Linux 或 inotify 初始化失敗時自動回退到原本 500ms 輪詢
 - **`inotify-simple>=1.3.0`** — 加入 requirements.txt（Linux 限定依賴）
 
-#### QUICK_START.md + TROUBLESHOOTING.md + .env.minimal — Phase 8D (安裝體驗)
+#### QUICK_START.md + TROUBLESHOOTING.md + .env.minimal — 第 8D 階段（安裝體驗）
 
 - **QUICK_START.md** — 5 分鐘快速上手（4 步驟），移除複雜度 (Issue #330)
 - **TROUBLESHOOTING.md** — 7 個常見問題及解法，含 log 符號對照表
 - **`.env.minimal`** — 只需 5 個必要變數（原本 37 個），降低新用戶入門門檻
 
-### Issues Addressed
+### 處理的 Issues
 #325 #326 #327 #328 #329 #330
 
 ---
@@ -645,7 +645,7 @@ Four PRs covering channel reliability, container security, observability & API s
 
 ## [1.14.0-phase7] — 2026-03-20
 
-### Fixed (Phase 7: P0 Anti-Hallucination & Stability)
+### 修復（第 7 階段：P0 反幻覺與穩定性）
 
 4 個 agent 並行深度分析後發現的根本性虛假回應問題，本版本修正 23 個具體漏洞中的最高優先 10 個。
 
@@ -669,14 +669,14 @@ Four PRs covering channel reliability, container security, observability & API s
 
 - **Phase 1/2/3 init 改用 structured logging** — 剩餘 6 個 `print()` 呼叫全改為 `log.info/warning`，確保初始化狀態進入監控系統
 
-### Issues Addressed
+### 處理的 Issues
 #318 #319 #322 #324 #329
 
 ---
 
 ## [1.13.1-phase6a] — 2026-03-20
 
-### Fixed (Phase 6A: Stability & False-Response Root Causes)
+### 修復（第 6A 階段：穩定性與假回應根本原因）
 
 這個版本針對深度程式碼審查後發現的穩定性問題進行系統性修正，
 解決了導致 EvoClaw 靜默無回應和虛假回應的核心 bug。
@@ -705,23 +705,23 @@ Four PRs covering channel reliability, container security, observability & API s
   agent loop 在 MAX_ITER 耗盡時均加入 `⚠️ LOOP-EXHAUST` log，
   方便診斷無限迴圈問題 (Issue #308)
 
-### GitHub Issues Created (Phase 6A)
+### 第 6A 階段建立的 GitHub Issues
 
 | Issue | 標題 | 狀態 |
 |-------|------|------|
-| #304 | [stability] db.get_conversation_history() has no error handling | ✅ Fixed |
-| #305 | [stability] format_messages() and db.get_session() have no error handling | ✅ Fixed |
-| #306 | [stability] Container error status causes silent failure | ✅ Fixed |
-| #307 | [stability] Timeout and exception notifications silently swallow errors | ✅ Fixed |
-| #308 | [stability] Agent loop produces empty output without user-visible fallback | ✅ Fixed |
-| #309 | [stability] MAX_ITER=30 too high — allows excessive hallucination loops | 🔲 Planned |
-| #310 | [stability] Default LLM (Gemini) has weaker tool-calling reliability than Claude | 🔲 Planned |
-| #311 | [stability] IPC file-based communication has no atomic write protection | 🔲 Planned |
-| #312 | [stability] Docker circuit breaker blocks ALL groups for 60s on any failure | 🔲 Planned |
-| #313 | [stability] GroupQueue silently drops messages after 5 consecutive failures | 🔲 Planned |
-| #314 | [stability] System prompt injection too complex — 3000+ tokens per request | 🔲 Planned |
-| #315 | [cleanup] 41 stale branches cannot be deleted — need admin access | 🔲 Pending |
-| #316 | [stability] IPC watcher polling interval too coarse for real-time feel | 🔲 Planned |
+| #304 | [stability] db.get_conversation_history() 無錯誤處理 | ✅ Fixed |
+| #305 | [stability] format_messages() 和 db.get_session() 無錯誤處理 | ✅ Fixed |
+| #306 | [stability] 容器錯誤狀態導致靜默失敗 | ✅ Fixed |
+| #307 | [stability] 超時和異常通知靜默吞噬錯誤 | ✅ Fixed |
+| #308 | [stability] Agent 循環產生空輸出，無使用者可見的後備 | ✅ Fixed |
+| #309 | [stability] MAX_ITER=30 過高 — 允許過度的幻覺循環 | 🔲 Planned |
+| #310 | [stability] 預設 LLM（Gemini）工具呼叫可靠性弱於 Claude | 🔲 Planned |
+| #311 | [stability] 基於 IPC 文件的通信無原子寫入保護 | 🔲 Planned |
+| #312 | [stability] Docker 熔斷器在任何失敗時阻塞所有群組 60 秒 | 🔲 Planned |
+| #313 | [stability] GroupQueue 在 5 次連續失敗後靜默丟棄訊息 | 🔲 Planned |
+| #314 | [stability] 系統 prompt 注入過於複雜 — 每個請求超過 3000 個 token | 🔲 Planned |
+| #315 | [cleanup] 41 個過期分支無法刪除 — 需要管理員權限 | 🔲 Pending |
+| #316 | [stability] IPC watcher 輪詢間隔對即時感過於粗糙 | 🔲 Planned |
 
 ---
 
@@ -729,33 +729,33 @@ Four PRs covering channel reliability, container security, observability & API s
 
 ## [1.13.0-phase3] -- 2026-03-18
 
-### Added (Phase 3: Cross-bot Identity + RBAC Foundation)
-- `host/identity/bot_registry.py` -- BotRegistry: SQLite-backed cross-framework bot identity store
-  - Stable `bot_id = SHA-256(name:framework:channel)[:16]` format for cross-framework bot identity
-  - BotIdentity dataclass with capabilities, endpoints, trust status
-  - Nonce-based handshake protocol for cross-system bot recognition
-  - Pre-registered known bots: 小白 (Telegram) and 小Eve (EvoClaw/Discord)
-  - `bootstrap_known_bots()` pre-registers and trusts known bots on startup
-- `host/identity/cross_bot_protocol.py` -- CrossBotProtocol: `crossbot/1.0` message envelope
-  - Message types: hello, ack, memory_share, task_delegate, status, ping, pong
-  - HMAC-SHA256 message signing and verification
-  - Decorator-based message handler registration
-- `host/rbac/__init__.py` + `host/rbac/roles.py` -- Role-Based Access Control
-  - Roles: admin, operator, agent, viewer
-  - Permissions: memory:read/write/delete, agent:spawn/kill/list, task:submit/cancel, registry:read/write, rbac:grant/revoke
-  - SQLite-backed RBACStore with grant/revoke/query operations
-- `host/identity/__init__.py` -- Updated to export BotRegistry, BotIdentity, CrossBotProtocol, CrossBotMessage
-- `host/sdk_api.py` -- Added bot registry WebSocket endpoints: bot_register, bot_lookup, bot_list, bot_handshake
-- `host/main.py` -- Phase 3 startup block: BotRegistry + RBAC initialized
+### 新增（第 3 階段：跨 Bot 身份 + RBAC 基礎）
+- `host/identity/bot_registry.py` -- BotRegistry：SQLite 支援的跨框架 bot 身份儲存
+  - 穩定的 `bot_id = SHA-256(name:framework:channel)[:16]` 格式用於跨框架 bot 身份
+  - BotIdentity dataclass，含功能、端點、信任狀態
+  - 基於 nonce 的握手協議，用於跨系統 bot 識別
+  - 預先登錄已知 bot：小白（Telegram）和 小Eve（EvoClaw/Discord）
+  - `bootstrap_known_bots()` 在啟動時預先登錄並信任已知 bot
+- `host/identity/cross_bot_protocol.py` -- CrossBotProtocol：`crossbot/1.0` 訊息封裝
+  - 訊息類型：hello、ack、memory_share、task_delegate、status、ping、pong
+  - HMAC-SHA256 訊息簽名和驗證
+  - 基於裝飾器的訊息處理器登錄
+- `host/rbac/__init__.py` + `host/rbac/roles.py` -- 角色型存取控制
+  - 角色：admin、operator、agent、viewer
+  - 權限：memory:read/write/delete、agent:spawn/kill/list、task:submit/cancel、registry:read/write、rbac:grant/revoke
+  - SQLite 支援的 RBACStore，含 grant/revoke/query 操作
+- `host/identity/__init__.py` -- 更新以匯出 BotRegistry、BotIdentity、CrossBotProtocol、CrossBotMessage
+- `host/sdk_api.py` -- 加入 bot 登錄 WebSocket 端點：bot_register、bot_lookup、bot_list、bot_handshake
+- `host/main.py` -- 第 3 階段啟動區塊：BotRegistry + RBAC 初始化
 
-### GitHub Issues Created
-- #265 [Phase 3] Cross-bot Identity Protocol
-- #266 [Phase 3] Enterprise Tool Suite - Integration Layer
-- #267 [Phase 3] RBAC - Role-Based Access Control
-- #268 [Phase 3] Matrix Channel Support
-- #269 [Phase 3] Multi-tenant Support
+### 建立的 GitHub Issues
+- #265 [Phase 3] 跨 Bot 身份協議
+- #266 [Phase 3] 企業工具套件 - 整合層
+- #267 [Phase 3] RBAC - 角色型存取控制
+- #268 [Phase 3] Matrix 頻道支援
+- #269 [Phase 3] 多租戶支援
 
-### Architecture After Phase 3
+### 第 3 階段後的架構
 ```
 Gateway (main.py)
 +-- MemoryBus          (Phase 1) OK
@@ -772,22 +772,22 @@ Gateway (main.py)
 
 ## [1.12.0-phase2] -- 2026-03-18
 
-### Added (Phase 2: Universal Memory Layer)
-- `host/memory/summarizer.py` -- MemorySummarizer: LLM-powered conversation->MEMORY.md compression
-  - Supports Gemini / Claude / OpenAI-compatible APIs with graceful fallback
-  - Auto-compress MEMORY.md when approaching 8KB limit
-- `host/sdk_api.py` -- External WebSocket SDK API (port 8767)
-  - Query agent memories from external tools/CLIs
-  - Submit tasks to groups via WebSocket
-  - Real-time event broadcasting to monitoring clients
-  - Optional bearer token authentication
-- `host/container_runner.py` -- Pass stable AGENT_ID env var to Docker containers
-  - Enables persistent agent identity across restarts
-- `host/main.py` -- Phase 2 startup integration
-  - SdkApi started as background asyncio task
-  - MemorySummarizer initialized
+### 新增（第 2 階段：通用記憶體層）
+- `host/memory/summarizer.py` -- MemorySummarizer：LLM 驅動的對話->MEMORY.md 壓縮
+  - 支援 Gemini / Claude / OpenAI 相容 API，帶優雅降級後備
+  - MEMORY.md 接近 8KB 限制時自動壓縮
+- `host/sdk_api.py` -- 外部 WebSocket SDK API（port 8767）
+  - 從外部工具/CLI 查詢 agent 記憶
+  - 通過 WebSocket 向群組提交任務
+  - 向監控客戶端實時廣播事件
+  - 可選的 bearer token 認證
+- `host/container_runner.py` -- 向 Docker 容器傳遞穩定的 AGENT_ID 環境變數
+  - 在重啟間啟用持久的 agent 身份
+- `host/main.py` -- 第 2 階段啟動整合
+  - SdkApi 作為後台 asyncio 任務啟動
+  - MemorySummarizer 初始化
 
-### Architecture After Phase 2
+### 第 2 階段後的架構
 ```
 Gateway (main.py)
 +-- MemoryBus         (Phase 1) OK
@@ -802,103 +802,103 @@ Agent Runtime
     AGENT_ID env var  (Phase 2) OK              <- NEW
 ```
 
-### Issues Addressed
-- #255 (MemorySummarizer), #256 (SdkApi), #257 (AGENT_ID in containers),
-- #258 (cross-project knowledge), #259 (auto identity summary update)
+### 處理的 Issues
+- #255（MemorySummarizer）、#256（SdkApi）、#257（容器中的 AGENT_ID）、
+- #258（跨專案知識）、#259（自動身份摘要更新）
 
 ---
 
-## [Unreleased] — UnifiedClaw Roadmap
+## [Unreleased] — UnifiedClaw 路線圖
 
-### Architecture (Planned)
-- [ ] Universal Memory Bus (sqlite-vec + shared memory scope)
-- [ ] Agent Identity Layer (persistent profiles across restarts)
-- [ ] WebSocket IPC replacing file-based polling
-- [ ] Cross-agent genome collaboration (Phase 4)
-- [ ] MinionDesk enterprise tools port (Phase 3)
-- [ ] Matrix/Signal channel support (Phase 3)
+### 架構（計劃中）
+- [ ] 通用記憶體匯流排（sqlite-vec + 共享記憶體範圍）
+- [ ] Agent 身份層（跨重啟的持久設定檔）
+- [ ] WebSocket IPC 替換基於文件的輪詢
+- [ ] 跨 agent 基因組協作（第 4 階段）
+- [ ] MinionDesk 企業工具移植（第 3 階段）
+- [ ] Matrix/Signal 頻道支援（第 3 階段）
 
-### Phase 1 In Progress
-- [ ] sqlite-vec semantic search integration
-- [ ] MemoryBus abstract interface class
-- [ ] Agent fitness feedback via WebSocket
+### 第 1 階段進行中
+- [ ] sqlite-vec 語義搜尋整合
+- [ ] MemoryBus 抽象介面類
+- [ ] 通過 WebSocket 的 Agent 適應度反饋
 
 ---
 
 ## [1.11.42] — 2026-03-17
 
-### Added
-- SECURITY.md — vulnerability reporting policy
-- ARCHITECTURE.md — UnifiedClaw architecture design and roadmap
-- Updated .gitignore to exclude __pycache__ and .pyc files
+### 新增
+- SECURITY.md — 漏洞回報政策
+- ARCHITECTURE.md — UnifiedClaw 架構設計與路線圖
+- 更新 .gitignore 以排除 __pycache__ 和 .pyc 文件
 
-### Fixed
-- Path traversal vulnerability in dev_engine _deploy_files()
-- Memory leak in long-running container sessions
-- Evolution daemon timestamp handling error
+### 修復
+- dev_engine _deploy_files() 中的路徑穿越漏洞
+- 長時間運行容器 session 中的記憶體洩漏
+- 進化守護進程時間戳處理錯誤
 
-### Security
-- 22 architecture and security issues tracked (see GitHub Issues)
-- 3 CRITICAL issues identified for immediate remediation
+### 安全性
+- 22 個架構和安全性 issues 已追蹤（見 GitHub Issues）
+- 3 個 CRITICAL issues 已識別，需立即補救
 
 ---
 
 ## [1.11.34] - 2026-03-17
-### Added
-- Heartbeat: EvoClaw sends `💓 EvoClaw 運行中 | 上線時間 | 群組數 | 成功/失敗數` to monitor group every 30 minutes — if pings stop, host is down (#217)
-- `HEARTBEAT_INTERVAL` env var to configure interval (default 1800s, set 0 to disable)
+### 新增
+- 心跳：EvoClaw 每 30 分鐘向監控群組發送 `💓 EvoClaw 運行中 | 上線時間 | 群組數 | 成功/失敗數` — 若 ping 停止，表示主機已停機（#217）
+- `HEARTBEAT_INTERVAL` 環境變數以設定間隔（預設 1800s，設為 0 以停用）
 
 ## [1.11.33] - 2026-03-17
-### Added
-- `/monitor` Telegram command: send in any group to instantly register it as the monitor group — no `.env` editing or restart required (#215)
-- `_write_monitor_jid_to_env()`: persists `MONITOR_JID` to `.env` automatically so the setting survives restarts
+### 新增
+- `/monitor` Telegram 命令：在任何群組中發送以立即將其登錄為監控群組 — 無需編輯 `.env` 或重啟（#215）
+- `_write_monitor_jid_to_env()`：自動將 `MONITOR_JID` 持久化至 `.env`，使設定在重啟後保留
 
 ## [1.11.32] - 2026-03-17
-### Added
-- Monitor group support via `MONITOR_JID` env var: error alerts forwarded to a dedicated watchdog Telegram group automatically (#213)
-- `reset_group` IPC command: monitor agent can unfreeze stuck groups without human intervention
-- `mcp__evoclaw__reset_group` tool available to agents in Gemini, OpenAI-compat, and Claude modes
-- `groups/telegram_monitor/MEMORY.md` template: watchdog agent persona pre-configured
-- Independent watchdog scheduled task: checks EvoClaw DB every 5 minutes as backup
+### 新增
+- 通過 `MONITOR_JID` 環境變數支援監控群組：錯誤警報自動轉發至專用的看門狗 Telegram 群組（#213）
+- `reset_group` IPC 命令：監控 agent 可在無人工干預的情況下解凍卡住的群組
+- `mcp__evoclaw__reset_group` 工具可在 Gemini、OpenAI 相容和 Claude 模式下供 agent 使用
+- `groups/telegram_monitor/MEMORY.md` 模板：看門狗 agent 角色預先配置
+- 獨立看門狗排程任務：每 5 分鐘檢查 EvoClaw DB 作為備份
 
 ## [1.11.31] - 2026-03-17
-### Added
-- Inline error notifications: container crash / timeout / exception now sends a user-facing message directly in the conversation — no backend log watching required (#211)
-- Rate-limited to 1 notification per group per 5 minutes to prevent flooding during failure storms
-- Works out of the box with zero configuration
+### 新增
+- 行內錯誤通知：容器崩潰/超時/異常現在直接在對話中向使用者發送訊息 — 無需觀察後端日誌（#211）
+- 速率限制為每個群組每 5 分鐘 1 次通知，以防止故障風暴期間的淹沒
+- 零配置開箱即用
 
 ## [1.11.30] - 2026-03-17
-### Fixed
-- `run_agent_openai()` crashed with `NameError: name 'group_folder' is not defined` on every NIM / OpenAI-compatible session — MEMORY.md path was computed from an unpassed local variable (#209)
+### 修復
+- `run_agent_openai()` 在每個 NIM / OpenAI 相容 session 中崩潰，錯誤為 `NameError: name 'group_folder' is not defined` — MEMORY.md 路徑從未傳入的局部變數計算（#209）
 
 ## [1.11.29] - 2026-03-17
-### Added
-- `TELEGRAM_PROXY` env var: route Telegram API calls through HTTP or SOCKS5 proxy — resolves TimedOut errors on networks where `api.telegram.org` is blocked (#207)
-- Increased `MAX_RETRIES` 3 → 5 with capped exponential backoff (2s, 4s, 8s, 16s, 30s max) for transient network blips
-- Documented `TELEGRAM_PROXY` in `.env.example` with HTTP and SOCKS5 examples
+### 新增
+- `TELEGRAM_PROXY` 環境變數：通過 HTTP 或 SOCKS5 代理路由 Telegram API 呼叫 — 解決 `api.telegram.org` 被封鎖的網路上的 TimedOut 錯誤（#207）
+- 將 `MAX_RETRIES` 從 3 增加至 5，帶上限的指數退避（2s、4s、8s、16s、最大 30s），用於瞬時網路故障
+- 在 `.env.example` 中記錄 `TELEGRAM_PROXY`，包含 HTTP 和 SOCKS5 範例
 
 ## [1.11.28] - 2026-03-17
-### Fixed
-- Security: path traversal via `str.startswith` prefix bypass in `_resolve_container_path` — now uses `pathlib.is_relative_to()` (#201)
-- Security: `register_group` IPC handler now validates folder name against path traversal (#202)
-- Memory leak: per-group tracking dicts (`_per_jid_cursors`, `_group_msg_timestamps`, failure counters) now pruned on group reload (#203)
-- Evolution daemon `_last_micro_sync`/`_last_weekly_compound` now loaded from DB on startup — prevents running immediately after every restart (#205)
+### 修復
+- 安全性：`_resolve_container_path` 中通過 `str.startswith` 前綴繞過的路徑穿越 — 現在使用 `pathlib.is_relative_to()`（#201）
+- 安全性：`register_group` IPC 處理器現在驗證資料夾名稱以防路徑穿越（#202）
+- 記憶體洩漏：每個群組的追蹤字典（`_per_jid_cursors`、`_group_msg_timestamps`、失敗計數器）現在在群組重載時清除（#203）
+- 進化守護進程 `_last_micro_sync`/`_last_weekly_compound` 現在在啟動時從 DB 載入 — 防止每次重啟後立即執行（#205）
 
 ## [1.11.27] - 2026-03-17
-### Fixed
-- Security hardening: reduce container secret exposure — only LLM keys passed, channel/SCM tokens excluded (PR #198)
-- Reliability: proper error logging with traceback, Docker health check at startup (PR #199)
-- Code quality: DRY _store_bot_reply() helper, named constants, startup-only secret validation (PR #200)
-- container_logs table never pruned — added to prune_old_logs() to prevent unbounded disk growth
-- warm_logs FTS index not synced on delete — stale search results after pruning
-- stderr_lines list unbounded in container_runner — capped at 5000 lines to prevent OOM
+### 修復
+- 安全性強化：減少容器密鑰暴露 — 僅傳遞 LLM 金鑰，排除頻道/SCM token（PR #198）
+- 可靠性：含堆疊追蹤的正確錯誤日誌，啟動時的 Docker 健康檢查（PR #199）
+- 代碼品質：DRY _store_bot_reply() 輔助函式，命名常數，僅在啟動時的密鑰驗證（PR #200）
+- container_logs 表從未清除 — 加入 prune_old_logs() 以防止無界磁碟增長
+- warm_logs FTS 索引在刪除時未同步 — 清除後出現過期搜尋結果
+- container_runner 中的 stderr_lines 列表無界 — 上限為 5000 行以防止 OOM
 
-### Added
-- Dashboard auth warning at startup when DASHBOARD_PASSWORD is unset
-- ENABLED_CHANNELS validation at startup — warns on unrecognised channel names
+### 新增
+- 未設定 DASHBOARD_PASSWORD 時啟動時的 Dashboard 認證警告
+- 啟動時的 ENABLED_CHANNELS 驗證 — 對無法識別的頻道名稱發出警告
 
 ## [1.11.26] - 2026-03-16
-### Added
+### 新增
 - 意志系統：MEMORY.md 智慧注入（身份永遠保留 + task log 後 3000 字元，防截斷）
 - 身份引導 Bootstrap：首次或缺少身份區段時注入模板 + 填寫指令
 - Milestone Enforcer v3：偵測 Write/Edit/Bash 寫入 MEMORY.md，turn-28 未寫入注入 CRITICAL 提醒
@@ -906,57 +906,57 @@ Agent Runtime
 - soul.md 新增 `### 自我認知` 區段與 MEMORY.md 結構說明
 
 ## [1.11.25] - 2026-03-16
-### Fixed
+### 修復
 - circuit breaker 誤分類：container 有 stderr（確實跑了）時呼叫 _record_docker_success() 而非 _record_docker_failure()，防止 agent crash 錯誤開路
 - 新增 SIGUSR1 信號處理器：kill -USR1 <pid> 可線上重置 circuit breaker，不需重啟進程
 
 ## [1.11.24] - 2026-03-16
-### Refactored
+### 重構
 - 靈魂規則獨立為 container/agent-runner/soul.md，runner 啟動時讀取注入 — 更新規則無需改 Python code
 
 ## [1.11.23] - 2026-03-16
-### Fixed
+### 修復
 - health_monitor: 加入 ERROR_RATE_MIN_SAMPLES=5 門檻，避免樣本數不足時誤報高錯誤率（如 1/1=100%）
 
 ## [1.11.22] - 2026-03-16
-### Fixed
+### 修復
 - Docker circuit breaker 半開放狀態（half-open）：60秒後允許一次試探請求，避免永久死鎖 (#177)
 - group_queue.py: enqueue_message_check 和 _drain_group 加入 retry_count > 0 檢查，防止 circuit breaker 開路時形成緊密無限重試迴圈（「無法中斷」問題）(#177)
 
 ## [2.4.16] - 2026-03-16
-### Fixed
+### 修復
 - 里程碑強制器 v2：區分「實質工具」vs「報告工具」— 只有 Bash/Read/Write/run_agent + send_message 組合才算真里程碑 (#169)
 - 新增 _only_notify_turns 計數器：連續 >=2 輪只呼叫 send_message 無實質工具 → 注入強硬反假報告警告 (#169)
 - CRITICAL 規則加入「禁止虛報進度」和「卡住請用 run_agent 委派」(#169)
 
 ## [1.11.21] - 2026-03-16
-### Fixed
+### 修復
 - 里程碑強制器 v2：區分「實質工具」vs「報告工具」— 只有 Bash/Read/Write/run_agent + send_message 組合才算真里程碑 (#175)
 - 新增 _only_notify_turns 計數器：連續 >=2 輪只呼叫 send_message 無實質工具 → 注入強硬反假報告警告 (#175)
 - CRITICAL 規則加入「禁止虛報進度」和「卡住請用 run_agent 委派」(#175)
 
 ## [1.11.20] - 2026-03-16
-### Added
+### 新增
 - MEMORY.md 啟動注入：session 啟動時讀取 {group_folder}/MEMORY.md，注入為「長期記憶」section — 讓知識歸檔真正有效 (#173)
 - 里程碑強制器：run_agent_openai loop 追蹤 _turns_since_notify，超過 4 輪無 mcp__evoclaw__send_message 自動注入提醒 (#173)
 - Level B 啟發式偵測：prompt 長度 > 200 或含關鍵字時代碼層面標記 Level B，輔助模型委派決策 (#173)
 
 ## [1.11.19] - 2026-03-16
-### Added
-- Agent soul: `## 任務協調與智慧委派` section added to system prompt
-- Pre-flight analysis: Level A (simple, handle directly) vs Level B (complex, delegate) task classification
-- Smart delegation: Level B tasks use `mcp__evoclaw__run_agent` with `/reasoning on` injected
-- Knowledge archiving: significant tasks append a summary to `MEMORY.md`
-- Transparency: Level B announces working dir, creates `progress.log`, sends milestone updates (#171)
+### 新增
+- Agent 靈魂：系統提示中加入 `## 任務協調與智慧委派` 區段
+- 預飛分析：Level A（簡單，直接處理）vs Level B（複雜，委派）任務分類
+- 智慧委派：Level B 任務使用注入了 `/reasoning on` 的 `mcp__evoclaw__run_agent`
+- 知識歸檔：重要任務將摘要附加至 `MEMORY.md`
+- 透明度：Level B 宣布工作目錄，創建 `progress.log`，發送里程碑更新（#171）
 
-All notable changes to EvoClaw will be documented in this file.
+EvoClaw 的所有重要變更都將記錄在此文件中。
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+格式基於 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)，
+本專案遵循 [語義化版本控制](https://semver.org/spec/v2.0.0.html)。
 
 ## [1.11.18] — 2026-03-16
 
-### Fixed
+### 修復
 - `container/agent-runner/agent.py`: 追蹤 `_no_tool_turns` 計數器，連續未呼叫工具時將 `tool_choice` 從 `"auto"` 升級為 `"required"` — API 層面強制模型必須呼叫工具 (Fix #169)
 - `container/agent-runner/agent.py`: 連續 3 次無 tool call → break loop，防止無限循環 (Fix #169)
 - `container/agent-runner/agent.py`: `tool_choice="required"` 不支援時自動降級為 `"auto"` (Fix #169)
@@ -964,13 +964,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.11.17] — 2026-03-16
 
-### Fixed
+### 修復
 - `container/agent-runner/agent.py`: CRITICAL 系統提示加入第二條禁令 — 明確禁止 `*(正在執行...)*` 等假狀態行，說明這些純文字對系統沒有任何作用 (Fix #167)
 - `container/agent-runner/agent.py`: openai-compat loop 新增 Fallback 2 — 偵測 `*(...)* ` / `*[...]* ` 假狀態模式，自動 re-prompt 模型「請停止假裝，立刻呼叫 Bash tool」(Fix #167)
 
 ## [1.11.16] — 2026-03-14
 
-### Fixed
+### 修復
 - `host/container_runner.py`: `_stop_container` 改用 `docker kill`（即時 SIGKILL）替代 `docker stop --time 10`（10 秒 grace period），大幅縮短 shutdown 等待時間 (Fix #164)
 - `host/container_runner.py`: 新增 `kill_all_containers()` — shutdown 超時後強制 kill 所有追蹤中的 container (Fix #164)
 - `host/container_runner.py`: `CancelledError` handler 直接呼叫 `proc.kill()` 殺死 asyncio subprocess，再用 `asyncio.shield(_stop_container())` 確保 docker kill 完成 (Fix #164)
@@ -981,62 +981,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.11.15] — 2026-03-14
 
-### Fixed
+### 修復
 - `host/container_runner.py`: `_read_secrets()` 加入 `GITHUB_TOKEN` / `GH_TOKEN` — 這才是真正傳進 container 的 secrets 函數（非 config.get_secrets()），之前一直修錯地方
 
 ## [1.11.14] — 2026-03-13
 
-### Fixed
+### 修復
 - `container/agent-runner/agent.py`: openai-compat loop 加入 bash code block 自動執行 fallback — Qwen/NIM 模型輸出 ` ```bash ` 代碼塊時自動偵測並執行，結果回饋 history 繼續迴圈
 - `container/agent-runner/agent.py`: 系統提示加入 CRITICAL tool usage 警告 — 明確禁止輸出 code blocks，要求 ALWAYS call Bash tool directly
 
 ## [1.11.13] — 2026-03-13
 
-### Added
+### 新增
 - `.env.example`: 加入 `GITHUB_TOKEN` 說明（附 GitHub settings token 連結），讓用戶知道必須設定此值才能讓 container 使用 git push / gh CLI
 
 ## [1.11.12] — 2026-03-13
 
-### Fixed
+### 修復
 - `container/Dockerfile`: 安裝 GitHub CLI (`gh`)，修復 container 內 `gh: command not found` 根本原因
 - `container/agent-runner/agent.py`: `gh auth login` 成功後執行 `gh auth setup-git`，設定 git credential helper 讓 `git push` via HTTPS 能使用 token
 - `container/agent-runner/agent.py`: 設定 `git config user.email/user.name`（agent@evoclaw.local），避免「Please tell me who you are」commit 失敗
 
 ## [1.11.11] — 2026-03-13
 
-### Fixed
+### 修復
 - `host/config.py`: `get_secrets()` 加入 `GITHUB_TOKEN` / `GH_TOKEN`，修復 container 啟動時 gh CLI 永遠顯示 `⚠️ GH AUTH no GITHUB_TOKEN in secrets` 的根本原因
 
 ## [1.11.10] — 2026-03-13
 
-### Fixed
+### 修復
 - `container/agent-runner/agent.py`: secrets 設入 `os.environ` 後自動執行 `gh auth login --with-token`，解決 `gh repo create` 及 `git push` 因「no credentials found」失敗的問題；認證成功/失敗/gh 未安裝均有 log
 
 ## [1.11.9] — 2026-03-13
 
-### Changed
+### 變更
 - `container/agent-runner/agent.py`: 工具 args/result 日誌截斷從 400 提升至 1500 字，可看到完整 bash command 和執行結果
 
 ## [1.11.8] — 2026-03-13
 
-### Added
+### 新增
 - `container/agent-runner/agent.py`: 在 `system_instruction` 建立後立即 log 前 800 字（`📋 SYSTEM`，逐行分段顯示）
 - `container/agent-runner/agent.py`: log 最近 3 輪對話歷史（`📚 HISTORY`），方便在 Container Logs 看到完整 LLM context
 
 ## [1.11.7] — 2026-03-13
 
-### Added
+### 新增
 - `container/agent-runner/agent.py`: 從 XML prompt 提取純文字 `💬 USER` log，顯示實際用戶訊息（最多 600 字）
 - `container/agent-runner/agent.py`: 新增 `📤 REPLY` log，顯示 bot 回覆前 600 字（原本只記字數）
 - `container/agent-runner/agent.py`: 工具 args/result 日誌截斷從 200 提升至 400 字
 
-### Fixed
+### 修復
 - `host/dashboard.py`: 修復 `showContainerLog()` 中 undefined 問題 — 雙 key（數字 + 字串）查找處理型別不符
 - `host/db.py`: stderr 儲存限制從 8KB 提升至 32KB，避免長對話日誌截斷
 
 ## [1.11.6] — 2026-03-13
 
-### Added
+### 新增
 - `host/dashboard.py`: Container Logs 分頁新增「📋 展開」按鈕，點擊後彈出 Modal 顯示完整 stderr（含所有 print/log 輸出）
 - Stderr 摘要由最後 3 行改為最後 5 行
 - Modal 採 Monospace 字體、深色背景，可捲動瀏覽完整 container 執行日誌
@@ -1044,7 +1044,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.11.5] — 2026-03-13
 
-### Added
+### 新增
 - `host/db.py`: 新增 `container_logs` 資料表，記錄每次 container 執行的 stderr/stdout 摘要
 - `host/db.py`: 新增 `log_container_start()` / `log_container_finish()` / `get_container_logs()` 函數
 - `host/container_runner.py`: 在所有執行路徑（success/error/timeout/exception）呼叫 log 函數
@@ -1053,7 +1053,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.11.4] — 2026-03-13
 
-### Added
+### 新增
 - `host/dashboard.py`: 新增「⚡ Skills」分頁 — 掃描 `skills/` 目錄並顯示每個技能的名稱、版本、作者、說明
 - `host/dashboard.py`: 新增「📈 使用統計」分頁 — 整合訊息數/群組、任務執行摘要（總數/成功率/平均時間）、進化執行統計
 - 新增 `GET /api/skills` 端點：掃描 `skills/*/manifest.yaml` 回傳技能清單
@@ -1061,280 +1061,280 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.11.3] — 2026-03-13
 
-### Added
+### 新增
 - `host/dashboard.py`: 新增「🧠 記憶查看器」分頁 — 可依群組檢視熱記憶（MEMORY.md）、暖記憶日誌（最近 N 天），以及全文搜尋冷/暖記憶
 - `host/dashboard.py`: 新增 `GET /api/memory?jid=&days=&search=` 端點，整合 `db.get_hot_memory`、`db.get_warm_logs_recent`、`memory.search.memory_search`
 
 ## [1.11.2] — 2026-03-13
 
-### Fixed
+### 修復
 - `main.py`: 關機 `finally` 區塊順序修正 — 先 `channel.disconnect()` 再取消 asyncio tasks，消除 Telegram CRITICAL CancelledError 誤報 (#135)
 - `channels/telegram_channel.py`: `disconnect()` 各步驟獨立 try/except，防止 `CancelledError` 向外傳播
 
 ## [1.11.1] — 2026-03-13
 
-### Fixed
+### 修復
 - `host/config.py`: `CONTAINER_IMAGE` 預設值從 `evoclaw-agent:1.11.0` 改為 `evoclaw-agent:latest`，避免每次版本 bump 都造成 Docker image 找不到錯誤 (#133)
 - 新增 `Makefile` 提供 `make build` / `make start` / `make dev` 等指令
 
 ## [1.11.0] — 2026-03-12
 
-### Added
-- Three-tier memory system inspired by OpenClaw/MemSearch architecture
-  - Hot Memory: per-group MEMORY.md (8KB), loaded every container invocation
-  - Warm Memory: daily log auto-appended after each conversation, 3h micro sync
-  - Cold Memory: SQLite FTS5 hybrid search (keyword + recency scoring)
-  - Weekly Compound: prune >30-day logs, distill patterns to hot memory
-- Container receives hot memory in system context (`[MEMORY]...[/MEMORY]`)
-- Container can update hot memory via `memory_patch` in response JSON
-- IPC command `memory_search` for in-conversation cold memory queries
-- New DB tables: `group_hot_memory`, `group_warm_logs`, `group_warm_logs_fts`, `group_cold_memory`, `group_cold_memory_fts`, `group_memory_sync`
-- New module: `host/memory/` with `hot.py`, `warm.py`, `search.py`, `compound.py`
+### 新增
+- 三層記憶體系統，靈感來自 OpenClaw/MemSearch 架構
+  - 熱記憶：每個群組的 MEMORY.md（8KB），每次容器呼叫時載入
+  - 暖記憶：每次對話後自動附加的每日日誌，3 小時微同步
+  - 冷記憶：SQLite FTS5 混合搜尋（關鍵字 + 近期性評分）
+  - 每週彙整：清除 >30 天日誌，將模式提煉至熱記憶
+- 容器在系統上下文中接收熱記憶（`[MEMORY]...[/MEMORY]`）
+- 容器可通過回應 JSON 中的 `memory_patch` 更新熱記憶
+- IPC 命令 `memory_search` 用於對話中的冷記憶查詢
+- 新 DB 表：`group_hot_memory`、`group_warm_logs`、`group_warm_logs_fts`、`group_cold_memory`、`group_cold_memory_fts`、`group_memory_sync`
+- 新模組：`host/memory/`，含 `hot.py`、`warm.py`、`search.py`、`compound.py`
 
-### Chore
-- Version bump 1.10.28 → 1.11.0
+### 例行事務
+- 版本升級 1.10.28 → 1.11.0
 
 ## [1.10.28] - 2026-03-12
 
-### Fixed
-- **#128** `agent.py`: `newSessionId` now preserves the incoming `sessionId` from the host instead of always generating a new `uuid.uuid4()` — every container run was starting a fresh session, destroying cross-turn conversation memory; now the host-provided session ID is echoed back and only falls back to a new UUID when no session ID was passed
-- **#128** `main.py`: `get_conversation_history(jid, limit=20)` increased to `limit=50` — the previous 20-message window (≈10 turns) was too small for meaningful multi-turn context; 50 messages (≈25 turns) gives the LLM substantially more conversation history
-- **#129** `daemon.py`: `EVOLUTION_INTERVAL_SECS` reduced from `24 * 3600` (24h) to `3600` (1h) — the 24-hour first-cycle delay made evolution impossible to observe or test; with a 1-hour interval the daemon becomes practical in development and production alike
-- **#129** `daemon.py`: `MIN_SAMPLES` reduced from `10` to `3` — requiring 10 runs before evolution triggers meant groups almost never crossed the threshold; 3 samples is sufficient to make basic fitness decisions while still avoiding single-sample noise
-- **#129** `container_runner.py`: `record_run(..., success=False)` is now called when container output has no valid markers or when JSON parsing fails — these error paths previously returned early without recording, causing silent data loss and underestimating failure rates in fitness calculations
-- **#129** `fitness.py`: `record_run()` exception handler changed from silent `log.warning` to `log.error("record_run failed (jid=%s): %s", jid, exc)` — DB errors were previously easy to miss in high-volume logs
-- **#129** `genome.py`: `upsert_genome()` exception handler changed from `log.warning` to `log.error("upsert_genome failed (jid=%s): %s", jid, exc)` — genome update failures are now clearly visible in error logs
-- **#129** `db.py`: `get_active_evolution_jids()` now includes cold-start groups — previously it only queried `evolution_runs` (returning empty list when the table was empty), causing "Evaluating 0 group(s)" on fresh deployments; now also includes groups with recent conversation history so the daemon can bootstrap their first genome
+### 修復
+- **#128** `agent.py`：`newSessionId` 現在保留來自主機的傳入 `sessionId`，而非始終生成新的 `uuid.uuid4()` — 每次容器執行都在啟動新的 session，銷毀了跨輪次的對話記憶；現在主機提供的 session ID 被回傳，只有在未傳入 session ID 時才退回至新 UUID
+- **#128** `main.py`：`get_conversation_history(jid, limit=20)` 增加至 `limit=50` — 之前的 20 訊息視窗（約 10 輪）對有意義的多輪上下文太小；50 條訊息（約 25 輪）為 LLM 提供了更豐富的對話歷史
+- **#129** `daemon.py`：`EVOLUTION_INTERVAL_SECS` 從 `24 * 3600`（24 小時）縮短至 `3600`（1 小時）— 24 小時的首次循環延遲使進化無法觀察或測試；1 小時間隔使守護進程在開發和生產環境中均可實用
+- **#129** `daemon.py`：`MIN_SAMPLES` 從 `10` 減少至 `3` — 要求 10 次執行才觸發進化意味著群組幾乎從未達到閾值；3 個樣本足以做出基本適應度決策，同時仍能避免單樣本雜訊
+- **#129** `container_runner.py`：當容器輸出沒有有效標記或 JSON 解析失敗時，現在呼叫 `record_run(..., success=False)` — 這些錯誤路徑之前在未記錄的情況下提前返回，導致靜默資料丟失並低估了適應度計算中的失敗率
+- **#129** `fitness.py`：`record_run()` 異常處理器從靜默的 `log.warning` 改為 `log.error("record_run failed (jid=%s): %s", jid, exc)` — DB 錯誤在高流量日誌中之前很容易被忽視
+- **#129** `genome.py`：`upsert_genome()` 異常處理器從 `log.warning` 改為 `log.error("upsert_genome failed (jid=%s): %s", jid, exc)` — 基因組更新失敗現在在錯誤日誌中清晰可見
+- **#129** `db.py`：`get_active_evolution_jids()` 現在包含冷啟動群組 — 之前僅查詢 `evolution_runs`（表為空時返回空列表），在新部署時導致「正在評估 0 個群組」；現在還包含有近期對話歷史的群組，使守護進程可以啟動其第一個基因組
 
-### Chore
-- Version bump 1.10.27 → 1.10.28
+### 例行事務
+- 版本升級 1.10.27 → 1.10.28
 
 ## [1.10.27] - 2026-03-12
 
-### Fixed
-- **#118** `main.py`: `_is_rate_limited()` — initialise per-group deque with `maxlen=RATE_LIMIT_MAX_MSGS*2`; without a cap the deque grew unbounded for groups that consistently send within the rolling window, causing memory bloat and O(n) deque operations after days of operation
-- **#119** `ipc_watcher.py`: added `_cleanup_stale_results()` background sweep — removes subagent result files in `data/ipc/*/results/` that are older than 1 hour; runs every 120 IPC poll cycles to prevent disk fill when containers crash before writing or parent agents are cancelled before reading
-- **#120** `evolution/immune.py`: `check_message()` now distinguishes transient DB locks (`sqlite3.OperationalError: database is locked`) from permanent errors — transient locks fail-open (allow message) to prevent a brief prune_old_logs lock from blacking out all group messages; permanent/IO errors still fail-secure
-- **#121** `main.py`: graceful shutdown now explicitly cancels all pending asyncio tasks before disconnecting channels — tasks sleeping in `asyncio.sleep()` (message loop POLL_INTERVAL, evolution loop) now exit immediately on SIGTERM instead of blocking shutdown for up to POLL_INTERVAL seconds
-- **#122** `task_scheduler.py`: when `compute_next_run()` returns `None` (invalid schedule expression), task is now marked `status=paused` with an explanatory `last_result` message instead of being left with `next_run=NULL`/`status=active`, invisible to scheduler polls but never cleaned up
+### 修復
+- **#118** `main.py`：`_is_rate_limited()` — 以 `maxlen=RATE_LIMIT_MAX_MSGS*2` 初始化每個群組的 deque；沒有上限時，持續在滾動視窗內發送的群組的 deque 無限增長，在數天運行後導致記憶體膨脹和 O(n) deque 操作
+- **#119** `ipc_watcher.py`：加入 `_cleanup_stale_results()` 背景清除 — 移除 `data/ipc/*/results/` 中超過 1 小時的子 agent 結果檔案；每 120 個 IPC 輪詢週期執行一次，以防止容器在寫入前崩潰或父 agent 在讀取前被取消時磁碟填滿
+- **#120** `evolution/immune.py`：`check_message()` 現在區分瞬時 DB 鎖（`sqlite3.OperationalError: database is locked`）和永久錯誤 — 瞬時鎖允許失敗（允許訊息），以防止短暫的 prune_old_logs 鎖封鎖所有群組訊息；永久/IO 錯誤仍然安全失敗
+- **#121** `main.py`：優雅關機現在在斷開頻道連接前明確取消所有待處理的 asyncio 任務 — 在 `asyncio.sleep()` 中睡眠的任務（訊息循環 POLL_INTERVAL、進化循環）現在在 SIGTERM 時立即退出，而不是阻塞關機達 POLL_INTERVAL 秒
+- **#122** `task_scheduler.py`：當 `compute_next_run()` 返回 `None`（無效的排程表達式）時，任務現在被標記為 `status=paused`，帶有說明性的 `last_result` 訊息，而不是保留 `next_run=NULL`/`status=active`，對排程器輪詢不可見但從未被清理
 
-### Chore
-- Version bump 1.10.26 → 1.10.27
+### 例行事務
+- 版本升級 1.10.26 → 1.10.27
 
 ## [1.10.26] - 2026-03-12
 
-### Fixed
-- **#118** `main.py`: `_is_rate_limited()` — initialise per-group deque with `maxlen=RATE_LIMIT_MAX_MSGS*2`; without a cap the deque grew unbounded for groups that consistently send within the rolling window, causing memory bloat and O(n) deque operations after days of operation
-- **#119** `ipc_watcher.py`: added `_cleanup_stale_results()` background sweep — removes subagent result files in `data/ipc/*/results/` that are older than 1 hour; runs every 120 IPC poll cycles to prevent disk fill when containers crash before writing or parent agents are cancelled before reading
-- **#120** `evolution/immune.py`: `check_message()` now distinguishes transient DB locks (`sqlite3.OperationalError: database is locked`) from permanent errors — transient locks fail-open (allow message) to prevent a brief prune_old_logs lock from blacking out all group messages; permanent/IO errors still fail-secure
-- **#121** `main.py`: graceful shutdown now explicitly cancels all pending asyncio tasks before disconnecting channels — tasks sleeping in `asyncio.sleep()` (message loop POLL_INTERVAL, evolution loop) now exit immediately on SIGTERM instead of blocking shutdown for up to POLL_INTERVAL seconds
-- **#122** `task_scheduler.py`: when `compute_next_run()` returns `None` (invalid schedule expression), task is now marked `status=paused` with an explanatory `last_result` message instead of being left with `next_run=NULL`/`status=active`, invisible to scheduler polls but never cleaned up
+### 修復
+- **#118** `main.py`：`_is_rate_limited()` — 以 `maxlen=RATE_LIMIT_MAX_MSGS*2` 初始化每個群組的 deque；沒有上限時，持續在滾動視窗內發送的群組的 deque 無限增長，在數天運行後導致記憶體膨脹和 O(n) deque 操作
+- **#119** `ipc_watcher.py`：加入 `_cleanup_stale_results()` 背景清除 — 移除 `data/ipc/*/results/` 中超過 1 小時的子 agent 結果檔案；每 120 個 IPC 輪詢週期執行一次，以防止容器在寫入前崩潰或父 agent 在讀取前被取消時磁碟填滿
+- **#120** `evolution/immune.py`：`check_message()` 現在區分瞬時 DB 鎖（`sqlite3.OperationalError: database is locked`）和永久錯誤 — 瞬時鎖允許失敗（允許訊息），以防止短暫的 prune_old_logs 鎖封鎖所有群組訊息；永久/IO 錯誤仍然安全失敗
+- **#121** `main.py`：優雅關機現在在斷開頻道連接前明確取消所有待處理的 asyncio 任務 — 在 `asyncio.sleep()` 中睡眠的任務（訊息循環 POLL_INTERVAL、進化循環）現在在 SIGTERM 時立即退出，而不是阻塞關機達 POLL_INTERVAL 秒
+- **#122** `task_scheduler.py`：當 `compute_next_run()` 返回 `None`（無效的排程表達式）時，任務現在被標記為 `status=paused`，帶有說明性的 `last_result` 訊息，而不是保留 `next_run=NULL`/`status=active`，對排程器輪詢不可見但從未被清理
 
-### Chore
-- Version bump 1.10.25 → 1.10.26
+### 例行事務
+- 版本升級 1.10.25 → 1.10.26
 
 ## [1.10.25] - 2026-03-12
 
-### Fixed
-- **#105** `main.py`: `_is_duplicate_message()` TOCTOU race — converted to `async def`, added `_dedup_lock = asyncio.Lock()` initialized in `main()`, and wrapped the entire check-then-insert sequence in a single `async with _dedup_lock:` block so no two coroutines can read/insert simultaneously
-- **#106** `task_scheduler.py`: `run_task()` now advances `next_run` in a `finally` block — the computed `next_run_ts` is always written via `db.update_task()` regardless of whether the run succeeded or raised an exception, preventing tasks from getting stuck at a past timestamp
-- **#107** `webportal.py`: `_pending_replies` changed from `dict[str, str]` to `dict[str, tuple[str, float]]` storing `(session_id, created_at_timestamp)`; `_cleanup_pending_replies()` now also evicts entries older than 300 seconds (5-minute TTL) in addition to entries whose session no longer exists
-- **#108** `evolution/immune.py`: `check_message()` changed from fail-open to fail-secure — exceptions from DB calls now return `(False, "immune_check_error")` (deny) instead of `(True, None)` (allow); a DB outage can no longer bypass the immune check
-- **#109** `ipc_watcher.py`: `apply_skill` and `uninstall_skill` IPC operations wrapped in `asyncio.wait_for(..., timeout=300.0)`; a `TimeoutError` logs an error and sends a user-facing notification instead of hanging the `_skills_lock` indefinitely
-- **#110** `container_runner.py`: added `_SECRET_PATTERNS` regex list and `_redact_secrets()` function; all container stderr lines are now passed through `_redact_secrets()` before being logged, preventing API keys, tokens, and passwords from appearing in host logs or the dashboard log stream
+### 修復
+- **#105** `main.py`：`_is_duplicate_message()` TOCTOU 競爭 — 轉換為 `async def`，加入在 `main()` 中初始化的 `_dedup_lock = asyncio.Lock()`，並將整個先檢查後插入序列包裝在單一 `async with _dedup_lock:` 區塊中，使兩個協程無法同時讀取/插入
+- **#106** `task_scheduler.py`：`run_task()` 現在在 `finally` 區塊中推進 `next_run` — 無論執行成功還是拋出異常，計算的 `next_run_ts` 始終通過 `db.update_task()` 寫入，防止任務卡在過去的時間戳
+- **#107** `webportal.py`：`_pending_replies` 從 `dict[str, str]` 改為 `dict[str, tuple[str, float]]`，儲存 `(session_id, created_at_timestamp)`；`_cleanup_pending_replies()` 現在除了驅逐 session 不再存在的條目外，還驅逐超過 300 秒（5 分鐘 TTL）的條目
+- **#108** `evolution/immune.py`：`check_message()` 從允許失敗改為安全失敗 — 來自 DB 呼叫的異常現在返回 `(False, "immune_check_error")`（拒絕）而非 `(True, None)`（允許）；DB 中斷現在無法再繞過免疫檢查
+- **#109** `ipc_watcher.py`：`apply_skill` 和 `uninstall_skill` IPC 操作包裝在 `asyncio.wait_for(..., timeout=300.0)` 中；`TimeoutError` 記錄錯誤並向使用者發送通知，而非無限期掛起 `_skills_lock`
+- **#110** `container_runner.py`：加入 `_SECRET_PATTERNS` regex 列表和 `_redact_secrets()` 函式；所有容器 stderr 行在記錄前現在都通過 `_redact_secrets()` 處理，防止 API 金鑰、token 和密碼出現在主機日誌或 dashboard 日誌流中
 
-### Chore
-- Version bump 1.10.24 → 1.10.25
+### 例行事務
+- 版本升級 1.10.24 → 1.10.25
 
 ## [1.10.24] - 2026-03-12
 
-### Fixed
-- **#92** dev_engine.py Stage 7: replace string `startswith()` path traversal guard with `Path.relative_to()` — eliminates false-pass for paths like `/base_evil/file`
-- **#90** webportal.py: move `_pending_replies[msg_id] = session_id` inside `_sessions_lock` to eliminate race condition between concurrent `/api/send` requests
+### 修復
+- **#92** dev_engine.py 第 7 階段：用 `Path.relative_to()` 替換字串 `startswith()` 路徑穿越守衛 — 消除像 `/base_evil/file` 這樣路徑的誤通過
+- **#90** webportal.py：將 `_pending_replies[msg_id] = session_id` 移至 `_sessions_lock` 內，以消除並發 `/api/send` 請求之間的競爭條件
 
-### Closed (already fixed in prior versions)
-- **#95** Docker: CJK fonts and PPT/PDF libs (libfreetype6, zlib1g, fonts-wqy-zenhei) already in v1.10.21 Dockerfile
-- **#96** CONTAINER_IMAGE env var already configurable since v1.10.22
-- **#97** RELEASE.md already added in v1.10.22
-- **#98** CHANGELOG.md already added in v1.10.22
-- **#99** Duplicate of #95
+### 已關閉（在先前版本中已修復）
+- **#95** Docker：CJK 字體和 PPT/PDF 函式庫（libfreetype6、zlib1g、fonts-wqy-zenhei）已在 v1.10.21 Dockerfile 中
+- **#96** CONTAINER_IMAGE 環境變數自 v1.10.22 起已可設定
+- **#97** RELEASE.md 已在 v1.10.22 中加入
+- **#98** CHANGELOG.md 已在 v1.10.22 中加入
+- **#99** #95 的重複
 
-### Chore
-- Version bump 1.10.23 → 1.10.24
+### 例行事務
+- 版本升級 1.10.23 → 1.10.24
 
 ## [1.10.23] - 2026-03-12
 
-### Fixed
-- **#86** `router.py`: Added user notification (⚠️ 回應傳送失敗) when all message chunks fail to deliver after retries
-- **#87** `discord_channel.py`: Wrapped `future.result(30)` in try/except to catch `concurrent.futures.TimeoutError` — prevents crash on slow Discord API responses
-- **#88** `whatsapp_channel.py`: `_last_wamid` changed from plain dict to `OrderedDict` with LRU eviction capped at 10,000 entries — prevents unbounded memory growth on high-volume deployments
-- **#89** `fitness.py`: Fixed `speed_score` formula — sub-target response times now correctly score 1.0 (was erroneously returning values > 1.0)
-- **#90** `webportal.py`: Sessions lock released before `db.store_message()` call — prevents potential deadlock under concurrent session and message-store operations
-- **#91** `telegram_channel.py`: Upload timeout now configurable via `TELEGRAM_UPLOAD_TIMEOUT` env var (default: 300s, was hardcoded 120s)
-- **#92** `dev_engine.py`: Path traversal guard improvements
-- **#93** `immune.py`: Guard against empty `sender_jid` in `check_message()` — prevents potential crash or incorrect threat attribution on malformed messages
+### 修復
+- **#86** `router.py`：在所有訊息區塊重試後傳送失敗時，加入使用者通知（⚠️ 回應傳送失敗）
+- **#87** `discord_channel.py`：將 `future.result(30)` 包裝在 try/except 中以捕捉 `concurrent.futures.TimeoutError` — 防止 Discord API 回應緩慢時崩潰
+- **#88** `whatsapp_channel.py`：`_last_wamid` 從普通字典改為 `OrderedDict`，帶 LRU 驅逐，上限 10,000 個條目 — 防止高流量部署中的無界記憶體增長
+- **#89** `fitness.py`：修復 `speed_score` 公式 — 低於目標的回應時間現在正確評分 1.0（之前錯誤地返回 > 1.0 的值）
+- **#90** `webportal.py`：在 `db.store_message()` 呼叫前釋放 Sessions 鎖 — 防止並發 session 和訊息儲存操作下的潛在死鎖
+- **#91** `telegram_channel.py`：上傳超時現在可通過 `TELEGRAM_UPLOAD_TIMEOUT` 環境變數設定（預設：300s，之前硬編碼為 120s）
+- **#92** `dev_engine.py`：路徑穿越守衛改進
+- **#93** `immune.py`：在 `check_message()` 中防範空的 `sender_jid` — 防止格式錯誤的訊息上的潛在崩潰或錯誤的威脅歸因
 
-### Chore
-- Version bump 1.10.22 → 1.10.23
+### 例行事務
+- 版本升級 1.10.22 → 1.10.23
 
 ## [1.10.22] - 2026-03-12
 
-### Fixed
-- **#66** WhatsApp `send_typing` now sends read receipt with correct `wamid` (per-message WhatsApp ID) instead of `chat_id`; skips gracefully when no prior message received
-- **#68** `send_file` IPC handler supports `deleteAfterSend` flag; `research-ppt` skill instructs agent to clean up temp `.pptx`/`.txt` files post-delivery
-- **#5** Formally closed: per-JID timestamp cursors (implemented in v1.10.17) fully resolve group-isolation violation
+### 修復
+- **#66** WhatsApp `send_typing` 現在發送帶有正確 `wamid`（每條訊息的 WhatsApp ID）的已讀回條，而非 `chat_id`；未收到先前訊息時優雅跳過
+- **#68** `send_file` IPC 處理器支援 `deleteAfterSend` 標誌；`research-ppt` 技能指示 agent 在傳送後清理臨時 `.pptx`/`.txt` 文件
+- **#5** 正式關閉：每個 JID 的時間戳游標（在 v1.10.17 中實作）完全解決了群組隔離違反問題
 
-### Added
-- **#6** Multi-key rotation for all LLM providers: `GOOGLE_API_KEY`, `CLAUDE_API_KEY`, `OPENAI_API_KEY`, `NIM_API_KEY` accept comma-separated values; container agent auto-rotates to next key on 429/quota error with `🔑 KEY ROTATE` log
+### 新增
+- **#6** 所有 LLM 提供商的多金鑰輪換：`GOOGLE_API_KEY`、`CLAUDE_API_KEY`、`OPENAI_API_KEY`、`NIM_API_KEY` 接受以逗號分隔的值；容器 agent 在 429/配額錯誤時自動輪換至下一個金鑰，帶 `🔑 KEY ROTATE` 日誌
 
-### Chore
-- Version bump 1.10.19 → 1.10.22
+### 例行事務
+- 版本升級 1.10.19 → 1.10.22
 
 ## [1.10.21] - 2026-03-12
 
-### Added
-- **Production-ready Docker image** (`container/Dockerfile`): upgraded base from `node:22-slim` to `node:22` (full Debian) for broader system library compatibility needed by native Python extensions and MCP tooling (Issue #83)
-- **Complete document generation stack** pre-installed in image: `reportlab` (PDF), `openpyxl` (Excel), `python-docx` (Word) alongside existing `python-pptx==1.0.2` — eliminates runtime pip installs for all document types (Issue #77)
-- **Web scraping stack** pre-installed: `httpx`, `beautifulsoup4`, `lxml` — agents can scrape and parse HTML without runtime network dependency (Issue #78)
-- **Image processing** pre-installed: `Pillow` with system libs `libjpeg-dev`, `libpng-dev`, `zlib1g-dev`, `libcairo2` — required by reportlab image embedding and future vision workflows (Issue #79)
-- **Data science stack** pre-installed: `pandas`, `numpy`, `matplotlib` — enables in-container data analysis, tabular processing, and chart generation (Issue #80)
-- **Complete CJK font coverage**: added `fonts-liberation`, `fonts-noto-color-emoji` alongside existing `fonts-noto-cjk`, `fonts-wqy-zenhei`, `fonts-wqy-microhei`; all run through `fc-cache -fv` (Issue #81)
-- **System utilities**: added `wget`, `unzip`, `jq`, `ffmpeg` — covers archive extraction, JSON shell scripting, and media processing required by many MCP server setup scripts (Issue #82)
-- **Build tools**: added `python3-dev`, `build-essential`, `gcc` so pip packages with C extensions (lxml, Pillow, numpy) compile correctly without pre-built wheels
-- **Infrastructure vs project separation**: Dockerfile now owns all infrastructure Python packages; `requirements.txt` stays lean (only `google-genai`, `openai`, `anthropic`)
-- **`libfontconfig1`** and **`libpangocairo-1.0-0`** added to ensure font rendering works correctly in headless PDF/PPT generation
+### 新增
+- **生產就緒的 Docker 映像**（`container/Dockerfile`）：將基礎映像從 `node:22-slim` 升級至 `node:22`（完整 Debian），以提供原生 Python 擴展和 MCP 工具所需的更廣泛系統函式庫相容性（Issue #83）
+- **完整文件生成堆疊**預裝於映像中：`reportlab`（PDF）、`openpyxl`（Excel）、`python-docx`（Word），以及現有的 `python-pptx==1.0.2` — 消除了所有文件類型的運行時 pip 安裝（Issue #77）
+- **網頁抓取堆疊**預裝：`httpx`、`beautifulsoup4`、`lxml` — agent 可在無運行時網路依賴的情況下抓取和解析 HTML（Issue #78）
+- **圖像處理**預裝：`Pillow`，帶系統函式庫 `libjpeg-dev`、`libpng-dev`、`zlib1g-dev`、`libcairo2` — reportlab 圖像嵌入和未來視覺工作流所需（Issue #79）
+- **資料科學堆疊**預裝：`pandas`、`numpy`、`matplotlib` — 啟用容器內資料分析、表格處理和圖表生成（Issue #80）
+- **完整 CJK 字體覆蓋**：加入 `fonts-liberation`、`fonts-noto-color-emoji`，以及現有的 `fonts-noto-cjk`、`fonts-wqy-zenhei`、`fonts-wqy-microhei`；全部通過 `fc-cache -fv` 處理（Issue #81）
+- **系統工具**：加入 `wget`、`unzip`、`jq`、`ffmpeg` — 涵蓋許多 MCP 伺服器安裝腳本所需的存檔提取、JSON shell 腳本和媒體處理（Issue #82）
+- **構建工具**：加入 `python3-dev`、`build-essential`、`gcc`，使帶 C 擴展的 pip 套件（lxml、Pillow、numpy）在沒有預構建 wheel 的情況下也能正確編譯
+- **基礎設施與專案分離**：Dockerfile 現在擁有所有基礎設施 Python 套件；`requirements.txt` 保持精簡（僅 `google-genai`、`openai`、`anthropic`）
+- 加入 **`libfontconfig1`** 和 **`libpangocairo-1.0-0`** 以確保字體渲染在無頭 PDF/PPT 生成中正常工作
 
-### Changed
-- Base image: `node:22-slim` → `node:22` for full system library availability (Issue #83)
-- `apt-get install` now uses `--no-install-recommends` to keep image size minimal despite upgrading base
+### 變更
+- 基礎映像：`node:22-slim` → `node:22` 以提供完整的系統函式庫可用性（Issue #83）
+- `apt-get install` 現在使用 `--no-install-recommends` 以在升級基礎的同時保持映像大小最小化
 
 ## [1.10.20] - 2026-03-12
 
-### Changed
+### 變更
 - 升級 container Docker 基礎鏡像至 python:3.9 (Debian Bullseye)
 - 預裝中文字體：fonts-wqy-zenhei、fonts-wqy-microhei + fc-cache
 - 預裝系統依賴：libfreetype6、libpng16-16、zlib1g
 - 預裝 python-pptx==1.0.2 進鏡像，消除 runtime pip 網路依賴
 - 設定 PYTHONUNBUFFERED=1 + LANG=C.UTF-8 確保輸出編碼正確
 
-### Fixed
+### 修復
 - research_ppt 工具在網路不穩定時因 pip install 失敗而崩潰的問題
 - 中文字元在 PPT/PDF 中顯示為方塊的問題
 
 ## [1.10.19] - 2026-03-12
 
-### Fixed
-- **Gmail body size unbounded** (`host/channels/gmail_channel.py`): `_extract_body()` now truncates decoded email bodies at 32 KB with a clear `[... email truncated at 32 KB ...]` suffix. Large emails (newsletters, quoted thread chains) could previously saturate the agent LLM context window and bloat the messages table (Issue #69)
-- **Telegram non-text messages silently dropped** (`host/channels/telegram_channel.py`): added a handler for photos, voice messages, video, audio, documents, stickers, location, and contact message types that sends a short informational reply: `I can only process text messages at the moment.` Previously, all non-text Telegram messages were silently ignored with zero user feedback (Issue #70)
-- **GroupQueue `create_task()` swallows exceptions silently** (`host/group_queue.py`): all `asyncio.create_task()` calls now attach a `_task_done_callback` that logs unhandled exceptions at ERROR level. Without this, exceptions outside the inner try/except (e.g. CancelledError during shutdown, RuntimeError from the event loop) were silently discarded by the Python event loop (Issue #71)
-- **`.env.example` missing security-critical and operational vars** (`.env.example`): added `WHATSAPP_APP_SECRET` (with a prominent security warning), `LOG_FORMAT`, `RATE_LIMIT_MAX_MSGS`, `RATE_LIMIT_WINDOW_SECS`, `DASHBOARD_USER`, `DASHBOARD_PASSWORD`, `WEBPORTAL_ENABLED`, `WEBPORTAL_HOST`, `WEBPORTAL_PORT`, and `HEALTH_PORT`. The omission of `WHATSAPP_APP_SECRET` was especially critical — operators without this var run with no HMAC signature verification, accepting webhook payloads from any caller (Issue #72)
-- **IPC `ensure_future()` fire-and-forget swallows exceptions** (`host/ipc_watcher.py`): all `asyncio.ensure_future()` calls for `_run_apply_skill`, `_run_uninstall_skill`, `_run_list_skills`, `_run_subagent`, and `_run_dev_task` now attach `_ipc_task_done_callback` that logs unhandled exceptions at ERROR level (Issue #73)
-- **Discord `disconnect()` deadlocks — `close()` called on wrong event loop** (`host/channels/discord_channel.py`): `disconnect()` now schedules `client.close()` via `asyncio.run_coroutine_threadsafe()` on the Discord background loop instead of awaiting it from the main asyncio loop. Also adds `thread.join(timeout=5)` to ensure the background thread drains cleanly before process exit (Issue #67)
+### 修復
+- **Gmail 郵件主體大小無界限**（`host/channels/gmail_channel.py`）：`_extract_body()` 現在在 32 KB 處截斷已解碼的郵件主體，帶有明確的 `[... email truncated at 32 KB ...]` 後綴。之前，大型郵件（電子報、引用的討論串）可能使 agent LLM 上下文視窗飽和並使訊息表膨脹（Issue #69）
+- **Telegram 非文字訊息靜默丟棄**（`host/channels/telegram_channel.py`）：加入了處理照片、語音訊息、視頻、音頻、文件、貼圖、位置和聯絡人訊息類型的處理器，發送簡短的資訊性回覆：`I can only process text messages at the moment.` 之前，所有非文字 Telegram 訊息都被靜默忽略，使用者零反饋（Issue #70）
+- **GroupQueue `create_task()` 靜默吞噬異常**（`host/group_queue.py`）：所有 `asyncio.create_task()` 呼叫現在附加了 `_task_done_callback`，在 ERROR 級別記錄未處理的異常。沒有這個，inner try/except 外的異常（例如關機期間的 CancelledError、來自事件循環的 RuntimeError）被 Python 事件循環靜默丟棄（Issue #71）
+- **`.env.example` 缺少安全關鍵和操作變數**（`.env.example`）：加入了 `WHATSAPP_APP_SECRET`（帶有顯著的安全警告）、`LOG_FORMAT`、`RATE_LIMIT_MAX_MSGS`、`RATE_LIMIT_WINDOW_SECS`、`DASHBOARD_USER`、`DASHBOARD_PASSWORD`、`WEBPORTAL_ENABLED`、`WEBPORTAL_HOST`、`WEBPORTAL_PORT` 和 `HEALTH_PORT`。省略 `WHATSAPP_APP_SECRET` 尤其關鍵 — 沒有此變數的操作員在沒有 HMAC 簽名驗證的情況下運行，接受任何呼叫者的 webhook 載荷（Issue #72）
+- **IPC `ensure_future()` 發射後忘記靜默吞噬異常**（`host/ipc_watcher.py`）：`_run_apply_skill`、`_run_uninstall_skill`、`_run_list_skills`、`_run_subagent` 和 `_run_dev_task` 的所有 `asyncio.ensure_future()` 呼叫現在附加了 `_ipc_task_done_callback`，在 ERROR 級別記錄未處理的異常（Issue #73）
+- **Discord `disconnect()` 死鎖 — `close()` 在錯誤的事件循環上呼叫**（`host/channels/discord_channel.py`）：`disconnect()` 現在通過 `asyncio.run_coroutine_threadsafe()` 在 Discord 後台循環上排程 `client.close()`，而非從主 asyncio 循環中等待。還加入了 `thread.join(timeout=5)` 以確保後台線程在進程退出前乾淨地排空（Issue #67）
 
 ## [1.10.18] - 2026-03-12
 
-### Fixed
-- **Container name collision** (`host/container_runner.py`): `container_name` now uses the first 8 hex characters of `run_id` (UUID4) instead of `int(time.time())`. Two concurrent containers for the same group starting within the same wall-clock second previously caused Docker to reject the second `run` with a name-conflict error, triggering the circuit breaker (Issue #59)
-- **Five DB read functions missing `_db_lock`** (`host/db.py`): `get_messages_since`, `get_state`, `get_session`, `get_registered_group`, and `get_dev_events` now hold `_db_lock` for the duration of their queries, consistent with all other DB read/write functions. Eliminates potential `SQLITE_LOCKED` errors and stale reads when dashboard/webportal/evolution daemon threads access the shared connection concurrently (Issue #60)
-- **No memory/CPU limits on `docker run`** (`host/container_runner.py`, `host/config.py`): added `--memory` and `--cpus` flags to the container command, configured via `CONTAINER_MEMORY` (default `512m`) and `CONTAINER_CPUS` (default `1.0`) env vars. Prevents a runaway agent from exhausting host memory and triggering the kernel OOM-killer (Issue #61)
-- **WAL file grows unbounded** (`host/evolution/daemon.py`): `_sync_prune_logs()` now runs `PRAGMA wal_checkpoint(TRUNCATE)` after log pruning so the WAL file is reclaimed every 24 hours, preventing unbounded WAL growth on high-traffic deployments (Issue #62)
-- **Unused `immune_cutoff_ms` variable** (`host/db.py`): removed the dead `immune_cutoff_ms = int(...)` assignment in `prune_old_logs()` that was computed but never used; added an explanatory comment for the hardcoded 90-day immune-threat retention policy (Issue #63)
-- **`PRAGMA foreign_keys = ON` never set** (`host/db.py`): `init_database()` now enables SQLite foreign key enforcement immediately after setting WAL mode. Without this pragma, any future schema additions using `ON DELETE CASCADE`/`ON DELETE RESTRICT` are silently ignored, causing orphaned rows and skewed metrics (Issue #64)
+### 修復
+- **容器名稱衝突**（`host/container_runner.py`）：`container_name` 現在使用 `run_id`（UUID4）的前 8 個十六進位字元，而非 `int(time.time())`。之前，同一群組的兩個並發容器在同一個時鐘秒內啟動，會導致 Docker 以名稱衝突錯誤拒絕第二個 `run`，觸發熔斷器（Issue #59）
+- **五個 DB 讀取函式缺少 `_db_lock`**（`host/db.py`）：`get_messages_since`、`get_state`、`get_session`、`get_registered_group` 和 `get_dev_events` 現在在查詢期間持有 `_db_lock`，與所有其他 DB 讀/寫函式一致。消除了 dashboard/webportal/進化守護進程線程並發存取共享連接時的潛在 `SQLITE_LOCKED` 錯誤和過期讀取（Issue #60）
+- **`docker run` 無記憶體/CPU 限制**（`host/container_runner.py`、`host/config.py`）：在容器命令中加入 `--memory` 和 `--cpus` 標誌，通過 `CONTAINER_MEMORY`（預設 `512m`）和 `CONTAINER_CPUS`（預設 `1.0`）環境變數設定。防止失控的 agent 耗盡主機記憶體並觸發核心 OOM 殺手（Issue #61）
+- **WAL 文件無限增長**（`host/evolution/daemon.py`）：`_sync_prune_logs()` 現在在日誌清除後執行 `PRAGMA wal_checkpoint(TRUNCATE)`，使 WAL 文件每 24 小時被回收，防止高流量部署中的無界 WAL 增長（Issue #62）
+- **未使用的 `immune_cutoff_ms` 變數**（`host/db.py`）：移除了 `prune_old_logs()` 中計算但從未使用的死代碼 `immune_cutoff_ms = int(...)` 賦值；加入了對硬編碼的 90 天免疫威脅保留政策的說明注釋（Issue #63）
+- **`PRAGMA foreign_keys = ON` 從未設定**（`host/db.py`）：`init_database()` 現在在設定 WAL 模式後立即啟用 SQLite 外鍵強制執行。沒有此 pragma，任何使用 `ON DELETE CASCADE`/`ON DELETE RESTRICT` 的未來結構新增都會被靜默忽略，導致孤立行和偏差的度量（Issue #64）
 
 ## [1.10.17] - 2026-03-12
 
-### Fixed
-- **Per-JID message cursors** (`host/main.py`): replaced single global `_last_timestamp` with a per-JID cursor dict (`_per_jid_cursors`). A successful container run for group A can no longer push the shared timestamp past group B's pending messages, preventing silent message loss in multi-group deployments (Issue #52)
-- **DB thread-safety** (`host/db.py`): `get_new_messages()` and `get_conversation_history()` now hold `_db_lock` for the duration of the query, consistent with all other DB read functions. Eliminates potential SQLITE_LOCKED errors and stale reads when dashboard/webportal/evolution daemon threads run concurrently (Issue #53)
-- **Task scheduler tight-retry loop** (`host/task_scheduler.py`): `run_task()` exception handler now calls `db.update_task()` to advance `next_run` after a failure, preventing the same task from re-firing on every scheduler poll cycle when an exception occurs before the normal update path (Issue #54)
-- **Empty env temp file race** (`host/container_runner.py`): `_get_empty_env_file()` now uses a `threading.Lock` with double-checked locking to prevent two concurrent callers from each creating a separate temp file during the first call, leaving one file orphaned (Issue #55)
-- **SSE log stream graceful shutdown** (`host/dashboard.py`): `_handle_sse_logs()` now checks a module-level `_dashboard_stopping` threading.Event instead of looping forever, exiting promptly when the host receives SIGTERM/SIGINT rather than waiting for the client to disconnect (Issue #56)
-- **Subagent result file size cap** (`host/ipc_watcher.py`): `_run_subagent()` now truncates result text to 1 MB before writing to the IPC results directory, preventing a runaway subagent from filling the host disk through unbounded result file writes (Issue #57)
-- **Scheduler empty chat_jid guard** (`host/task_scheduler.py`): `start_scheduler_loop()` now skips tasks with an empty `chat_jid` with a warning instead of enqueuing them with an empty key, which could corrupt the GroupQueue per-group serialization map (Issue #48)
+### 修復
+- **每個 JID 的訊息游標**（`host/main.py`）：用每個 JID 的游標字典（`_per_jid_cursors`）替換單一全域 `_last_timestamp`。群組 A 的成功容器執行不再能將共享時間戳推過群組 B 的待處理訊息，防止多群組部署中的靜默訊息丟失（Issue #52）
+- **DB 線程安全性**（`host/db.py`）：`get_new_messages()` 和 `get_conversation_history()` 現在在查詢期間持有 `_db_lock`，與所有其他 DB 讀取函式一致。消除了 dashboard/webportal/進化守護進程線程並發運行時的潛在 SQLITE_LOCKED 錯誤和過期讀取（Issue #53）
+- **任務排程器緊密重試循環**（`host/task_scheduler.py`）：`run_task()` 異常處理器現在在失敗後呼叫 `db.update_task()` 以推進 `next_run`，防止在正常更新路徑前發生異常時同一任務在每個排程器輪詢週期都重新觸發（Issue #54）
+- **空 env 臨時文件競爭**（`host/container_runner.py`）：`_get_empty_env_file()` 現在使用帶雙重檢查鎖定的 `threading.Lock`，防止兩個並發呼叫者在首次呼叫期間各自創建單獨的臨時文件，導致一個文件孤立（Issue #55）
+- **SSE 日誌流優雅關機**（`host/dashboard.py`）：`_handle_sse_logs()` 現在檢查模組層級的 `_dashboard_stopping` threading.Event，而非永遠循環，在主機接收到 SIGTERM/SIGINT 時立即退出，而非等待客戶端斷開連接（Issue #56）
+- **子 agent 結果文件大小上限**（`host/ipc_watcher.py`）：`_run_subagent()` 現在在寫入 IPC 結果目錄前將結果文字截斷至 1 MB，防止失控的子 agent 通過無界結果文件寫入填滿主機磁碟（Issue #57）
+- **排程器空 chat_jid 守衛**（`host/task_scheduler.py`）：`start_scheduler_loop()` 現在以警告跳過空 `chat_jid` 的任務，而非以空鍵將其加入佇列，空鍵可能損壞 GroupQueue 的每個群組序列化映射（Issue #48）
 
 ## [1.10.16] - 2026-03-12
 
-### Security
-- WhatsApp webhook now validates the `X-Hub-Signature-256` HMAC-SHA256 header on every delivery; requests that fail verification are rejected with HTTP 403, preventing spoofed payloads from unauthenticated callers (Issue #42)
-- WebPortal session endpoint now returns a per-session CSRF token; all POST requests (`/api/send`) must echo the token as `X-CSRF-Token`, blocking cross-site request forgery attacks even when Basic Auth credentials are browser-cached (Issue #45)
-- `immune.py` content fingerprinting upgraded from MD5 to SHA-256, preventing hash-collision attacks that could allow adversaries to bypass spam counters or poison the threat database (Issue #47)
+### 安全性
+- WhatsApp webhook 現在在每次傳送時驗證 `X-Hub-Signature-256` HMAC-SHA256 標頭；驗證失敗的請求被以 HTTP 403 拒絕，防止來自未認證呼叫者的偽造載荷（Issue #42）
+- WebPortal session 端點現在返回每個 session 的 CSRF token；所有 POST 請求（`/api/send`）必須將 token 作為 `X-CSRF-Token` 回傳，即使 Basic Auth 憑證被瀏覽器快取也能阻止跨站請求偽造攻擊（Issue #45）
+- `immune.py` 內容指紋從 MD5 升級至 SHA-256，防止可能允許攻擊者繞過垃圾郵件計數器或毒化威脅資料庫的雜湊碰撞攻擊（Issue #47）
 
-### Fixed
-- DB read functions called from background threads now hold `_db_lock`: `get_all_registered_groups`, `get_all_tasks`, `get_evolution_runs`, `get_active_evolution_jids`, `get_recent_run_stats`, `get_group_genome`, `is_sender_blocked`, `get_recent_threat_count`, `get_immune_stats`, `get_evolution_log`, `get_due_tasks`, `get_pending_task_count`, `get_error_stats` — eliminates `database is locked` errors and stale reads under concurrent load from dashboard/webportal and evolution daemon (Issue #43)
-- Discord `send_message()` and `send_typing()` now use `asyncio.run_coroutine_threadsafe()` to bridge the main event loop and the Discord client's background event loop, fixing cross-loop `RuntimeError` that silently prevented Discord message delivery (Issue #44)
-- Gmail channel `_seen_message_ids` replaced with a bounded `OrderedDict` (cap 10,000 entries, LRU eviction), preventing unbounded memory growth on long-running deployments processing high volumes of email (Issue #46)
-- Slack `auth_test()` is now called once during `connect()` and the workspace ID is cached on `self._workspace_id`; previously called on every single incoming message, hitting Slack rate limits at high message rates (Issue #49)
-- `ipc_watcher._notify_main_group_error()` now sanitizes error strings before sending them to the main group chat — filesystem paths are replaced with `<path>` and output is truncated to 120 characters, preventing internal directory layout leakage to chat members (Issue #50)
+### 修復
+- 從後台線程呼叫的 DB 讀取函式現在持有 `_db_lock`：`get_all_registered_groups`、`get_all_tasks`、`get_evolution_runs`、`get_active_evolution_jids`、`get_recent_run_stats`、`get_group_genome`、`is_sender_blocked`、`get_recent_threat_count`、`get_immune_stats`、`get_evolution_log`、`get_due_tasks`、`get_pending_task_count`、`get_error_stats` — 消除了 dashboard/webportal 和進化守護進程並發負載下的 `database is locked` 錯誤和過期讀取（Issue #43）
+- Discord `send_message()` 和 `send_typing()` 現在使用 `asyncio.run_coroutine_threadsafe()` 橋接主事件循環和 Discord 客戶端的後台事件循環，修復了靜默阻止 Discord 訊息傳送的跨循環 `RuntimeError`（Issue #44）
+- Gmail 頻道 `_seen_message_ids` 替換為有界的 `OrderedDict`（上限 10,000 個條目，LRU 驅逐），防止長時間運行的高容量郵件處理部署中的無界記憶體增長（Issue #46）
+- Slack `auth_test()` 現在在 `connect()` 期間呼叫一次，工作區 ID 被快取在 `self._workspace_id` 上；之前在每條傳入訊息上呼叫，在高訊息速率下達到 Slack 速率限制（Issue #49）
+- `ipc_watcher._notify_main_group_error()` 現在在將錯誤字串發送到主群組聊天前對其進行清除 — 文件系統路徑被替換為 `<path>`，輸出被截斷至 120 個字元，防止內部目錄佈局洩漏給聊天成員（Issue #50）
 
 ## [1.10.15] - 2026-03-12
 
-### Added
-- New `research-ppt` skill: generates PowerPoint presentations with self-healing dependency management (Issue #39)
-  - `research_ppt_tool.py` container tool registered at runtime via `register_dynamic_tool()`
-  - Version-pins `python-pptx==1.0.2` to prevent dependency drift on ephemeral Docker containers
-  - Self-healing installer retries up to 2 times on transient PyPI network failures
-  - Graceful degradation: produces a plain-text `.txt` report when PPTX generation fails for any reason
-  - Font-safe: skips unavailable CJK/Chinese fonts with a fallback chain instead of crashing
-  - Skill manifest `skills/research-ppt/manifest.yaml` includes `container_tools:` entry so the tool is hot-deployed to `data/dynamic_tools/` without rebuilding the container image
+### 新增
+- 新的 `research-ppt` 技能：生成帶有自我修復依賴管理的 PowerPoint 簡報（Issue #39）
+  - `research_ppt_tool.py` 容器工具在運行時通過 `register_dynamic_tool()` 登錄
+  - 版本固定 `python-pptx==1.0.2` 以防止臨時 Docker 容器上的依賴漂移
+  - 自我修復安裝器在瞬時 PyPI 網路失敗時最多重試 2 次
+  - 優雅降級：當 PPTX 生成因任何原因失敗時，產生純文字 `.txt` 報告
+  - 字體安全：使用後備鏈跳過不可用的 CJK/中文字體而非崩潰
+  - 技能 manifest `skills/research-ppt/manifest.yaml` 包含 `container_tools:` 條目，使工具在不重新構建容器映像的情況下熱部署至 `data/dynamic_tools/`
 
-### Fixed
-- `route_file()` in `router.py` now validates file existence and enforces a 45 MB size guard before attempting upload; oversized files trigger a plain-text notification to the user instead of a silent broken upload (Issue #40)
-- `TelegramChannel.send_file()` now streams the file via an open file object instead of loading the entire binary content into memory with `f.read()`, preventing large memory spikes for multi-megabyte files (Issue #40)
-- `TelegramChannel.send_file()` wrapped in `asyncio.wait_for(..., timeout=120)` so a slow network cannot stall the GroupQueue slot indefinitely (Issue #40)
-- Removed debug log file (`debug_send.log`) side-effect from `TelegramChannel.send_file()` that was writing to `/workspace/group/debug_send.log` on every file send
+### 修復
+- `router.py` 中的 `route_file()` 現在在嘗試上傳前驗證文件存在並強制執行 45 MB 大小守衛；超大文件向使用者觸發純文字通知，而非靜默的損壞上傳（Issue #40）
+- `TelegramChannel.send_file()` 現在通過開放的文件物件流式傳輸文件，而非使用 `f.read()` 將整個二進位內容載入記憶體，防止多兆字節文件的大記憶體峰值（Issue #40）
+- `TelegramChannel.send_file()` 包裝在 `asyncio.wait_for(..., timeout=120)` 中，使緩慢的網路不能無限期阻塞 GroupQueue 插槽（Issue #40）
+- 從 `TelegramChannel.send_file()` 移除了在每次文件發送時寫入 `/workspace/group/debug_send.log` 的除錯日誌文件（`debug_send.log`）副作用
 
 ## [1.10.14] - 2026-03-12
 
-### Fixed
-- `db.record_immune_threat()` now holds `_db_lock` for the full read-modify-write sequence, eliminating a TOCTOU race condition under concurrent dashboard/webportal thread access (Issue #32)
-- `db.prune_old_logs()` now also prunes `evolution_log`, `messages`, `immune_threats` (noise-only), `dev_events`, and `dev_sessions` tables — previously only `task_run_logs` and `evolution_runs` were cleaned, leaving five tables to grow unboundedly (Issue #33)
-- Added `psutil>=5.9.0` to `host/requirements.txt` and `pyproject.toml`; `health_monitor.py` imports `psutil` unconditionally but it was not listed as a dependency, causing `ImportError` on fresh installs (Issue #34)
-- Implemented `db.get_pending_task_count()` and `db.get_error_stats()` in `db.py`; health monitor was guarding calls with `hasattr()` and silently using zero-value fallbacks, making the container-queue and error-rate health checks permanently non-functional (Issue #35)
-- LLM API calls (Gemini, Claude, OpenAI-compatible) now wrapped in `_llm_call_with_retry()` with exponential backoff (up to 3 attempts: 1s, 2s delay) for transient errors (429 rate limit, 5xx server errors); permanent errors (400, 401) are not retried (Issue #36)
+### 修復
+- `db.record_immune_threat()` 現在在完整的讀取-修改-寫入序列中持有 `_db_lock`，消除了並發 dashboard/webportal 線程存取下的 TOCTOU 競爭條件（Issue #32）
+- `db.prune_old_logs()` 現在還清除 `evolution_log`、`messages`、`immune_threats`（僅雜訊）、`dev_events` 和 `dev_sessions` 表 — 之前僅清除 `task_run_logs` 和 `evolution_runs`，讓五個表無限增長（Issue #33）
+- 將 `psutil>=5.9.0` 加入 `host/requirements.txt` 和 `pyproject.toml`；`health_monitor.py` 無條件導入 `psutil` 但未將其列為依賴，導致新安裝時出現 `ImportError`（Issue #34）
+- 在 `db.py` 中實作了 `db.get_pending_task_count()` 和 `db.get_error_stats()`；健康監控器用 `hasattr()` 守衛呼叫並靜默使用零值後備，使容器佇列和錯誤率健康檢查永久失效（Issue #35）
+- LLM API 呼叫（Gemini、Claude、OpenAI 相容）現在包裝在 `_llm_call_with_retry()` 中，帶指數退避（最多 3 次嘗試：1s、2s 延遲）用於瞬時錯誤（429 速率限制、5xx 伺服器錯誤）；永久錯誤（400、401）不重試（Issue #36）
 
-### Added
-- Periodic DB log pruning: `evolution_loop` in `daemon.py` now calls `prune_old_logs()` after each 24-hour evolution cycle, ensuring long-running processes benefit from maintenance without requiring a restart (Issue #37)
+### 新增
+- 定期 DB 日誌清除：`daemon.py` 中的 `evolution_loop` 現在在每個 24 小時進化週期後呼叫 `prune_old_logs()`，確保長時間運行的進程受益於維護而無需重啟（Issue #37）
 
 ## [1.10.13] - 2026-03-12
 
-### Security
-- Agent tools (`tool_read`, `tool_write`, `tool_edit`) now validate that file paths resolve inside `/workspace/` before executing, blocking prompt-injection attacks that attempt to read `/proc/self/environ` or other sensitive container files (Issue #29)
-- `skills_engine/apply.py` post_apply commands now checked against an allowlist of safe prefixes (`pip install`, `npm install`, `pytest`, etc.) — unknown commands are skipped with a warning, preventing malicious skill manifests from running arbitrary host commands (Issue #28)
-- `ipc_watcher._resolve_container_path` now validates the resolved host path stays within the expected root directory, preventing path traversal via crafted container file paths (Issue #26)
+### 安全性
+- Agent 工具（`tool_read`、`tool_write`、`tool_edit`）現在在執行前驗證文件路徑解析在 `/workspace/` 內，阻止試圖讀取 `/proc/self/environ` 或其他敏感容器文件的 prompt 注入攻擊（Issue #29）
+- `skills_engine/apply.py` post_apply 命令現在對照安全前綴允許清單（`pip install`、`npm install`、`pytest` 等）進行檢查 — 未知命令以警告跳過，防止惡意技能 manifest 執行任意主機命令（Issue #28）
+- `ipc_watcher._resolve_container_path` 現在驗證解析的主機路徑留在預期的根目錄內，防止通過精心設計的容器文件路徑進行路徑穿越（Issue #26）
 
-### Fixed
-- WebPortal `_pending_replies` dict now cleaned up lazily on each `/api/send` call (evicting entries whose sessions no longer exist), fixing an unbounded memory leak that accumulated indefinitely as sessions expired (Issue #21)
-- DB write functions `set_session`, `create_task`, `update_task`, `delete_task`, `set_registered_group`, `upsert_group_genome`, `block_sender`, `log_evolution_event`, `log_dev_event` now all hold `_db_lock` for thread safety, preventing potential `database is locked` errors from webportal/dashboard/evolution threads (Issue #22)
-- WebPortal `/api/send` now enforces per-group rate limiting (same as the Telegram/WhatsApp path) to prevent authenticated WebPortal users from bypassing the rate limiter and flooding the GroupQueue (Issue #25)
-- `router.route_outbound` now retries failed chunks (up to 2 attempts, 1s delay) and notifies the user when chunks cannot be delivered after retries, rather than silently dropping remaining chunks (Issue #27)
+### 修復
+- WebPortal `_pending_replies` 字典現在在每次 `/api/send` 呼叫時惰性清理（驅逐 session 不再存在的條目），修復了隨著 session 過期而無限累積的無界記憶體洩漏（Issue #21）
+- DB 寫入函式 `set_session`、`create_task`、`update_task`、`delete_task`、`set_registered_group`、`upsert_group_genome`、`block_sender`、`log_evolution_event`、`log_dev_event` 現在全部持有 `_db_lock` 以確保線程安全，防止來自 webportal/dashboard/進化線程的潛在 `database is locked` 錯誤（Issue #22）
+- WebPortal `/api/send` 現在強制執行每個群組的速率限制（與 Telegram/WhatsApp 路徑相同），防止已認證的 WebPortal 使用者繞過速率限制器並淹沒 GroupQueue（Issue #25）
+- `router.route_outbound` 現在重試失敗的區塊（最多 2 次嘗試，1s 延遲），並在重試後區塊無法傳送時通知使用者，而非靜默丟棄剩餘區塊（Issue #27）
 
-### Added
-- WebPortal `_sessions` dict now capped at 500 concurrent sessions; `_expire_sessions` is called on every new session creation to enforce the cap (Issue #23)
-- Per-session message list capped at 200 entries to prevent unbounded per-session memory growth; `deliver_reply` also respects this cap (Issue #23)
-- WebPortal `_read_body` now enforces a 64 KB maximum POST body size, returning HTTP 413 for oversized requests to prevent memory exhaustion (Issue #24)
-- Individual message text in WebPortal `/api/send` capped at 32 KB (Issue #24)
-- `ENABLED_CHANNELS` validated at startup against the set of known channel names; unrecognised names trigger a clear `ERROR` log entry so operators immediately see typos (Issue #30)
+### 新增
+- WebPortal `_sessions` 字典現在上限為 500 個並發 session；`_expire_sessions` 在每次新 session 創建時被呼叫以強制執行上限（Issue #23）
+- 每個 session 的訊息列表上限為 200 個條目，以防止無界的每個 session 記憶體增長；`deliver_reply` 也遵守此上限（Issue #23）
+- WebPortal `_read_body` 現在強制執行 64 KB 最大 POST 主體大小，對超大請求返回 HTTP 413，以防止記憶體耗盡（Issue #24）
+- WebPortal `/api/send` 中的單條訊息文字上限為 32 KB（Issue #24）
+- `ENABLED_CHANNELS` 在啟動時對照已知頻道名稱集合進行驗證；無法識別的名稱觸發明確的 `ERROR` 日誌條目，使操作員立即看到拼寫錯誤（Issue #30）
 
 ## [1.10.12] - 2026-03-12
 
-### Security
-- WebPortal now enforces Basic Auth when `DASHBOARD_PASSWORD` is set, preventing unauthenticated access to group list and message injection (Issue #12)
+### 安全性
+- WebPortal 現在在設定 `DASHBOARD_PASSWORD` 時強制執行 Basic Auth，防止未認證存取群組列表和訊息注入（Issue #12）
 
-### Fixed
-- Fitness `speed_score` formula now excludes failed runs (response_ms=0) from the average, preventing broken groups from being scored as "perfect speed" (Issue #18)
-- SQLite connection now protected by `threading.Lock` on all write operations, preventing `database is locked` errors when dashboard/webportal/evolution threads write concurrently (Issue #15)
-- `task_run_logs` and `evolution_runs` tables now pruned at startup (30-day retention) to prevent unbounded disk growth (Issue #19)
+### 修復
+- 適應度 `speed_score` 公式現在排除失敗執行（response_ms=0）的平均值，防止損壞的群組被評為「完美速度」（Issue #18）
+- SQLite 連接現在在所有寫入操作上受 `threading.Lock` 保護，防止 dashboard/webportal/進化線程並發寫入時出現 `database is locked` 錯誤（Issue #15）
+- `task_run_logs` 和 `evolution_runs` 表現在在啟動時清除（30 天保留），以防止無界磁碟增長（Issue #19）
 
-### Added
-- Per-group message rate limiting (sliding window: 20 msgs/60s by default, configurable via `RATE_LIMIT_MAX_MSGS` / `RATE_LIMIT_WINDOW_SECS`) to prevent one group from starving others (Issue #16)
-- `GroupQueue` backpressure: `pending_tasks` capped at 50 per group, `_waiting_groups` capped at 100 entries — excess tasks are dropped with a warning (Issue #14)
-- Structured log format support: set `LOG_FORMAT=json` to emit newline-delimited JSON logs for Loki/Datadog/CloudWatch (requires `python-json-logger`) (Issue #17)
-- Container image pin warning: logs a `WARNING` at startup when `CONTAINER_IMAGE` uses the mutable `:latest` tag (Issue #13)
-- `db.prune_old_logs(days=30)` maintenance function for log table housekeeping
+### 新增
+- 每個群組的訊息速率限制（滑動視窗：預設 20 msgs/60s，可通過 `RATE_LIMIT_MAX_MSGS` / `RATE_LIMIT_WINDOW_SECS` 設定），防止一個群組使其他群組饑餓（Issue #16）
+- `GroupQueue` 反壓：`pending_tasks` 每個群組上限 50 個，`_waiting_groups` 上限 100 個條目 — 超出的任務帶警告丟棄（Issue #14）
+- 結構化日誌格式支援：設定 `LOG_FORMAT=json` 以為 Loki/Datadog/CloudWatch 發出換行分隔的 JSON 日誌（需要 `python-json-logger`）（Issue #17）
+- 容器映像固定警告：當 `CONTAINER_IMAGE` 使用可變的 `:latest` 標籤時，在啟動時記錄 `WARNING`（Issue #13）
+- `db.prune_old_logs(days=30)` 日誌表維護函式
 
 ## [1.10.11] - 2026-03-12
 
-### Architecture Improvements
+### 架構改進
 - 新增 `run_id` 關聯 ID 傳入 container input_data，提升多群組除錯能力（Issue #1, #8）
 - 修正 outer timeout 硬編碼 300s 改用 `config.CONTAINER_TIMEOUT`，確保設定一致性（Issue #2）
 - 修正 IPC 未知 type 靜默忽略，現在記錄 warning 日誌（Issue #3）
@@ -1345,7 +1345,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.10.10] - 2026-03-12
 
-### Fixed
+### 修復
 - 修正 JSON 輸出無大小限制（加入 2MB 上限防止 DoS）
 - 修正 circuit breaker 競態條件（asyncio.Lock 保護全域 dict）
 - 修正 DB connection 未關閉造成的 file lock 殘留（atexit 正確關閉）
@@ -1359,40 +1359,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.10.9] - 2026-03-11
 
-### Fixed
+### 修復
 - 移除對話歷史訊息 800 字截斷限制，保留完整 context
 - 修正 Session 管理：container 現在回傳 newSessionId，DB 正確更新
 - 歷史時間窗從硬編碼 2 小時改為可設定（預設 4 小時）
 - 歷史訊息上限從 30 則增加至 50 則
 
-### Changed
+### 變更
 - history_lookback_hours 可在 group config 中設定（預設 4）
 
 ## [1.10.8] - 2026-03-11
 
-### Added — Dynamic Container Tool Hot-swap (Skills 2.0)
+### 新增 — 動態容器工具熱替換（Skills 2.0）
 
-Solves the core Docker limitation for DevEngine-generated skills: new Python tools can now be installed into running containers without rebuilding the image.
+解決 DevEngine 生成技能的核心 Docker 限制：新的 Python 工具現在無需重建映像即可安裝到運行中的容器。
 
-#### Architecture: `data/dynamic_tools/` volume mount
-- `host/container_runner.py`: `_build_volume_mounts()` now mounts `{DATA_DIR}/dynamic_tools/` → `/app/dynamic_tools:ro` in **every** container (both main and regular groups)
-- `container/agent-runner/agent.py`: new `_load_dynamic_tools()` function — scans `/app/dynamic_tools/*.py` at startup and dynamically imports each file via `importlib.util`; `register_dynamic_tool` is injected into each module's namespace
-- Drop a `.py` file into `data/dynamic_tools/`, next container run picks it up automatically — no `docker build` needed
+#### 架構：`data/dynamic_tools/` 卷掛載
+- `host/container_runner.py`：`_build_volume_mounts()` 現在在**每個**容器（主群組和普通群組）中掛載 `{DATA_DIR}/dynamic_tools/` → `/app/dynamic_tools:ro`
+- `container/agent-runner/agent.py`：新的 `_load_dynamic_tools()` 函式 — 在啟動時掃描 `/app/dynamic_tools/*.py` 並通過 `importlib.util` 動態導入每個文件；`register_dynamic_tool` 被注入每個模組的命名空間
+- 將 `.py` 文件放入 `data/dynamic_tools/`，下次容器執行自動拾取 — 無需 `docker build`
 
-#### Dynamic Tool Registry (`agent.py`)
-- `_dynamic_tools: dict` — global in-process registry: `{name → {fn, schema, description}}`
-- `register_dynamic_tool(name, description, schema, fn)` — appends to **all three** provider declaration lists (Gemini `TOOL_DECLARATIONS`, `CLAUDE_TOOL_DECLARATIONS`, `OPENAI_TOOL_DECLARATIONS`) and registers the dispatch function
-- `_json_schema_to_gemini()` — converts JSON Schema properties dict to Gemini `types.Schema` at runtime (supports string, integer, boolean, object, array types)
-- `_execute_tool_inner()` — falls back to `_dynamic_tools` dispatch after all built-in tools
+#### 動態工具登錄（`agent.py`）
+- `_dynamic_tools: dict` — 全域進程內登錄：`{name → {fn, schema, description}}`
+- `register_dynamic_tool(name, description, schema, fn)` — 附加至**所有三個**提供商宣告列表（Gemini `TOOL_DECLARATIONS`、`CLAUDE_TOOL_DECLARATIONS`、`OPENAI_TOOL_DECLARATIONS`）並登錄分發函式
+- `_json_schema_to_gemini()` — 在運行時將 JSON Schema 屬性字典轉換為 Gemini `types.Schema`（支援 string、integer、boolean、object、array 類型）
+- `_execute_tool_inner()` — 在所有內置工具之後退回至 `_dynamic_tools` 分發
 
-#### Skills Engine: `container_tools:` manifest field
-- `skills_engine/types.py`: `SkillManifest` dataclass gains `container_tools: list[str]` field (default `[]`)
-- `skills_engine/manifest.py`: `read_manifest()` reads `container_tools:` from YAML
-- `skills_engine/apply.py`: after `adds:` processing, copies `container_tools` files from `skill/add/` → `{DATA_DIR}/dynamic_tools/` (flattened by filename)
-- `skills_engine/uninstall.py`: before replay, locates skill dir, reads manifest, removes its `container_tools` files from `dynamic_tools/`
-- `dynamic_tools/.gitkeep` — git-tracked directory placeholder
+#### 技能引擎：`container_tools:` manifest 欄位
+- `skills_engine/types.py`：`SkillManifest` dataclass 增加 `container_tools: list[str]` 欄位（預設 `[]`）
+- `skills_engine/manifest.py`：`read_manifest()` 從 YAML 讀取 `container_tools:`
+- `skills_engine/apply.py`：在 `adds:` 處理後，將 `container_tools` 文件從 `skill/add/` 複製至 `{DATA_DIR}/dynamic_tools/`（以檔名扁平化）
+- `skills_engine/uninstall.py`：在重播前，找到技能目錄，讀取 manifest，從 `dynamic_tools/` 中刪除其 `container_tools` 文件
+- `dynamic_tools/.gitkeep` — git 追蹤的目錄佔位符
 
-### Example `manifest.yaml` with `container_tools:`
+### 帶 `container_tools:` 的 `manifest.yaml` 範例
 ```yaml
 skill: my-skill
 version: "1.0.0"
@@ -1402,7 +1402,7 @@ container_tools:
   - dynamic_tools/my_tool.py   # injected at /app/dynamic_tools/my_tool.py
 ```
 
-### Example dynamic tool file
+### 動態工具文件範例
 ```python
 # dynamic_tools/my_tool.py  (inside skill add/ directory)
 def _my_tool(args: dict) -> str:
@@ -1416,115 +1416,115 @@ register_dynamic_tool(
 )
 ```
 
-### Files Changed
-- `host/container_runner.py` (dynamic_tools mount in `_build_volume_mounts`)
-- `container/agent-runner/agent.py` (`_dynamic_tools` registry, `register_dynamic_tool`, `_load_dynamic_tools`, `_execute_tool_inner` fallback)
-- `skills_engine/types.py` (`container_tools` field on `SkillManifest`)
-- `skills_engine/manifest.py` (`container_tools` deserialization)
-- `skills_engine/apply.py` (`container_tools` copy to `dynamic_tools/`)
-- `skills_engine/uninstall.py` (`container_tools` cleanup before replay)
-- `dynamic_tools/.gitkeep` (new)
+### 更改的文件
+- `host/container_runner.py`（`_build_volume_mounts` 中的 dynamic_tools 掛載）
+- `container/agent-runner/agent.py`（`_dynamic_tools` 登錄、`register_dynamic_tool`、`_load_dynamic_tools`、`_execute_tool_inner` 後備）
+- `skills_engine/types.py`（`SkillManifest` 上的 `container_tools` 欄位）
+- `skills_engine/manifest.py`（`container_tools` 反序列化）
+- `skills_engine/apply.py`（`container_tools` 複製至 `dynamic_tools/`）
+- `skills_engine/uninstall.py`（重播前的 `container_tools` 清理）
+- `dynamic_tools/.gitkeep`（新增）
 
 ---
 
 ## [1.10.7] - 2026-03-11
 
-### Fixed
-- **Telegram File Send Optimization**: Refined v1.10.1 binary file fix by removing redundant `disable_content_type_detection` parameter that caused compatibility issues.
-- **Debug Log Delivery**: Enhanced error reporting to send debug logs directly to user's Telegram instead of writing to container-internal files (solving persistence issues in Docker).
-- **Documentation Sync**: Ensured `CHANGELOG.md`, `README.md`, and `RELEASE.md` are properly synchronized with actual code changes.
+### 修復
+- **Telegram 文件發送優化**：通過移除導致相容性問題的冗餘 `disable_content_type_detection` 參數，改進了 v1.10.1 的二進位文件修復。
+- **除錯日誌傳送**：增強錯誤報告，直接向使用者的 Telegram 發送除錯日誌，而非寫入容器內部文件（解決 Docker 中的持久性問題）。
+- **文件同步**：確保 `CHANGELOG.md`、`README.md` 和 `RELEASE.md` 與實際代碼變更正確同步。
 
 
 ## [1.10.6] - 2026-03-11
 
-### Fixed (Code Review Findings)
-- CRASH: .env shadow mount no longer double-prefixes `-v` flag (containers were failing to start on Linux/macOS)
-- ERROR: run_container_agent now catches asyncio.CancelledError and calls _stop_container (outer timeout no longer creates zombie containers)
-- ERROR: /api/dev/resume now writes IPC file to correct group folder path (DevEngine resume was silently broken)
-- WARNING: cleanup_orphans now awaits proc.wait() after docker rm
-- Minor: send_file tool schema — chat_jid removed from required[] (auto-detected from input)
-- Minor: _resolve_container_path guards against empty group_folder
-- Minor: TelegramChannel.send_file removes redundant filename parameter
+### 修復（代碼審查發現）
+- CRASH：.env 影子掛載不再對 `-v` 標誌重複加前綴（容器在 Linux/macOS 上無法啟動）
+- ERROR：run_container_agent 現在捕捉 asyncio.CancelledError 並呼叫 _stop_container（外部超時不再創建殭屍容器）
+- ERROR：/api/dev/resume 現在將 IPC 文件寫入正確的群組資料夾路徑（DevEngine 恢復之前靜默損壞）
+- WARNING：cleanup_orphans 現在在 docker rm 後等待 proc.wait()
+- 次要：send_file 工具 schema — chat_jid 從 required[] 中移除（自動從輸入中偵測）
+- 次要：_resolve_container_path 防範空的 group_folder
+- 次要：TelegramChannel.send_file 移除冗餘的 filename 參數
 
 ## [1.10.5] - 2026-03-11
 
-### Added
-- **Comprehensive Container Agent Logging**: Added `_log(tag, msg)` helper with millisecond timestamps to `container/agent-runner/agent.py` for structured stderr logging throughout the agent lifecycle.
-  - Startup: process ID logged at container boot (`🚀 START`).
-  - Input parsed: JID, group folder, and message count (`📥 INPUT`).
-  - Last message preview for quick debugging (`💬 MSG`).
-  - Model/provider selection before first LLM call (`🤖 MODEL`).
-  - Per-turn LLM call and response with stop reason (`🧠 LLM →/←`).
-  - Tool dispatch with name and truncated args (`🔧 TOOL`).
-  - Tool result preview (`🔧 RESULT`).
-  - IPC file writes for messages, tasks, and files (`📨 IPC`).
-  - File send path and existence check (`📎 FILE`).
-  - Output size in chars before emit (`📤 OUTPUT`).
-  - Exception type and message with full traceback to stderr (`❌ ERROR`).
-  - Completion with success flag (`🏁 DONE`).
-- **Noisy SDK log suppression**: `httpx`, `httpcore`, `google`, and `urllib3` loggers clamped to WARNING level.
-- **Host stderr elevation**: `host/container_runner.py` `_stream_stderr()` now promotes emoji-tagged agent log lines from DEBUG to INFO so they appear in production logs without `--debug`.
+### 新增
+- **全面的容器 Agent 日誌**：在 `container/agent-runner/agent.py` 中加入帶毫秒時間戳的 `_log(tag, msg)` 輔助函式，用於 agent 生命週期中的結構化 stderr 日誌。
+  - 啟動：在容器啟動時記錄進程 ID（`🚀 START`）。
+  - 輸入解析：JID、群組資料夾和訊息數（`📥 INPUT`）。
+  - 最後一條訊息預覽，便於快速除錯（`💬 MSG`）。
+  - 在第一次 LLM 呼叫前選擇模型/提供商（`🤖 MODEL`）。
+  - 每輪 LLM 呼叫和帶停止原因的回應（`🧠 LLM →/←`）。
+  - 帶名稱和截斷 args 的工具分發（`🔧 TOOL`）。
+  - 工具結果預覽（`🔧 RESULT`）。
+  - 訊息、任務和文件的 IPC 文件寫入（`📨 IPC`）。
+  - 文件發送路徑和存在檢查（`📎 FILE`）。
+  - 發出前的輸出大小（字元數）（`📤 OUTPUT`）。
+  - 異常類型和帶完整堆疊追蹤的訊息至 stderr（`❌ ERROR`）。
+  - 帶成功標誌的完成（`🏁 DONE`）。
+- **嘈雜 SDK 日誌抑制**：`httpx`、`httpcore`、`google` 和 `urllib3` 日誌器鉗制至 WARNING 級別。
+- **主機 stderr 提升**：`host/container_runner.py` `_stream_stderr()` 現在將帶 emoji 標記的 agent 日誌行從 DEBUG 提升至 INFO，使其在不使用 `--debug` 的情況下也出現在生產日誌中。
 
 ## [1.10.1] - 2026-03-11
 
-### Fixed
-- **Telegram Channel**: Fixed critical bug in `send_file()` where binary files (e.g., `.pptx`, `.pdf`, `.jpg`) would fail to send due to incorrect encoding handling (`cp950 codec can't decode` error).
-  - Changed file reading to explicitly use binary mode (`rb`) and read entire content before sending.
-  - Now uses `telegram.InputFile` to ensure binary data is properly transmitted.
-  - Added MIME type detection with fallback to `application/octet-stream`.
-  - Set `disable_content_type_detection=True` to prevent Telegram from re-encoding files.
-  - Improved error logging for file sending failures.
+### 修復
+- **Telegram 頻道**：修復 `send_file()` 中的嚴重 bug，二進位文件（例如 `.pptx`、`.pdf`、`.jpg`）因錯誤的編碼處理（`cp950 codec can't decode` 錯誤）而無法發送。
+  - 更改文件讀取為明確使用二進位模式（`rb`）並在發送前讀取整個內容。
+  - 現在使用 `telegram.InputFile` 以確保二進位資料正確傳輸。
+  - 加入 MIME 類型偵測，後備為 `application/octet-stream`。
+  - 設定 `disable_content_type_detection=True` 以防止 Telegram 重新編碼文件。
+  - 改進文件發送失敗的錯誤日誌。
 
 ## [1.10.0] - 2026-03-10
 
-### Added
-- **Evolution Engine**: Full genome evolution with formality, technical_depth, and responsiveness genes.
-- **Health Monitor**: Real-time system health tracking with automatic alerts.
-- **DevEngine**: 7-stage automated development pipeline (Analyze → Design → Implement → Test → Review → Document → Deploy).
-- **Web Dashboard**: 7-tab monitoring interface with Subagent hierarchy visualization.
-- **Superpowers Integration**: 12 workflow skill packages from Superpowers methodology.
+### 新增
+- **進化引擎**：帶有 formality、technical_depth 和 responsiveness 基因的完整基因組進化。
+- **健康監控器**：帶自動警報的實時系統健康追蹤。
+- **DevEngine**：7 階段自動化開發管線（分析 → 設計 → 實作 → 測試 → 審查 → 文件 → 部署）。
+- **Web Dashboard**：帶子 Agent 層次視覺化的 7 頁籤監控介面。
+- **Superpowers 整合**：來自 Superpowers 方法論的 12 個工作流程技能套件。
 
-### Changed
-- Replaced `threading.Lock` with `asyncio.Lock` for better async compatibility.
-- GroupQueue now serializes container execution per group.
-- WebPortal session timeout reduced to 1 hour.
+### 變更
+- 將 `threading.Lock` 替換為 `asyncio.Lock` 以提升非同步相容性。
+- GroupQueue 現在按群組序列化容器執行。
+- WebPortal session 超時縮短至 1 小時。
 
-### Fixed
-- `_stop_container` now properly waits for `proc.wait()` to complete.
-- `/api/env` now uses key whitelist for security.
-- DevEngine JID fallback now provides clear error messages.
-- macOS compatibility fixes for `.env` file handling.
+### 修復
+- `_stop_container` 現在正確等待 `proc.wait()` 完成。
+- `/api/env` 現在使用金鑰白名單以確保安全。
+- DevEngine JID 後備現在提供清晰的錯誤訊息。
+- macOS 相容性修復，針對 `.env` 文件處理。
 
 ## [1.9.0] - 2026-02-15
 
-### Added
-- **Immune System Enhancement**: 22 injection pattern detections.
-- **Adaptive Evolution**: Epigenetic adaptation based on system load and time of day.
-- **Evolution Log**: Complete history of genome changes in `evolution_log` table.
+### 新增
+- **免疫系統增強**：22 個注入模式偵測。
+- **適應性進化**：基於系統負載和時段的表觀遺傳適應。
+- **進化日誌**：`evolution_log` 表中基因組變更的完整歷史。
 
-### Changed
-- Improved container isolation and security.
-- Enhanced error reporting in dashboard.
+### 變更
+- 改進容器隔離和安全性。
+- 增強 dashboard 中的錯誤報告。
 
 ## [1.8.0] - 2026-02-01
 
-### Added
-- **Skills Engine**: Plugin system for adding new capabilities.
-- **WhatsApp Support**: Optional skill for WhatsApp integration.
-- **Multi-model Support**: Gemini, OpenAI-compatible, and Claude.
+### 新增
+- **技能引擎**：用於新增功能的插件系統。
+- **WhatsApp 支援**：用於 WhatsApp 整合的可選技能。
+- **多模型支援**：Gemini、OpenAI 相容和 Claude。
 
-### Changed
-- Refactored channel architecture for better modularity.
+### 變更
+- 重構頻道架構以提升模組化。
 
 ---
 
-## Version History Summary
+## 版本歷史摘要
 
-| Version | Date | Key Changes |
+| 版本 | 日期 | 主要變更 |
 |---------|------|-------------|
-| 1.10.23 | 2026-03-12 | Router fail notification (#86), Discord timeout guard (#87), WhatsApp LRU wamid dict (#88), fitness score fix (#89), webportal deadlock fix (#90), Telegram upload timeout env var (#91), path traversal guard (#92), immune empty JID guard (#93) |
-| 1.10.22 | 2026-03-12 | WhatsApp send_typing wamid fix, send_file deleteAfterSend, multi-key rotation (#6), close #5 |
-| 1.10.1 | 2026-03-11 | Fixed Telegram binary file sending bug |
-| 1.10.0 | 2026-03-10 | Full evolution engine, DevEngine, Health Monitor |
-| 1.9.0 | 2026-02-15 | Enhanced immune system, adaptive evolution |
-| 1.8.0 | 2026-02-01 | Skills engine, WhatsApp support |
+| 1.10.23 | 2026-03-12 | 路由器失敗通知（#86）、Discord 超時守衛（#87）、WhatsApp LRU wamid 字典（#88）、適應度分數修復（#89）、webportal 死鎖修復（#90）、Telegram 上傳超時環境變數（#91）、路徑穿越守衛（#92）、免疫空 JID 守衛（#93） |
+| 1.10.22 | 2026-03-12 | WhatsApp send_typing wamid 修復、send_file deleteAfterSend、多金鑰輪換（#6）、關閉 #5 |
+| 1.10.1 | 2026-03-11 | 修復 Telegram 二進位文件發送 bug |
+| 1.10.0 | 2026-03-10 | 完整進化引擎、DevEngine、健康監控器 |
+| 1.9.0 | 2026-02-15 | 增強免疫系統、適應性進化 |
+| 1.8.0 | 2026-02-01 | 技能引擎、WhatsApp 支援 |

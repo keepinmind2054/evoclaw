@@ -1,49 +1,49 @@
-# EvoClaw Debug Checklist
+# EvoClaw 除錯檢查清單
 
-## Known Issues (2026-02-08)
+## 已知問題（2026-02-08）
 
-### 1. [FIXED] Resume branches from stale tree position
-When agent teams spawns subagent CLI processes, they write to the same session JSONL. On subsequent `query()` resumes, the CLI reads the JSONL but may pick a stale branch tip (from before the subagent activity), causing the agent's response to land on a branch the host never receives a `result` for. **Fix**: pass `resumeSessionAt` with the last assistant message UUID to explicitly anchor each resume.
+### 1. [已修復] 從過時的樹狀結構位置繼續執行分支
+當 agent 團隊生成子 agent CLI 程序時，它們會寫入同一個 session JSONL 檔案。在後續的 `query()` 繼續執行時，CLI 會讀取 JSONL，但可能選取過時的分支末端（即子 agent 活動之前的狀態），導致 agent 的回應落在主機從未收到 `result` 的分支上。**修復方式**：傳入 `resumeSessionAt` 並附上最後一條助手訊息的 UUID，以明確錨定每次繼續執行的位置。
 
-### 2. IDLE_TIMEOUT == CONTAINER_TIMEOUT (both 30 min)
-Both timers fire at the same time, so containers always exit via hard SIGKILL (code 137) instead of graceful `_close` sentinel shutdown. The idle timeout should be shorter (e.g., 5 min) so containers wind down between messages, while container timeout stays at 30 min as a safety net for stuck agents.
+### 2. IDLE_TIMEOUT == CONTAINER_TIMEOUT（兩者皆為 30 分鐘）
+兩個計時器同時觸發，因此容器總是透過強制 SIGKILL（代碼 137）退出，而非優雅的 `_close` sentinel 關閉。閒置逾時應設定得更短（例如 5 分鐘），讓容器在訊息之間自行關閉，而容器逾時則維持 30 分鐘，作為卡住的 agent 的安全保護。
 
-### 3. Cursor advanced before agent succeeds
-`processGroupMessages` advances `lastAgentTimestamp` before the agent runs. If the container times out, retries find no messages (cursor already past them). Messages are permanently lost on timeout.
+### 3. 游標在 agent 成功前就已推進
+`processGroupMessages` 在 agent 執行前就推進 `lastAgentTimestamp`。若容器逾時，重試時會找不到任何訊息（游標已超過它們）。訊息在逾時後會永久遺失。
 
-## Quick Status Check
+## 快速狀態檢查
 
 ```bash
-# 1. Is the service running?
+# 1. 服務是否正在執行？
 launchctl list | grep evoclaw
-# Expected: PID  0  com.evoclaw (PID = running, "-" = not running, non-zero exit = crashed)
+# 預期輸出：PID  0  com.evoclaw（PID = 執行中，"-" = 未執行，非零退出碼 = 已崩潰）
 
-# 2. Any running containers?
+# 2. 是否有正在執行的容器？
 container ls --format '{{.Names}} {{.Status}}' 2>/dev/null | grep evoclaw
 
-# 3. Any stopped/orphaned containers?
+# 3. 是否有已停止或孤立的容器？
 container ls -a --format '{{.Names}} {{.Status}}' 2>/dev/null | grep evoclaw
 
-# 4. Recent errors in service log?
+# 4. 服務日誌中是否有近期錯誤？
 grep -E 'ERROR|WARN' logs/evoclaw.log | tail -20
 
-# 5. Is WhatsApp connected? (look for last connection event)
+# 5. WhatsApp 是否已連線？（尋找最後一次連線事件）
 grep -E 'Connected to WhatsApp|Connection closed|connection.*close' logs/evoclaw.log | tail -5
 
-# 6. Are groups loaded?
+# 6. 群組是否已載入？
 grep 'groupCount' logs/evoclaw.log | tail -3
 ```
 
-## Session Transcript Branching
+## Session 記錄分支
 
 ```bash
-# Check for concurrent CLI processes in session debug logs
+# 在 session 除錯日誌中確認是否有並行的 CLI 程序
 ls -la data/sessions/<group>/.claude/debug/
 
-# Count unique SDK processes that handled messages
-# Each .txt file = one CLI subprocess. Multiple = concurrent queries.
+# 計算處理訊息的唯一 SDK 程序數量
+# 每個 .txt 檔案 = 一個 CLI 子程序。多個檔案 = 並行查詢。
 
-# Check parentUuid branching in transcript
+# 在記錄中確認 parentUuid 分支情況
 python3 -c "
 import json, sys
 lines = open('data/sessions/<group>/.claude/projects/-workspace-group/<session>.jsonl').read().strip().split('\n')
@@ -58,86 +58,86 @@ for i, line in enumerate(lines):
 "
 ```
 
-## Container Timeout Investigation
+## 容器逾時調查
 
 ```bash
-# Check for recent timeouts
+# 確認近期是否有逾時
 grep -E 'Container timeout|timed out' logs/evoclaw.log | tail -10
 
-# Check container log files for the timed-out container
+# 確認逾時容器的日誌檔案
 ls -lt groups/*/logs/container-*.log | head -10
 
-# Read the most recent container log (replace path)
+# 讀取最新的容器日誌（替換路徑）
 cat groups/<group>/logs/container-<timestamp>.log
 
-# Check if retries were scheduled and what happened
+# 確認是否已排定重試，以及後續結果
 grep -E 'Scheduling retry|retry|Max retries' logs/evoclaw.log | tail -10
 ```
 
-## Agent Not Responding
+## Agent 未回應
 
 ```bash
-# Check if messages are being received from WhatsApp
+# 確認是否有收到來自 WhatsApp 的訊息
 grep 'New messages' logs/evoclaw.log | tail -10
 
-# Check if messages are being processed (container spawned)
+# 確認訊息是否正在被處理（容器已生成）
 grep -E 'Processing messages|Spawning container' logs/evoclaw.log | tail -10
 
-# Check if messages are being piped to active container
+# 確認訊息是否正在被傳送至活躍容器
 grep -E 'Piped messages|sendMessage' logs/evoclaw.log | tail -10
 
-# Check the queue state — any active containers?
+# 確認佇列狀態 — 是否有活躍容器？
 grep -E 'Starting container|Container active|concurrency limit' logs/evoclaw.log | tail -10
 
-# Check lastAgentTimestamp vs latest message timestamp
+# 比對 lastAgentTimestamp 與最新訊息時間戳記
 sqlite3 store/messages.db "SELECT chat_jid, MAX(timestamp) as latest FROM messages GROUP BY chat_jid ORDER BY latest DESC LIMIT 5;"
 ```
 
-## Container Mount Issues
+## 容器掛載問題
 
 ```bash
-# Check mount validation logs (shows on container spawn)
+# 確認掛載驗證日誌（於容器生成時顯示）
 grep -E 'Mount validated|Mount.*REJECTED|mount' logs/evoclaw.log | tail -10
 
-# Verify the mount allowlist is readable
+# 確認掛載允許清單是否可讀取
 cat ~/.config/evoclaw/mount-allowlist.json
 
-# Check group's container_config in DB
+# 確認資料庫中群組的 container_config
 sqlite3 store/messages.db "SELECT name, container_config FROM registered_groups;"
 
-# Test-run a container to check mounts (dry run)
-# Replace <group-folder> with the group's folder name
+# 測試執行容器以確認掛載（乾跑）
+# 將 <group-folder> 替換為群組的資料夾名稱
 container run -i --rm --entrypoint ls evoclaw-agent:latest /workspace/extra/
 ```
 
-## WhatsApp Auth Issues
+## WhatsApp 驗證問題
 
 ```bash
-# Check if QR code was requested (means auth expired)
+# 確認是否有 QR code 請求（表示驗證已過期）
 grep 'QR\|authentication required\|qr' logs/evoclaw.log | tail -5
 
-# Check auth files exist
+# 確認驗證檔案是否存在
 ls -la store/auth/
 
-# Re-authenticate if needed
+# 如有需要，重新進行驗證
 npm run auth
 ```
 
-## Service Management
+## 服務管理
 
 ```bash
-# Restart the service
+# 重新啟動服務
 launchctl kickstart -k gui/$(id -u)/com.evoclaw
 
-# View live logs
+# 查看即時日誌
 tail -f logs/evoclaw.log
 
-# Stop the service (careful — running containers are detached, not killed)
+# 停止服務（注意 — 正在執行的容器會被分離，而非終止）
 launchctl bootout gui/$(id -u)/com.evoclaw
 
-# Start the service
+# 啟動服務
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.evoclaw.plist
 
-# Rebuild after code changes
+# 在程式碼變更後重新建置
 npm run build && launchctl kickstart -k gui/$(id -u)/com.evoclaw
 ```

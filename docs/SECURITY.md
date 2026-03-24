@@ -1,123 +1,123 @@
-# EvoClaw Security Model
+# EvoClaw 安全模型
 
-## Trust Model
+## 信任模型
 
-| Entity | Trust Level | Rationale |
-|--------|-------------|-----------|
-| Main group | Trusted | Private self-chat, admin control |
-| Non-main groups | Untrusted | Other users may be malicious |
-| Container agents | Sandboxed | Isolated execution environment |
-| WhatsApp messages | User input | Potential prompt injection |
+| 實體 | 信任等級 | 理由 |
+|------|----------|------|
+| 主群組 | 受信任 | 私人自我對話，管理員控制 |
+| 非主群組 | 不受信任 | 其他使用者可能具有惡意 |
+| 容器 agent | 沙箱隔離 | 隔離的執行環境 |
+| WhatsApp 訊息 | 使用者輸入 | 潛在的提示注入風險 |
 
-## Security Boundaries
+## 安全邊界
 
-### 1. Container Isolation (Primary Boundary)
+### 1. 容器隔離（主要邊界）
 
-Agents execute in containers (lightweight Linux VMs), providing:
-- **Process isolation** - Container processes cannot affect the host
-- **Filesystem isolation** - Only explicitly mounted directories are visible
-- **Non-root execution** - Runs as unprivileged `node` user (uid 1000)
-- **Ephemeral containers** - Fresh environment per invocation (`--rm`)
+Agent 在容器（輕量 Linux VM）中執行，提供：
+- **程序隔離** - 容器程序無法影響主機
+- **檔案系統隔離** - 只有明確掛載的目錄才可見
+- **非 root 執行** - 以無特權的 `node` 使用者身份執行（uid 1000）
+- **短暫容器** - 每次調用皆為全新環境（`--rm`）
 
-This is the primary security boundary. Rather than relying on application-level permission checks, the attack surface is limited by what's mounted.
+這是主要的安全邊界。其設計理念是透過限制掛載內容來縮小攻擊面，而非依賴應用程式層級的權限檢查。
 
-### 2. Mount Security
+### 2. 掛載安全性
 
-**External Allowlist** - Mount permissions stored at `~/.config/evoclaw/mount-allowlist.json`, which is:
-- Outside project root
-- Never mounted into containers
-- Cannot be modified by agents
+**外部允許清單** - 掛載權限儲存於 `~/.config/evoclaw/mount-allowlist.json`，其特性為：
+- 位於專案根目錄之外
+- 永遠不會掛載至容器中
+- Agent 無法修改
 
-**Default Blocked Patterns:**
+**預設封鎖的路徑模式：**
 ```
 .ssh, .gnupg, .aws, .azure, .gcloud, .kube, .docker,
 credentials, .env, .netrc, .npmrc, id_rsa, id_ed25519,
 private_key, .secret
 ```
 
-**Protections:**
-- Symlink resolution before validation (prevents traversal attacks)
-- Container path validation (rejects `..` and absolute paths)
-- `nonMainReadOnly` option forces read-only for non-main groups
+**保護機制：**
+- 驗證前進行符號連結解析（防止路徑遍歷攻擊）
+- 容器路徑驗證（拒絕 `..` 及絕對路徑）
+- `nonMainReadOnly` 選項強制非主群組以唯讀方式掛載
 
-**Read-Only Project Root:**
+**唯讀專案根目錄：**
 
-The main group's project root is mounted read-only. Writable paths the agent needs (group folder, IPC, `.claude/`) are mounted separately. This prevents the agent from modifying host application code (`src/`, `dist/`, `package.json`, etc.) which would bypass the sandbox entirely on next restart.
+主群組的專案根目錄以唯讀方式掛載。Agent 所需的可寫路徑（群組資料夾、IPC、`.claude/`）會分開掛載。這可防止 agent 修改主機應用程式的程式碼（`src/`、`dist/`、`package.json` 等），否則在下次重新啟動時將完全繞過沙箱。
 
-### 3. Session Isolation
+### 3. Session 隔離
 
-Each group has isolated Claude sessions at `data/sessions/{group}/.claude/`:
-- Groups cannot see other groups' conversation history
-- Session data includes full message history and file contents read
-- Prevents cross-group information disclosure
+每個群組在 `data/sessions/{group}/.claude/` 擁有獨立的 Claude session：
+- 群組之間無法看到彼此的對話歷史記錄
+- Session 資料包含完整的訊息歷史記錄及已讀取的檔案內容
+- 防止跨群組的資訊洩露
 
-### 4. IPC Authorization
+### 4. IPC 授權
 
-Messages and task operations are verified against group identity:
+訊息與任務操作會依據群組身份進行驗證：
 
-| Operation | Main Group | Non-Main Group |
-|-----------|------------|----------------|
-| Send message to own chat | ✓ | ✓ |
-| Send message to other chats | ✓ | ✗ |
-| Schedule task for self | ✓ | ✓ |
-| Schedule task for others | ✓ | ✗ |
-| View all tasks | ✓ | Own only |
-| Manage other groups | ✓ | ✗ |
+| 操作 | 主群組 | 非主群組 |
+|------|--------|----------|
+| 傳送訊息至自己的對話 | ✓ | ✓ |
+| 傳送訊息至其他對話 | ✓ | ✗ |
+| 為自己排定任務 | ✓ | ✓ |
+| 為其他人排定任務 | ✓ | ✗ |
+| 查看所有任務 | ✓ | 僅限自己的 |
+| 管理其他群組 | ✓ | ✗ |
 
-### 5. Credential Handling
+### 5. 憑證處理
 
-**Mounted Credentials:**
-- Claude auth tokens (filtered from `.env`, read-only)
+**已掛載的憑證：**
+- Claude 驗證 token（從 `.env` 過濾，唯讀）
 
-**NOT Mounted:**
-- WhatsApp session (`store/auth/`) - host only
-- Mount allowlist - external, never mounted
-- Any credentials matching blocked patterns
+**未掛載的項目：**
+- WhatsApp session（`store/auth/`）- 僅限主機
+- 掛載允許清單 - 外部存放，永不掛載
+- 任何符合封鎖模式的憑證
 
-**Credential Filtering:**
-Only these environment variables are exposed to containers:
+**憑證過濾：**
+僅有以下環境變數會暴露給容器：
 ```typescript
 const allowedVars = ['GOOGLE_API_KEY', 'GOOGLE_API_KEY'];
 ```
 
-> **Note:** Anthropic credentials are mounted so that Claude Code can authenticate when the agent runs. However, this means the agent itself can discover these credentials via Bash or file operations. Ideally, Claude Code would authenticate without exposing credentials to the agent's execution environment, but I couldn't figure this out. **PRs welcome** if you have ideas for credential isolation.
+> **注意：** Anthropic 憑證已掛載，以便 Claude Code 在 agent 執行時能夠進行驗證。然而，這意味著 agent 本身可以透過 Bash 或檔案操作發現這些憑證。理想情況下，Claude Code 應在不將憑證暴露給 agent 執行環境的前提下完成驗證，但目前尚未找到解決方案。**歡迎提交 PR** 如果你有憑證隔離的想法。
 
-## Privilege Comparison
+## 權限比較
 
-| Capability | Main Group | Non-Main Group |
-|------------|------------|----------------|
-| Project root access | `/workspace/project` (ro) | None |
-| Group folder | `/workspace/group` (rw) | `/workspace/group` (rw) |
-| Global memory | Implicit via project | `/workspace/global` (ro) |
-| Additional mounts | Configurable | Read-only unless allowed |
-| Network access | Unrestricted | Unrestricted |
-| MCP tools | All | All |
+| 能力 | 主群組 | 非主群組 |
+|------|--------|----------|
+| 專案根目錄存取 | `/workspace/project`（唯讀） | 無 |
+| 群組資料夾 | `/workspace/group`（可讀寫） | `/workspace/group`（可讀寫） |
+| 全域記憶體 | 透過專案隱式存取 | `/workspace/global`（唯讀） |
+| 額外掛載 | 可設定 | 唯讀，除非另行允許 |
+| 網路存取 | 不受限制 | 不受限制 |
+| MCP 工具 | 全部 | 全部 |
 
-## Security Architecture Diagram
+## 安全架構圖
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                        UNTRUSTED ZONE                             │
-│  WhatsApp Messages (potentially malicious)                        │
+│                        不受信任區域                               │
+│  WhatsApp 訊息（可能具有惡意）                                    │
 └────────────────────────────────┬─────────────────────────────────┘
                                  │
-                                 ▼ Trigger check, input escaping
+                                 ▼ 觸發條件檢查、輸入轉義
 ┌──────────────────────────────────────────────────────────────────┐
-│                     HOST PROCESS (TRUSTED)                        │
-│  • Message routing                                                │
-│  • IPC authorization                                              │
-│  • Mount validation (external allowlist)                          │
-│  • Container lifecycle                                            │
-│  • Credential filtering                                           │
+│                     主機程序（受信任）                            │
+│  • 訊息路由                                                       │
+│  • IPC 授權                                                       │
+│  • 掛載驗證（外部允許清單）                                       │
+│  • 容器生命週期管理                                               │
+│  • 憑證過濾                                                       │
 └────────────────────────────────┬─────────────────────────────────┘
                                  │
-                                 ▼ Explicit mounts only
+                                 ▼ 僅限明確掛載
 ┌──────────────────────────────────────────────────────────────────┐
-│                CONTAINER (ISOLATED/SANDBOXED)                     │
-│  • Agent execution                                                │
-│  • Bash commands (sandboxed)                                      │
-│  • File operations (limited to mounts)                            │
-│  • Network access (unrestricted)                                  │
-│  • Cannot modify security config                                  │
+│                容器（隔離/沙箱）                                  │
+│  • Agent 執行                                                     │
+│  • Bash 指令（沙箱隔離）                                          │
+│  • 檔案操作（僅限掛載範圍）                                       │
+│  • 網路存取（不受限制）                                           │
+│  • 無法修改安全設定                                               │
 └──────────────────────────────────────────────────────────────────┘
 ```

@@ -1,27 +1,27 @@
-# EvoClaw Specification
+# EvoClaw 規格文件
 
-A personal Claude assistant with multi-channel support, persistent memory per conversation, scheduled tasks, and container-isolated agent execution.
-
----
-
-## Table of Contents
-
-1. [Architecture](#architecture)
-2. [Architecture: Channel System](#architecture-channel-system)
-3. [Folder Structure](#folder-structure)
-4. [Configuration](#configuration)
-5. [Memory System](#memory-system)
-6. [Session Management](#session-management)
-7. [Message Flow](#message-flow)
-8. [Commands](#commands)
-9. [Scheduled Tasks](#scheduled-tasks)
-10. [MCP Servers](#mcp-servers)
-11. [Deployment](#deployment)
-12. [Security Considerations](#security-considerations)
+一個個人 Claude 助理，具備多頻道支援、每次對話的持久記憶、排程任務，以及容器隔離的代理程序執行環境。
 
 ---
 
-## Architecture
+## 目錄
+
+1. [架構](#architecture)
+2. [架構：頻道系統](#architecture-channel-system)
+3. [資料夾結構](#folder-structure)
+4. [設定](#configuration)
+5. [記憶系統](#memory-system)
+6. [會話管理](#session-management)
+7. [訊息流程](#message-flow)
+8. [指令](#commands)
+9. [排程任務](#scheduled-tasks)
+10. [MCP 伺服器](#mcp-servers)
+11. [部署](#deployment)
+12. [安全考量](#security-considerations)
+
+---
+
+## 架構
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -71,27 +71,27 @@ A personal Claude assistant with multi-channel support, persistent memory per co
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
-### Technology Stack
+### 技術堆疊
 
-| Component | Technology | Purpose |
-|-----------|------------|---------|
-| Channel System | Channel registry (`src/channels/registry.ts`) | Channels self-register at startup |
-| Message Storage | SQLite (better-sqlite3) | Store messages for polling |
-| Container Runtime | Containers (Linux VMs) | Isolated environments for agent execution |
-| Agent | @google/genai (0.2.29) | Run Claude with tools and MCP servers |
-| Browser Automation | agent-browser + Chromium | Web interaction and screenshots |
-| Runtime | Node.js 20+ | Host process for routing and scheduling |
-| Web Dashboard | `host/dashboard.py` (Python stdlib) | Dark-theme monitoring dashboard, port 8765 |
-| Web Portal | `host/webportal.py` (Python stdlib) | Browser chat interface, port 8766 |
-| Evolution Logger | `host/evolution/` + `evolution_log` table | Records every evolution event with genome snapshots |
+| 元件 | 技術 | 用途 |
+|------|------|------|
+| 頻道系統 | 頻道登錄表（`src/channels/registry.ts`） | 頻道在啟動時自我註冊 |
+| 訊息儲存 | SQLite (better-sqlite3) | 儲存訊息以供輪詢 |
+| 容器執行環境 | 容器（Linux VMs） | 代理程序執行的隔離環境 |
+| 代理程序 | @google/genai (0.2.29) | 帶工具和 MCP 伺服器執行 Claude |
+| 瀏覽器自動化 | agent-browser + Chromium | 網頁互動與截圖 |
+| 執行環境 | Node.js 20+ | 用於路由和排程的主機程序 |
+| 網頁儀表板 | `host/dashboard.py`（Python 標準函式庫） | 深色主題監控儀表板，連接埠 8765 |
+| 網頁入口 | `host/webportal.py`（Python 標準函式庫） | 瀏覽器聊天介面，連接埠 8766 |
+| 演化記錄器 | `host/evolution/` + `evolution_log` 資料表 | 記錄每個演化事件及基因組快照 |
 
 ---
 
-## Architecture: Channel System
+## 架構：頻道系統
 
-The core ships with no channels built in — each channel (WhatsApp, Telegram, Slack, Discord, Gmail) is installed as a [Claude Code skill](https://code.claude.com/docs/en/skills) that adds the channel code to your fork. Channels self-register at startup; installed channels with missing credentials emit a WARN log and are skipped.
+核心不內建任何頻道——每個頻道（WhatsApp、Telegram、Slack、Discord、Gmail）都作為 [Claude Code skill](https://code.claude.com/docs/en/skills) 安裝，將頻道程式碼添加到你的 fork 中。頻道在啟動時自我註冊；已安裝但缺少憑證的頻道會輸出 WARN 日誌並被跳過。
 
-### System Diagram
+### 系統圖
 
 ```mermaid
 graph LR
@@ -135,9 +135,9 @@ graph LR
     style New stroke-dasharray: 5 5,stroke-width:2px
 ```
 
-### Channel Registry
+### 頻道登錄表
 
-The channel system is built on a factory registry in `src/channels/registry.ts`:
+頻道系統建立在 `src/channels/registry.ts` 中的工廠登錄表上：
 
 ```typescript
 export type ChannelFactory = (opts: ChannelOpts) => Channel | null;
@@ -157,11 +157,11 @@ export function getRegisteredChannelNames(): string[] {
 }
 ```
 
-Each factory receives `ChannelOpts` (callbacks for `onMessage`, `onChatMetadata`, and `registeredGroups`) and returns either a `Channel` instance or `null` if that channel's credentials are not configured.
+每個工廠接收 `ChannelOpts`（包含 `onMessage`、`onChatMetadata` 和 `registeredGroups` 的回呼函式），並傳回 `Channel` 實例，若該頻道的憑證未設定則傳回 `null`。
 
-### Channel Interface
+### 頻道介面
 
-Every channel implements this interface (defined in `src/types.ts`):
+每個頻道都實作此介面（定義於 `src/types.ts`）：
 
 ```typescript
 interface Channel {
@@ -176,11 +176,11 @@ interface Channel {
 }
 ```
 
-### Self-Registration Pattern
+### 自我註冊模式
 
-Channels self-register using a barrel-import pattern:
+頻道使用桶狀匯入模式進行自我註冊：
 
-1. Each channel skill adds a file to `src/channels/` (e.g. `whatsapp.ts`, `telegram.ts`) that calls `registerChannel()` at module load time:
+1. 每個頻道技能在 `src/channels/` 中添加一個檔案（例如 `whatsapp.ts`、`telegram.ts`），在模組載入時呼叫 `registerChannel()`：
 
    ```typescript
    // src/channels/whatsapp.ts
@@ -195,7 +195,7 @@ Channels self-register using a barrel-import pattern:
    });
    ```
 
-2. The barrel file `src/channels/index.ts` imports all channel modules, triggering registration:
+2. 桶狀檔案 `src/channels/index.ts` 匯入所有頻道模組，觸發註冊：
 
    ```typescript
    import './whatsapp.js';
@@ -203,7 +203,7 @@ Channels self-register using a barrel-import pattern:
    // ... each skill adds its import here
    ```
 
-3. At startup, the orchestrator (`src/index.ts`) loops through registered channels and connects whichever ones return a valid instance:
+3. 啟動時，協調器（`src/index.ts`）遍歷已註冊的頻道，連接那些傳回有效實例的頻道：
 
    ```typescript
    for (const name of getRegisteredChannelNames()) {
@@ -216,120 +216,120 @@ Channels self-register using a barrel-import pattern:
    }
    ```
 
-### Key Files
+### 關鍵檔案
 
-| File | Purpose |
-|------|---------|
-| `src/channels/registry.ts` | Channel factory registry |
-| `src/channels/index.ts` | Barrel imports that trigger channel self-registration |
-| `src/types.ts` | `Channel` interface, `ChannelOpts`, message types |
-| `src/index.ts` | Orchestrator — instantiates channels, runs message loop |
-| `src/router.ts` | Finds the owning channel for a JID, formats messages |
+| 檔案 | 用途 |
+|------|------|
+| `src/channels/registry.ts` | 頻道工廠登錄表 |
+| `src/channels/index.ts` | 觸發頻道自我註冊的桶狀匯入 |
+| `src/types.ts` | `Channel` 介面、`ChannelOpts`、訊息類型 |
+| `src/index.ts` | 協調器——實例化頻道、執行訊息迴圈 |
+| `src/router.ts` | 尋找 JID 的所屬頻道，格式化訊息 |
 
-### Adding a New Channel
+### 添加新頻道
 
-To add a new channel, contribute a skill to `.claude/skills/add-<name>/` that:
+要添加新頻道，請在 `.claude/skills/add-<name>/` 中貢獻一個技能，內容包括：
 
-1. Adds a `src/channels/<name>.ts` file implementing the `Channel` interface
-2. Calls `registerChannel(name, factory)` at module load
-3. Returns `null` from the factory if credentials are missing
-4. Adds an import line to `src/channels/index.ts`
+1. 添加實作 `Channel` 介面的 `src/channels/<name>.ts` 檔案
+2. 在模組載入時呼叫 `registerChannel(name, factory)`
+3. 若憑證缺失，從工廠傳回 `null`
+4. 在 `src/channels/index.ts` 中添加匯入行
 
-See existing skills (`/add-whatsapp`, `/add-telegram`, `/add-slack`, `/add-discord`, `/add-gmail`) for the pattern.
+請參考現有技能（`/add-whatsapp`、`/add-telegram`、`/add-slack`、`/add-discord`、`/add-gmail`）了解模式。
 
 ---
 
-## Folder Structure
+## 資料夾結構
 
 ```
 evoclaw/
-├── CLAUDE.md                      # Project context for Claude Code
+├── CLAUDE.md                      # Claude Code 的專案上下文
 ├── docs/
-│   ├── SPEC.md                    # This specification document
-│   ├── REQUIREMENTS.md            # Architecture decisions
-│   └── SECURITY.md                # Security model
-├── README.md                      # User documentation
-├── package.json                   # Node.js dependencies
-├── tsconfig.json                  # TypeScript configuration
-├── .mcp.json                      # MCP server configuration (reference)
+│   ├── SPEC.md                    # 本規格文件
+│   ├── REQUIREMENTS.md            # 架構決策
+│   └── SECURITY.md                # 安全模型
+├── README.md                      # 使用者文件
+├── package.json                   # Node.js 相依套件
+├── tsconfig.json                  # TypeScript 設定
+├── .mcp.json                      # MCP 伺服器設定（參考）
 ├── .gitignore
 │
 ├── src/
-│   ├── index.ts                   # Orchestrator: state, message loop, agent invocation
+│   ├── index.ts                   # 協調器：狀態、訊息迴圈、代理程序調用
 │   ├── channels/
-│   │   ├── registry.ts            # Channel factory registry
-│   │   └── index.ts               # Barrel imports for channel self-registration
-│   ├── ipc.ts                     # IPC watcher and task processing
-│   ├── router.ts                  # Message formatting and outbound routing
-│   ├── config.ts                  # Configuration constants
-│   ├── types.ts                   # TypeScript interfaces (includes Channel)
-│   ├── logger.ts                  # Pino logger setup
-│   ├── db.ts                      # SQLite database initialization and queries
-│   ├── group-queue.ts             # Per-group queue with global concurrency limit
-│   ├── mount-security.ts          # Mount allowlist validation for containers
-│   ├── whatsapp-auth.ts           # Standalone WhatsApp authentication
-│   ├── task-scheduler.ts          # Runs scheduled tasks when due
-│   └── container-runner.ts        # Spawns agents in containers
+│   │   ├── registry.ts            # 頻道工廠登錄表
+│   │   └── index.ts               # 頻道自我註冊的桶狀匯入
+│   ├── ipc.ts                     # IPC 監看器與任務處理
+│   ├── router.ts                  # 訊息格式化與對外路由
+│   ├── config.ts                  # 設定常數
+│   ├── types.ts                   # TypeScript 介面（包含 Channel）
+│   ├── logger.ts                  # Pino 記錄器設定
+│   ├── db.ts                      # SQLite 資料庫初始化與查詢
+│   ├── group-queue.ts             # 具全域並發限制的每群組佇列
+│   ├── mount-security.ts          # 容器掛載允許清單驗證
+│   ├── whatsapp-auth.ts           # 獨立 WhatsApp 驗證
+│   ├── task-scheduler.ts          # 到期時執行排程任務
+│   └── container-runner.ts        # 在容器中產生代理程序
 │
 ├── container/
-│   ├── Dockerfile                 # Container image (runs as 'node' user, includes Claude Code CLI)
-│   ├── build.sh                   # Build script for container image
-│   ├── agent-runner/              # Code that runs inside the container
+│   ├── Dockerfile                 # 容器映像（以 'node' 使用者執行，包含 Claude Code CLI）
+│   ├── build.sh                   # 容器映像建置腳本
+│   ├── agent-runner/              # 在容器內部執行的程式碼
 │   │   ├── package.json
 │   │   ├── tsconfig.json
 │   │   └── src/
-│   │       ├── index.ts           # Entry point (query loop, IPC polling, session resume)
-│   │       └── ipc-mcp-stdio.ts   # Stdio-based MCP server for host communication
+│   │       ├── index.ts           # 入口點（查詢迴圈、IPC 輪詢、會話恢復）
+│   │       └── ipc-mcp-stdio.ts   # 用於主機通訊的 Stdio 型 MCP 伺服器
 │   └── skills/
-│       └── agent-browser.md       # Browser automation skill
+│       └── agent-browser.md       # 瀏覽器自動化技能
 │
-├── dist/                          # Compiled JavaScript (gitignored)
+├── dist/                          # 編譯後的 JavaScript（已加入 gitignore）
 │
 ├── .claude/
 │   └── skills/
-│       ├── setup/SKILL.md              # /setup - First-time installation
-│       ├── customize/SKILL.md          # /customize - Add capabilities
-│       ├── debug/SKILL.md              # /debug - Container debugging
-│       ├── add-telegram/SKILL.md       # /add-telegram - Telegram channel
-│       ├── add-gmail/SKILL.md          # /add-gmail - Gmail integration
+│       ├── setup/SKILL.md              # /setup - 首次安裝
+│       ├── customize/SKILL.md          # /customize - 添加功能
+│       ├── debug/SKILL.md              # /debug - 容器除錯
+│       ├── add-telegram/SKILL.md       # /add-telegram - Telegram 頻道
+│       ├── add-gmail/SKILL.md          # /add-gmail - Gmail 整合
 │       ├── add-voice-transcription/    # /add-voice-transcription - Whisper
 │       ├── x-integration/SKILL.md      # /x-integration - X/Twitter
-│       ├── convert-to-apple-container/  # /convert-to-apple-container - Apple Container runtime
-│       └── add-parallel/SKILL.md       # /add-parallel - Parallel agents
+│       ├── convert-to-apple-container/  # /convert-to-apple-container - Apple Container 執行環境
+│       └── add-parallel/SKILL.md       # /add-parallel - 並行代理程序
 │
 ├── groups/
-│   ├── CLAUDE.md                  # Global memory (all groups read this)
-│   ├── {channel}_main/             # Main control channel (e.g., whatsapp_main/)
-│   │   ├── CLAUDE.md              # Main channel memory
-│   │   └── logs/                  # Task execution logs
-│   └── {channel}_{group-name}/    # Per-group folders (created on registration)
-│       ├── CLAUDE.md              # Group-specific memory
-│       ├── logs/                  # Task logs for this group
-│       └── *.md                   # Files created by the agent
+│   ├── CLAUDE.md                  # 全域記憶（所有群組讀取此檔）
+│   ├── {channel}_main/             # 主控制頻道（例如 whatsapp_main/）
+│   │   ├── CLAUDE.md              # 主頻道記憶
+│   │   └── logs/                  # 任務執行日誌
+│   └── {channel}_{group-name}/    # 每群組資料夾（在註冊時建立）
+│       ├── CLAUDE.md              # 群組特定記憶
+│       ├── logs/                  # 此群組的任務日誌
+│       └── *.md                   # 代理程序建立的檔案
 │
-├── store/                         # Local data (gitignored)
-│   ├── auth/                      # WhatsApp authentication state
-│   └── messages.db                # SQLite database (messages, chats, scheduled_tasks, task_run_logs, registered_groups, sessions, router_state, evolution_log)
+├── store/                         # 本地資料（已加入 gitignore）
+│   ├── auth/                      # WhatsApp 驗證狀態
+│   └── messages.db                # SQLite 資料庫（messages、chats、scheduled_tasks、task_run_logs、registered_groups、sessions、router_state、evolution_log）
 │
-├── data/                          # Application state (gitignored)
-│   ├── sessions/                  # Per-group session data (.claude/ dirs with JSONL transcripts)
-│   ├── env/env                    # Copy of .env for container mounting
-│   └── ipc/                       # Container IPC (messages/, tasks/)
+├── data/                          # 應用程式狀態（已加入 gitignore）
+│   ├── sessions/                  # 每群組會話資料（帶 JSONL 轉錄的 .claude/ 目錄）
+│   ├── env/env                    # 用於容器掛載的 .env 副本
+│   └── ipc/                       # 容器 IPC（messages/、tasks/）
 │
-├── logs/                          # Runtime logs (gitignored)
-│   ├── evoclaw.log               # Host stdout
-│   └── evoclaw.error.log         # Host stderr
-│   # Note: Per-container logs are in groups/{folder}/logs/container-*.log
+├── logs/                          # 執行期日誌（已加入 gitignore）
+│   ├── evoclaw.log               # 主機 stdout
+│   └── evoclaw.error.log         # 主機 stderr
+│   # 注意：每個容器的日誌位於 groups/{folder}/logs/container-*.log
 │
 └── launchd/
-    └── com.evoclaw.plist         # macOS service configuration
+    └── com.evoclaw.plist         # macOS 服務設定
 ```
 
 ---
 
-## Configuration
+## 設定
 
-Configuration constants are in `src/config.ts`:
+設定常數位於 `src/config.ts`：
 
 ```typescript
 import path from 'path';
@@ -354,11 +354,11 @@ export const MAX_CONCURRENT_CONTAINERS = Math.max(1, parseInt(process.env.MAX_CO
 export const TRIGGER_PATTERN = new RegExp(`^@${ASSISTANT_NAME}\\b`, 'i');
 ```
 
-**Note:** Paths must be absolute for container volume mounts to work correctly.
+**注意：** 路徑必須為絕對路徑，容器磁碟區掛載才能正常運作。
 
-### Container Configuration
+### 容器設定
 
-Groups can have additional directories mounted via `containerConfig` in the SQLite `registered_groups` table (stored as JSON in the `container_config` column). Example registration:
+群組可以透過 SQLite `registered_groups` 資料表中的 `containerConfig`（以 JSON 形式儲存於 `container_config` 欄位）掛載額外的目錄。範例註冊：
 
 ```typescript
 registerGroup("1234567890@g.us", {
@@ -379,153 +379,153 @@ registerGroup("1234567890@g.us", {
 });
 ```
 
-Folder names follow the convention `{channel}_{group-name}` (e.g., `whatsapp_family-chat`, `telegram_dev-team`). The main group has `isMain: true` set during registration.
+資料夾名稱遵循 `{channel}_{group-name}` 的命名慣例（例如 `whatsapp_family-chat`、`telegram_dev-team`）。主群組在註冊時設定 `isMain: true`。
 
-Additional mounts appear at `/workspace/extra/{containerPath}` inside the container.
+額外掛載出現在容器內的 `/workspace/extra/{containerPath}`。
 
-**Mount syntax note:** Read-write mounts use `-v host:container`, but readonly mounts require `--mount "type=bind,source=...,target=...,readonly"` (the `:ro` suffix may not work on all runtimes).
+**掛載語法注意事項：** 讀寫掛載使用 `-v host:container`，但唯讀掛載需要 `--mount "type=bind,source=...,target=...,readonly"`（`:ro` 後綴在所有執行環境上可能無法正常運作）。
 
-### Claude Authentication
+### Claude 驗證
 
-Configure authentication in a `.env` file in the project root. Two options:
+在專案根目錄的 `.env` 檔案中設定驗證。有兩個選項：
 
-**Option 1: Claude Subscription (OAuth token)**
+**選項 1：Claude 訂閱（OAuth 令牌）**
 ```bash
 GOOGLE_API_KEY=sk-ant-oat01-...
 ```
-The token can be extracted from `~/.claude/.credentials.json` if you're logged in to Claude Code.
+如果你已登入 Claude Code，可以從 `~/.claude/.credentials.json` 中提取令牌。
 
-**Option 2: Pay-per-use API Key**
+**選項 2：按用量計費的 API Key**
 ```bash
 GOOGLE_API_KEY=sk-ant-api03-...
 ```
 
-Only the authentication variables (`GOOGLE_API_KEY` and `GOOGLE_API_KEY`) are extracted from `.env` and written to `data/env/env`, then mounted into the container at `/workspace/env-dir/env` and sourced by the entrypoint script. This ensures other environment variables in `.env` are not exposed to the agent. This workaround is needed because some container runtimes lose `-e` environment variables when using `-i` (interactive mode with piped stdin).
+只有驗證變數（`GOOGLE_API_KEY` 和 `GOOGLE_API_KEY`）從 `.env` 中提取並寫入 `data/env/env`，然後掛載至容器的 `/workspace/env-dir/env` 並由入口點腳本載入。這確保 `.env` 中的其他環境變數不會暴露給代理程序。這個變通方案是必要的，因為某些容器執行環境在使用帶有管道 stdin 的 `-i`（互動模式）時會遺失 `-e` 環境變數。
 
-### Changing the Assistant Name
+### 變更助理名稱
 
-Set the `ASSISTANT_NAME` environment variable:
+設定 `ASSISTANT_NAME` 環境變數：
 
 ```bash
 ASSISTANT_NAME=Bot npm start
 ```
 
-Or edit the default in `src/config.ts`. This changes:
-- The trigger pattern (messages must start with `@YourName`)
-- The response prefix (`YourName:` added automatically)
+或在 `src/config.ts` 中編輯預設值。這將變更：
+- 觸發模式（訊息必須以 `@YourName` 開頭）
+- 回應前綴（自動添加 `YourName:`）
 
-### Placeholder Values in launchd
+### launchd 中的佔位符值
 
-Files with `{{PLACEHOLDER}}` values need to be configured:
-- `{{PROJECT_ROOT}}` - Absolute path to your evoclaw installation
-- `{{NODE_PATH}}` - Path to node binary (detected via `which node`)
-- `{{HOME}}` - User's home directory
-
----
-
-## Memory System
-
-EvoClaw uses a hierarchical memory system based on CLAUDE.md files.
-
-### Memory Hierarchy
-
-| Level | Location | Read By | Written By | Purpose |
-|-------|----------|---------|------------|---------|
-| **Global** | `groups/CLAUDE.md` | All groups | Main only | Preferences, facts, context shared across all conversations |
-| **Group** | `groups/{name}/CLAUDE.md` | That group | That group | Group-specific context, conversation memory |
-| **Files** | `groups/{name}/*.md` | That group | That group | Notes, research, documents created during conversation |
-
-### How Memory Works
-
-1. **Agent Context Loading**
-   - Agent runs with `cwd` set to `groups/{group-name}/`
-   - Claude Agent SDK with `settingSources: ['project']` automatically loads:
-     - `../CLAUDE.md` (parent directory = global memory)
-     - `./CLAUDE.md` (current directory = group memory)
-
-2. **Writing Memory**
-   - When user says "remember this", agent writes to `./CLAUDE.md`
-   - When user says "remember this globally" (main channel only), agent writes to `../CLAUDE.md`
-   - Agent can create files like `notes.md`, `research.md` in the group folder
-
-3. **Main Channel Privileges**
-   - Only the "main" group (self-chat) can write to global memory
-   - Main can manage registered groups and schedule tasks for any group
-   - Main can configure additional directory mounts for any group
-   - All groups have Bash access (safe because it runs inside container)
+含有 `{{PLACEHOLDER}}` 值的檔案需要設定：
+- `{{PROJECT_ROOT}}` - 你的 evoclaw 安裝的絕對路徑
+- `{{NODE_PATH}}` - node 執行檔的路徑（透過 `which node` 偵測）
+- `{{HOME}}` - 使用者的家目錄
 
 ---
 
-## Session Management
+## 記憶系統
 
-Sessions enable conversation continuity - Claude remembers what you talked about.
+EvoClaw 使用基於 CLAUDE.md 檔案的層級記憶系統。
 
-### How Sessions Work
+### 記憶層級
 
-1. Each group has a session ID stored in SQLite (`sessions` table, keyed by `group_folder`)
-2. Session ID is passed to Claude Agent SDK's `resume` option
-3. Claude continues the conversation with full context
-4. Session transcripts are stored as JSONL files in `data/sessions/{group}/.claude/`
+| 層級 | 位置 | 讀取者 | 寫入者 | 用途 |
+|------|------|--------|--------|------|
+| **全域** | `groups/CLAUDE.md` | 所有群組 | 僅 Main | 跨所有對話共享的偏好設定、事實、上下文 |
+| **群組** | `groups/{name}/CLAUDE.md` | 該群組 | 該群組 | 群組特定上下文、對話記憶 |
+| **檔案** | `groups/{name}/*.md` | 該群組 | 該群組 | 對話期間建立的筆記、研究、文件 |
+
+### 記憶的運作方式
+
+1. **代理程序上下文載入**
+   - 代理程序以 `cwd` 設定為 `groups/{group-name}/` 執行
+   - 帶有 `settingSources: ['project']` 的 Claude Agent SDK 自動載入：
+     - `../CLAUDE.md`（父目錄 = 全域記憶）
+     - `./CLAUDE.md`（當前目錄 = 群組記憶）
+
+2. **寫入記憶**
+   - 當使用者說「記住這個」時，代理程序寫入 `./CLAUDE.md`
+   - 當使用者說「全域記住這個」（僅限主頻道），代理程序寫入 `../CLAUDE.md`
+   - 代理程序可以在群組資料夾中建立如 `notes.md`、`research.md` 之類的檔案
+
+3. **主頻道特權**
+   - 只有「main」群組（自我對話）可以寫入全域記憶
+   - Main 可以管理已註冊的群組並為任何群組安排任務
+   - Main 可以為任何群組設定額外的目錄掛載
+   - 所有群組都有 Bash 存取權（安全，因為在容器內執行）
 
 ---
 
-## Message Flow
+## 會話管理
 
-### Incoming Message Flow
+會話讓對話具有連續性——Claude 記得你們談過的內容。
+
+### 會話的運作方式
+
+1. 每個群組都有一個儲存在 SQLite 中的會話 ID（`sessions` 資料表，以 `group_folder` 為索引鍵）
+2. 會話 ID 傳遞給 Claude Agent SDK 的 `resume` 選項
+3. Claude 繼續具有完整上下文的對話
+4. 會話轉錄以 JSONL 檔案形式儲存於 `data/sessions/{group}/.claude/`
+
+---
+
+## 訊息流程
+
+### 傳入訊息流程
 
 ```
-1. User sends a message via any connected channel
+1. 使用者透過任何已連接的頻道傳送訊息
    │
    ▼
-2. Channel receives message (e.g. Baileys for WhatsApp, Bot API for Telegram)
+2. 頻道接收訊息（例如 WhatsApp 使用 Baileys，Telegram 使用 Bot API）
    │
    ▼
-3. Message stored in SQLite (store/messages.db)
+3. 訊息儲存於 SQLite（store/messages.db）
    │
    ▼
-4. Message loop polls SQLite (every 2 seconds)
+4. 訊息迴圈輪詢 SQLite（每 2 秒）
    │
    ▼
-5. Router checks:
-   ├── Is chat_jid in registered groups (SQLite)? → No: ignore
-   └── Does message match trigger pattern? → No: store but don't process
+5. 路由器檢查：
+   ├── chat_jid 是否在已註冊群組中（SQLite）？→ 否：忽略
+   └── 訊息是否符合觸發模式？→ 否：儲存但不處理
    │
    ▼
-6. Router catches up conversation:
-   ├── Fetch all messages since last agent interaction
-   ├── Format with timestamp and sender name
-   └── Build prompt with full conversation context
+6. 路由器補上對話：
+   ├── 提取自上次代理程序互動以來的所有訊息
+   ├── 以時間戳記和傳送者名稱格式化
+   └── 建立包含完整對話上下文的提示
    │
    ▼
-7. Router invokes Claude Agent SDK:
+7. 路由器調用 Claude Agent SDK：
    ├── cwd: groups/{group-name}/
-   ├── prompt: conversation history + current message
-   ├── resume: session_id (for continuity)
-   └── mcpServers: evoclaw (scheduler)
+   ├── prompt: 對話歷史 + 當前訊息
+   ├── resume: session_id（用於連續性）
+   └── mcpServers: evoclaw（排程器）
    │
    ▼
-8. Claude processes message:
-   ├── Reads CLAUDE.md files for context
-   └── Uses tools as needed (search, email, etc.)
+8. Claude 處理訊息：
+   ├── 讀取 CLAUDE.md 檔案以獲取上下文
+   └── 視需要使用工具（搜尋、電子郵件等）
    │
    ▼
-9. Router prefixes response with assistant name and sends via the owning channel
+9. 路由器以助理名稱作為回應前綴，並透過所屬頻道傳送
    │
    ▼
-10. Router updates last agent timestamp and saves session ID
+10. 路由器更新最後代理程序時間戳記並儲存會話 ID
 ```
 
-### Trigger Word Matching
+### 觸發詞比對
 
-Messages must start with the trigger pattern (default: `@Eve`):
-- `@Eve what's the weather?` → ✅ Triggers Claude
-- `@andy help me` → ✅ Triggers (case insensitive)
-- `Hey @Eve` → ❌ Ignored (trigger not at start)
-- `What's up?` → ❌ Ignored (no trigger)
+訊息必須以觸發模式開頭（預設：`@Eve`）：
+- `@Eve what's the weather?` → ✅ 觸發 Claude
+- `@andy help me` → ✅ 觸發（不區分大小寫）
+- `Hey @Eve` → ❌ 忽略（觸發詞不在開頭）
+- `What's up?` → ❌ 忽略（無觸發詞）
 
-### Conversation Catch-Up
+### 對話補充
 
-When a triggered message arrives, the agent receives all messages since its last interaction in that chat. Each message is formatted with timestamp and sender name:
+當觸發訊息到達時，代理程序會收到自其上次在該聊天中互動以來的所有訊息。每則訊息以時間戳記和傳送者名稱格式化：
 
 ```
 [Jan 31 2:32 PM] John: hey everyone, should we do pizza tonight?
@@ -533,49 +533,49 @@ When a triggered message arrives, the agent receives all messages since its last
 [Jan 31 2:35 PM] John: @Eve what toppings do you recommend?
 ```
 
-This allows the agent to understand the conversation context even if it wasn't mentioned in every message.
+這讓代理程序能夠理解對話上下文，即使它並未在每條訊息中被提及。
 
 ---
 
-## Commands
+## 指令
 
-### Commands Available in Any Group
+### 任何群組中可用的指令
 
-| Command | Example | Effect |
-|---------|---------|--------|
-| `@Assistant [message]` | `@Eve what's the weather?` | Talk to Claude |
+| 指令 | 範例 | 效果 |
+|------|------|------|
+| `@Assistant [message]` | `@Eve what's the weather?` | 與 Claude 對話 |
 
-### Commands Available in Main Channel Only
+### 僅主頻道可用的指令
 
-| Command | Example | Effect |
-|---------|---------|--------|
-| `@Assistant add group "Name"` | `@Eve add group "Family Chat"` | Register a new group |
-| `@Assistant remove group "Name"` | `@Eve remove group "Work Team"` | Unregister a group |
-| `@Assistant list groups` | `@Eve list groups` | Show registered groups |
-| `@Assistant remember [fact]` | `@Eve remember I prefer dark mode` | Add to global memory |
+| 指令 | 範例 | 效果 |
+|------|------|------|
+| `@Assistant add group "Name"` | `@Eve add group "Family Chat"` | 註冊新群組 |
+| `@Assistant remove group "Name"` | `@Eve remove group "Work Team"` | 取消註冊群組 |
+| `@Assistant list groups` | `@Eve list groups` | 顯示已註冊群組 |
+| `@Assistant remember [fact]` | `@Eve remember I prefer dark mode` | 添加至全域記憶 |
 
 ---
 
-## Scheduled Tasks
+## 排程任務
 
-EvoClaw has a built-in scheduler that runs tasks as full agents in their group's context.
+EvoClaw 內建一個排程器，以完整代理程序的身份在群組上下文中執行任務。
 
-### How Scheduling Works
+### 排程的運作方式
 
-1. **Group Context**: Tasks created in a group run with that group's working directory and memory
-2. **Full Agent Capabilities**: Scheduled tasks have access to all tools (WebSearch, file operations, etc.)
-3. **Optional Messaging**: Tasks can send messages to their group using the `send_message` tool, or complete silently
-4. **Main Channel Privileges**: The main channel can schedule tasks for any group and view all tasks
+1. **群組上下文**：在群組中建立的任務以該群組的工作目錄和記憶執行
+2. **完整代理程序功能**：排程任務可以存取所有工具（WebSearch、檔案操作等）
+3. **可選的訊息傳送**：任務可以使用 `send_message` 工具傳送訊息給群組，或靜默完成
+4. **主頻道特權**：主頻道可以為任何群組安排任務並查看所有任務
 
-### Schedule Types
+### 排程類型
 
-| Type | Value Format | Example |
-|------|--------------|---------|
-| `cron` | Cron expression | `0 9 * * 1` (Mondays at 9am) |
-| `interval` | Milliseconds | `3600000` (every hour) |
-| `once` | ISO timestamp | `2024-12-25T09:00:00Z` |
+| 類型 | 值格式 | 範例 |
+|------|--------|------|
+| `cron` | Cron 表達式 | `0 9 * * 1`（每週一上午 9 點） |
+| `interval` | 毫秒 | `3600000`（每小時） |
+| `once` | ISO 時間戳記 | `2024-12-25T09:00:00Z` |
 
-### Creating a Task
+### 建立任務
 
 ```
 User: @Eve remind me every Monday at 9am to review the weekly metrics
@@ -590,7 +590,7 @@ Claude: [calls mcp__evoclaw__schedule_task]
 Claude: Done! I'll remind you every Monday at 9am.
 ```
 
-### One-Time Tasks
+### 一次性任務
 
 ```
 User: @Eve at 5pm today, send me a summary of today's emails
@@ -603,151 +603,151 @@ Claude: [calls mcp__evoclaw__schedule_task]
         }
 ```
 
-### Managing Tasks
+### 管理任務
 
-From any group:
-- `@Eve list my scheduled tasks` - View tasks for this group
-- `@Eve pause task [id]` - Pause a task
-- `@Eve resume task [id]` - Resume a paused task
-- `@Eve cancel task [id]` - Delete a task
+從任何群組：
+- `@Eve list my scheduled tasks` - 查看此群組的任務
+- `@Eve pause task [id]` - 暫停任務
+- `@Eve resume task [id]` - 恢復暫停的任務
+- `@Eve cancel task [id]` - 刪除任務
 
-From main channel:
-- `@Eve list all tasks` - View tasks from all groups
-- `@Eve schedule task for "Family Chat": [prompt]` - Schedule for another group
-
----
-
-## Evolution Engine
-
-EvoClaw ships with a bio-inspired self-adaptation system in `host/evolution/`.
-
-### Files
-
-| File | Purpose |
-|------|---------|
-| `host/evolution/fitness.py` | Fitness tracking — records response time, success rate, retry count per response |
-| `host/evolution/adaptive.py` | Epigenetic hints — computes environment-driven behavior modifiers (load, time-of-day, day-of-week) |
-| `host/evolution/genome.py` | Group genome — per-group behavioral parameters (response style, formality, technical depth) |
-| `host/evolution/immune.py` | Immune system — detects prompt injection and spam, builds persistent threat memory |
-| `host/evolution/daemon.py` | Evolution Daemon — 24-hour cycle that analyses fitness data and adjusts group genomes |
-
-### Database: evolution_log Table
-
-Every evolution event is recorded in the `evolution_log` table:
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | INTEGER | Primary key |
-| `event_type` | TEXT | One of: `genome_evolved`, `genome_unchanged`, `cycle_start`, `cycle_end`, `skipped_low_samples` |
-| `group_folder` | TEXT | The group this event applies to |
-| `timestamp` | TEXT | ISO timestamp |
-| `genome_before` | TEXT (JSON) | Genome snapshot before the evolution step |
-| `genome_after` | TEXT (JSON) | Genome snapshot after the evolution step |
-| `details` | TEXT (JSON) | Additional event metadata |
-
-The dashboard shows the last 30 events with color-coded event types.
-
-### Scheduled Task Status
-
-Scheduled tasks now have a `status` column:
-
-| Value | Meaning |
-|-------|---------|
-| `active` | Task is running normally |
-| `error` | Group not found — task will not retry until fixed |
-| `cancelled` | Task has been cancelled by agent or user |
-
-Orphan tasks (tasks with an empty `chat_jid`) are automatically deleted on startup.
+從主頻道：
+- `@Eve list all tasks` - 查看所有群組的任務
+- `@Eve schedule task for "Family Chat": [prompt]` - 為其他群組安排任務
 
 ---
 
-## Web Interfaces
+## 演化引擎
 
-### Web Dashboard
+EvoClaw 內建一個仿生物啟發的自適應系統，位於 `host/evolution/`。
 
-**File:** `host/dashboard.py`
-**Default port:** 8765 (env: `DASHBOARD_PORT`)
+### 檔案
 
-A dark-theme monitoring dashboard built from the Python standard library — no external dependencies.
+| 檔案 | 用途 |
+|------|------|
+| `host/evolution/fitness.py` | 適應度追蹤——記錄每次回應的回應時間、成功率、重試次數 |
+| `host/evolution/adaptive.py` | 表觀遺傳提示——計算環境驅動的行為修飾符（負載、一天中的時間、星期幾） |
+| `host/evolution/genome.py` | 群組基因組——每群組的行為參數（回應風格、正式程度、技術深度） |
+| `host/evolution/immune.py` | 免疫系統——偵測提示注入和垃圾訊息，建立持久威脅記憶 |
+| `host/evolution/daemon.py` | 演化守護程序——24 小時週期，分析適應度資料並調整群組基因組 |
 
-Sections:
-- Groups, Scheduled Tasks, Task Run Logs, Sessions, Messages, Evolution Stats, Evolution Log, Immune Threats
+### 資料庫：evolution_log 資料表
 
-Endpoints:
-- `/` — Main dashboard (auto-refreshes every 10 seconds)
-- `/health` — JSON health check (DB + Docker). Returns 200 OK or 503 Service Unavailable
-- `/metrics` — Prometheus-format row counts for all tables
+每個演化事件都記錄在 `evolution_log` 資料表中：
 
-Authentication: HTTP Basic Auth via `DASHBOARD_USER` / `DASHBOARD_PASSWORD` env vars. If `DASHBOARD_PASSWORD` is empty, auth is disabled.
+| 欄位 | 類型 | 說明 |
+|------|------|------|
+| `id` | INTEGER | 主鍵 |
+| `event_type` | TEXT | 其中之一：`genome_evolved`、`genome_unchanged`、`cycle_start`、`cycle_end`、`skipped_low_samples` |
+| `group_folder` | TEXT | 此事件適用的群組 |
+| `timestamp` | TEXT | ISO 時間戳記 |
+| `genome_before` | TEXT (JSON) | 演化步驟前的基因組快照 |
+| `genome_after` | TEXT (JSON) | 演化步驟後的基因組快照 |
+| `details` | TEXT (JSON) | 額外的事件元資料 |
 
-### Web Portal
+儀表板顯示最近 30 個事件，以顏色區分事件類型。
 
-**File:** `host/webportal.py`
-**Default port:** 8766 (env: `WEBPORTAL_PORT`)
+### 排程任務狀態
 
-A browser-based chat interface using long-polling (no WebSocket dependency). Disabled by default.
+排程任務現在有一個 `status` 欄位：
 
-Features:
-- Group selector dropdown
-- Scrollable chat view with 1-second polling
-- `deliver_reply(group_folder, text)` function — called by the host to push bot responses to the browser
+| 值 | 含義 |
+|----|------|
+| `active` | 任務正常執行中 |
+| `error` | 找不到群組——任務在修復前不會重試 |
+| `cancelled` | 任務已被代理程序或使用者取消 |
 
-Enable via `WEBPORTAL_ENABLED=true`.
-
-### Environment Variables (Web Interfaces)
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DASHBOARD_PORT` | `8765` | Web dashboard port |
-| `DASHBOARD_USER` | `admin` | Basic Auth username |
-| `DASHBOARD_PASSWORD` | _(empty)_ | Basic Auth password. Empty = no auth |
-| `WEBPORTAL_ENABLED` | `false` | Enable browser chat interface |
-| `WEBPORTAL_PORT` | `8766` | Web portal port |
-| `WEBPORTAL_HOST` | `127.0.0.1` | Web portal bind address |
+孤立任務（`chat_jid` 為空的任務）在啟動時自動刪除。
 
 ---
 
-## MCP Servers
+## 網頁介面
 
-### EvoClaw MCP (built-in)
+### 網頁儀表板
 
-The `evoclaw` MCP server is created dynamically per agent call with the current group's context.
+**檔案：** `host/dashboard.py`
+**預設連接埠：** 8765（環境變數：`DASHBOARD_PORT`）
 
-**Available Tools:**
-| Tool | Purpose |
-|------|---------|
-| `schedule_task` | Schedule a recurring or one-time task |
-| `list_tasks` | Show tasks (group's tasks, or all if main). Also exposed to container agents via `scheduledTasks` in the input payload |
-| `get_task` | Get task details and run history |
-| `update_task` | Modify task prompt or schedule |
-| `pause_task` | Pause a task |
-| `resume_task` | Resume a paused task |
-| `cancel_task` | Delete/cancel a task. Container agents can call this directly via the `cancel_task(task_id)` tool |
-| `send_message` | Send a message to the group via its channel |
+使用 Python 標準函式庫建置的深色主題監控儀表板——無外部相依套件。
+
+區段：
+- 群組、排程任務、任務執行日誌、會話、訊息、演化統計、演化日誌、免疫威脅
+
+端點：
+- `/` — 主儀表板（每 10 秒自動刷新）
+- `/health` — JSON 健康檢查（DB + Docker）。傳回 200 OK 或 503 Service Unavailable
+- `/metrics` — Prometheus 格式的所有資料表列數
+
+驗證：透過 `DASHBOARD_USER` / `DASHBOARD_PASSWORD` 環境變數進行 HTTP Basic Auth。若 `DASHBOARD_PASSWORD` 為空，則停用驗證。
+
+### 網頁入口
+
+**檔案：** `host/webportal.py`
+**預設連接埠：** 8766（環境變數：`WEBPORTAL_PORT`）
+
+使用長輪詢的瀏覽器聊天介面（無 WebSocket 相依）。預設停用。
+
+功能：
+- 群組選擇器下拉選單
+- 可捲動的聊天視圖，1 秒輪詢
+- `deliver_reply(group_folder, text)` 函式——由主機呼叫以將機器人回應推送到瀏覽器
+
+透過 `WEBPORTAL_ENABLED=true` 啟用。
+
+### 環境變數（網頁介面）
+
+| 變數 | 預設值 | 說明 |
+|------|--------|------|
+| `DASHBOARD_PORT` | `8765` | 網頁儀表板連接埠 |
+| `DASHBOARD_USER` | `admin` | Basic Auth 使用者名稱 |
+| `DASHBOARD_PASSWORD` | _（空）_ | Basic Auth 密碼。空值 = 無驗證 |
+| `WEBPORTAL_ENABLED` | `false` | 啟用瀏覽器聊天介面 |
+| `WEBPORTAL_PORT` | `8766` | 網頁入口連接埠 |
+| `WEBPORTAL_HOST` | `127.0.0.1` | 網頁入口繫結位址 |
 
 ---
 
-## Deployment
+## MCP 伺服器
 
-EvoClaw runs as a single macOS launchd service.
+### EvoClaw MCP（內建）
 
-### Startup Sequence
+`evoclaw` MCP 伺服器依據當前群組的上下文，在每次代理程序呼叫時動態建立。
 
-When EvoClaw starts, it:
-1. **Ensures container runtime is running** - Automatically starts it if needed; kills orphaned EvoClaw containers from previous runs
-2. Initializes the SQLite database (migrates from JSON files if they exist)
-3. Loads state from SQLite (registered groups, sessions, router state)
-4. **Connects channels** — loops through registered channels, instantiates those with credentials, calls `connect()` on each
-5. Once at least one channel is connected:
-   - Starts the scheduler loop
-   - Starts the IPC watcher for container messages
-   - Sets up the per-group queue with `processGroupMessages`
-   - Recovers any unprocessed messages from before shutdown
-   - Starts the message polling loop
+**可用工具：**
+| 工具 | 用途 |
+|------|------|
+| `schedule_task` | 安排週期性或一次性任務 |
+| `list_tasks` | 顯示任務（群組的任務，若為 main 則顯示全部）。也透過輸入酬載中的 `scheduledTasks` 暴露給容器代理程序 |
+| `get_task` | 取得任務詳細資訊和執行歷史記錄 |
+| `update_task` | 修改任務提示或排程 |
+| `pause_task` | 暫停任務 |
+| `resume_task` | 恢復暫停的任務 |
+| `cancel_task` | 刪除/取消任務。容器代理程序可直接透過 `cancel_task(task_id)` 工具呼叫此功能 |
+| `send_message` | 透過頻道傳送訊息給群組 |
 
-### Service: com.evoclaw
+---
 
-**launchd/com.evoclaw.plist:**
+## 部署
+
+EvoClaw 以單一 macOS launchd 服務執行。
+
+### 啟動順序
+
+EvoClaw 啟動時：
+1. **確保容器執行環境正在執行** - 若需要則自動啟動；終止前次執行遺留的孤立 EvoClaw 容器
+2. 初始化 SQLite 資料庫（若 JSON 檔案存在則從中遷移）
+3. 從 SQLite 載入狀態（已註冊群組、會話、路由器狀態）
+4. **連接頻道** — 遍歷已註冊的頻道，實例化有憑證的頻道，在每個頻道上呼叫 `connect()`
+5. 一旦至少有一個頻道連接：
+   - 啟動排程器迴圈
+   - 啟動用於容器訊息的 IPC 監看器
+   - 以 `processGroupMessages` 設定每群組佇列
+   - 恢復關閉前未處理的訊息
+   - 啟動訊息輪詢迴圈
+
+### 服務：com.evoclaw
+
+**launchd/com.evoclaw.plist：**
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "...">
@@ -783,94 +783,94 @@ When EvoClaw starts, it:
 </plist>
 ```
 
-### Managing the Service
+### 管理服務
 
 ```bash
-# Install service
+# 安裝服務
 cp launchd/com.evoclaw.plist ~/Library/LaunchAgents/
 
-# Start service
+# 啟動服務
 launchctl load ~/Library/LaunchAgents/com.evoclaw.plist
 
-# Stop service
+# 停止服務
 launchctl unload ~/Library/LaunchAgents/com.evoclaw.plist
 
-# Check status
+# 檢查狀態
 launchctl list | grep evoclaw
 
-# View logs
+# 查看日誌
 tail -f logs/evoclaw.log
 ```
 
 ---
 
-## Security Considerations
+## 安全考量
 
-### Container Isolation
+### 容器隔離
 
-All agents run inside containers (lightweight Linux VMs), providing:
-- **Filesystem isolation**: Agents can only access mounted directories
-- **Safe Bash access**: Commands run inside the container, not on your Mac
-- **Network isolation**: Can be configured per-container if needed
-- **Process isolation**: Container processes can't affect the host
-- **Non-root user**: Container runs as unprivileged `node` user (uid 1000)
+所有代理程序在容器（輕量 Linux VMs）內執行，提供：
+- **檔案系統隔離**：代理程序只能存取已掛載的目錄
+- **安全的 Bash 存取**：指令在容器內執行，而非在你的 Mac 上
+- **網路隔離**：可按需為每個容器設定
+- **程序隔離**：容器程序不會影響主機
+- **非 root 使用者**：容器以無特權的 `node` 使用者（uid 1000）執行
 
-### Prompt Injection Risk
+### 提示注入風險
 
-WhatsApp messages could contain malicious instructions attempting to manipulate Claude's behavior.
+WhatsApp 訊息可能包含惡意指令，試圖操縱 Claude 的行為。
 
-**Mitigations:**
-- Container isolation limits blast radius
-- Only registered groups are processed
-- Trigger word required (reduces accidental processing)
-- Agents can only access their group's mounted directories
-- Main can configure additional directories per group
-- Claude's built-in safety training
+**緩解措施：**
+- 容器隔離限制了影響範圍
+- 只有已註冊的群組才會被處理
+- 需要觸發詞（減少意外處理）
+- 代理程序只能存取其群組的已掛載目錄
+- Main 可以為每個群組設定額外的目錄
+- Claude 內建的安全訓練
 
-**Recommendations:**
-- Only register trusted groups
-- Review additional directory mounts carefully
-- Review scheduled tasks periodically
-- Monitor logs for unusual activity
+**建議：**
+- 只註冊受信任的群組
+- 仔細審查額外的目錄掛載
+- 定期審查排程任務
+- 監控日誌以發現異常活動
 
-### Credential Storage
+### 憑證儲存
 
-| Credential | Storage Location | Notes |
-|------------|------------------|-------|
-| Claude CLI Auth | data/sessions/{group}/.claude/ | Per-group isolation, mounted to /home/node/.claude/ |
-| WhatsApp Session | store/auth/ | Auto-created, persists ~20 days |
+| 憑證 | 儲存位置 | 注意事項 |
+|------|----------|----------|
+| Claude CLI Auth | data/sessions/{group}/.claude/ | 每群組隔離，掛載至 /home/node/.claude/ |
+| WhatsApp Session | store/auth/ | 自動建立，持續約 20 天 |
 
-### File Permissions
+### 檔案權限
 
-The groups/ folder contains personal memory and should be protected:
+groups/ 資料夾包含個人記憶，應受到保護：
 ```bash
 chmod 700 groups/
 ```
 
 ---
 
-## Troubleshooting
+## 疑難排解
 
-### Common Issues
+### 常見問題
 
-| Issue | Cause | Solution |
-|-------|-------|----------|
-| No response to messages | Service not running | Check `launchctl list | grep evoclaw` |
-| "Claude Code process exited with code 1" | Container runtime failed to start | Check logs; EvoClaw auto-starts container runtime but may fail |
-| "Claude Code process exited with code 1" | Session mount path wrong | Ensure mount is to `/home/node/.claude/` not `/root/.claude/` |
-| Session not continuing | Session ID not saved | Check SQLite: `sqlite3 store/messages.db "SELECT * FROM sessions"` |
-| Session not continuing | Mount path mismatch | Container user is `node` with HOME=/home/node; sessions must be at `/home/node/.claude/` |
-| "QR code expired" | WhatsApp session expired | Delete store/auth/ and restart |
-| "No groups registered" | Haven't added groups | Use `@Eve add group "Name"` in main |
+| 問題 | 原因 | 解決方案 |
+|------|------|----------|
+| 訊息無回應 | 服務未執行 | 檢查 `launchctl list | grep evoclaw` |
+| "Claude Code process exited with code 1" | 容器執行環境啟動失敗 | 檢查日誌；EvoClaw 會自動啟動容器執行環境，但可能失敗 |
+| "Claude Code process exited with code 1" | 會話掛載路徑錯誤 | 確保掛載到 `/home/node/.claude/` 而非 `/root/.claude/` |
+| 會話未繼續 | 會話 ID 未儲存 | 檢查 SQLite：`sqlite3 store/messages.db "SELECT * FROM sessions"` |
+| 會話未繼續 | 掛載路徑不符 | 容器使用者為 `node`，HOME=/home/node；會話必須在 `/home/node/.claude/` |
+| "QR code expired" | WhatsApp 會話已過期 | 刪除 store/auth/ 並重新啟動 |
+| "No groups registered" | 尚未添加群組 | 在 main 中使用 `@Eve add group "Name"` |
 
-### Log Location
+### 日誌位置
 
 - `logs/evoclaw.log` - stdout
 - `logs/evoclaw.error.log` - stderr
 
-### Debug Mode
+### 除錯模式
 
-Run manually for verbose output:
+手動執行以獲取詳細輸出：
 ```bash
 npm run dev
 # or
