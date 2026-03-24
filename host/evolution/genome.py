@@ -195,7 +195,16 @@ def evolve_genome_from_fitness(jid: str, fitness: float, avg_response_ms: float)
 
     # Evolve response_style
     style_order = ["concise", "balanced", "detailed"]
-    idx = style_order.index(response_style) if response_style in style_order else 1
+    # p24c: if the stored response_style is not a valid value (e.g. DB corruption),
+    # normalise it to "balanced" (idx=1) rather than carrying the corrupted value
+    # forward into new_style via the `else` branch below.
+    if response_style not in style_order:
+        log.warning(
+            "evolve_genome_from_fitness: invalid response_style %r for %s — normalising to 'balanced'",
+            response_style, jid,
+        )
+        response_style = "balanced"
+    idx = style_order.index(response_style)
     if avg_response_ms > 15_000 and fitness < 0.4 and idx > 0:
         new_style = style_order[idx - 1]
     elif avg_response_ms < 5_000 and fitness > 0.7 and idx < 2:

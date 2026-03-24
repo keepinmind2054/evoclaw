@@ -3,12 +3,12 @@
 > This English README is a summary. For complete and current documentation, see [README.md](README.md) (Traditional Chinese).
 > Current version: v1.26.0
 
-[![Version](https://img.shields.io/badge/version-v1.26.0-blue)](https://github.com/KeithKeepGoing/evoclaw/blob/main/CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v1.26.0-blue)](https://github.com/KeithKeepGoing/evoclaw/blob/main/docs/CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Docker](https://img.shields.io/badge/docker-required-blue)](https://www.docker.com/)
 
-A lightweight, 100% Python multi-LLM AI agent framework. Agents run securely in isolated Docker containers. ~42 Python files — readable in an afternoon.
+A lightweight multi-LLM AI agent framework with a pure-Python host. Agents run securely in isolated Docker containers (Node.js is used inside the container for browser automation). ~42 Python files — readable in an afternoon.
 
 **Fork origin**: Built on [NanoClaw](https://github.com/qwibitai/nanoclaw-discord). EvoClaw extends the foundation with a Python AI agent layer, multi-layer memory, skill system, workflow engine, and enterprise connectors.
 

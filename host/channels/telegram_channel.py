@@ -256,18 +256,64 @@ class TelegramChannel:
                 return
         log.debug("Telegram poll watchdog exiting (app stopped)")
 
+    # Telegram hard limit is 4096 UTF-16 code units; use 4000 for a safety margin.
+    _TELEGRAM_MAX_LEN = 4000
+
     async def send_message(self, jid: str, text: str) -> None:
         if not self._app:
+            return
+        # p24c: guard against empty text — sending empty string causes a Telegram 400 error.
+        if not text:
+            log.debug("send_message: empty text for jid=%s — skipping", jid)
             return
         try:
             chat_id = int(jid.replace("tg:", ""))
         except ValueError:
             log.error("send_message: malformed Telegram JID %r — cannot parse chat_id", jid)
             return
-        try:
-            await self._app.bot.send_message(chat_id=chat_id, text=text)
-        except Exception as exc:
-            log.error("send_message: failed to deliver to %s: %s", jid, exc)
+
+        # p24c: split messages that exceed Telegram's 4096-char limit.
+        # The router already splits at TELEGRAM_MAX_LEN but this guards against
+        # messages that arrive via other code paths (e.g. /monitor reply, test shims).
+        chunks: list[str] = []
+        remaining = text
+        while remaining:
+            if len(remaining) <= self._TELEGRAM_MAX_LEN:
+                chunks.append(remaining)
+                break
+            split_at = remaining.rfind("\n", 0, self._TELEGRAM_MAX_LEN)
+            if split_at <= 0:
+                split_at = self._TELEGRAM_MAX_LEN
+            chunks.append(remaining[:split_at].rstrip())
+            remaining = remaining[split_at:].lstrip("\n")
+        chunks = [c for c in chunks if c]
+
+        for chunk in chunks:
+            try:
+                # p24c: handle Telegram FloodWait (429 RetryAfter) rate-limit errors.
+                # When Telegram tells us to back off, wait the specified number of seconds
+                # and retry once before giving up.
+                from telegram.error import RetryAfter, TimedOut, NetworkError
+                try:
+                    await self._app.bot.send_message(chat_id=chat_id, text=chunk)
+                except RetryAfter as flood_exc:
+                    wait_secs = max(float(getattr(flood_exc, "retry_after", 5)), 5.0)
+                    log.warning(
+                        "send_message: Telegram FloodWait for %s — sleeping %.0fs then retrying",
+                        jid, wait_secs,
+                    )
+                    await asyncio.sleep(wait_secs)
+                    await self._app.bot.send_message(chat_id=chat_id, text=chunk)
+                except (TimedOut, NetworkError) as transient_exc:
+                    # p24c: retry once on transient network errors (timeouts, brief disconnects).
+                    log.warning(
+                        "send_message: transient error for %s (%s) — retrying once",
+                        jid, transient_exc,
+                    )
+                    await asyncio.sleep(2.0)
+                    await self._app.bot.send_message(chat_id=chat_id, text=chunk)
+            except Exception as exc:
+                log.error("send_message: failed to deliver to %s: %s", jid, exc)
 
     async def send_file(self, jid: str, file_path: str, caption: str = "") -> None:
         """Send a document/file to a Telegram chat.

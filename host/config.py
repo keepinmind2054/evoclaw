@@ -56,7 +56,12 @@ if os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("CLAUDE_API_KEY"):
     os.environ["CLAUDE_API_KEY"] = os.environ["ANTHROPIC_API_KEY"]
 
 # Assistant
-ASSISTANT_NAME = os.environ.get("ASSISTANT_NAME", "Eve")
+ASSISTANT_NAME = os.environ.get("ASSISTANT_NAME", "Eve") or "Eve"
+# p24c: guard against empty ASSISTANT_NAME (e.g. ASSISTANT_NAME="" in .env).
+# An empty name produces TRIGGER_PATTERN = "^@\b" which never matches any input,
+# silently disabling the trigger and causing the bot to ignore all messages.
+if not ASSISTANT_NAME:
+    ASSISTANT_NAME = "Eve"
 TRIGGER_PATTERN = re.compile(rf"^@{re.escape(ASSISTANT_NAME)}\b", re.IGNORECASE)
 
 # Polling

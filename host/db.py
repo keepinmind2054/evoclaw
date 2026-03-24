@@ -49,20 +49,36 @@ def init_database(db_path: Path) -> None:
     但實際上我們保證所有 DB 操作都在同一個 event loop 中序列執行。
     row_factory=sqlite3.Row：讓查詢結果可以用欄位名稱存取（dict-like），
     而不是只能用索引，提升程式碼可讀性。
+
+    BUG-DB-01 FIX (HIGH): protect the global _db assignment with _db_lock.
+    Without the lock, two threads calling init_database() simultaneously
+    (e.g. a test that re-initializes while a background thread is still
+    referencing the old connection) can race on the global _db pointer —
+    one thread overwrites _db while the other is mid-setup, leaving the
+    first connection leaked and the second partially initialized.
     """
     global _db
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    _db = sqlite3.connect(str(db_path), check_same_thread=False)
-    _db.row_factory = sqlite3.Row
-    _db.execute("PRAGMA journal_mode=WAL")
-    _db.execute("PRAGMA synchronous=NORMAL")
-    _db.execute("PRAGMA busy_timeout=5000")  # 5s retry on SQLITE_BUSY
-    # Enable foreign key enforcement (Issue #64).
-    # SQLite disables FK constraints by default; without this pragma, any schema
-    # additions using ON DELETE CASCADE / ON DELETE RESTRICT are silently ignored,
-    # producing orphaned rows that skew metrics and fill the database.
-    _db.execute("PRAGMA foreign_keys = ON")
-    _create_tables(_db)
+    with _db_lock:
+        new_conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        new_conn.row_factory = sqlite3.Row
+        new_conn.execute("PRAGMA journal_mode=WAL")
+        new_conn.execute("PRAGMA synchronous=NORMAL")
+        new_conn.execute("PRAGMA busy_timeout=5000")  # 5s retry on SQLITE_BUSY
+        # Enable foreign key enforcement (Issue #64).
+        # SQLite disables FK constraints by default; without this pragma, any schema
+        # additions using ON DELETE CASCADE / ON DELETE RESTRICT are silently ignored,
+        # producing orphaned rows that skew metrics and fill the database.
+        new_conn.execute("PRAGMA foreign_keys = ON")
+        _create_tables(new_conn)
+        # Close the previous connection (if any) before replacing it so we
+        # do not leak the file descriptor on re-initialization.
+        if _db is not None:
+            try:
+                _db.close()
+            except Exception:
+                pass
+        _db = new_conn
     log.info(f"Database initialized: {db_path}")
 
 def _create_tables(db: sqlite3.Connection) -> None:
@@ -1279,7 +1295,11 @@ def memory_fts_search(jid: str, query: str, limit: int = 10) -> list[dict]:
         except Exception:
             pass
 
-    # Re-sort combined results by relevance descending (highest score = best match)
+    # Re-sort combined results by relevance descending.
+    # BUG-DB-03 FIX (LOW): clarify sort semantics.  SQLite BM25() returns a
+    # negative float (more negative = better match).  abs() is applied above
+    # so fts_score is stored as a positive number where higher = better match.
+    # reverse=True therefore correctly puts the best matches first.
     results.sort(key=lambda x: x["fts_score"], reverse=True)
     return results[:limit]
 
@@ -1491,7 +1511,14 @@ def log_container_finish(
 
 
 def get_container_logs(jid: str = "", limit: int = 50, status: str = "") -> list[dict]:
-    """Fetch recent container run logs."""
+    """Fetch recent container run logs.
+
+    BUG-DB-02 FIX (MEDIUM): guard against limit <= 0.  A caller passing
+    limit=0 (e.g. from a misconfigured dashboard query) would silently
+    return an empty list with no indication that the parameter was wrong.
+    Clamp to at least 1 row so the call always returns something meaningful.
+    """
+    limit = max(1, limit)
     params: list = []
     where_parts: list[str] = []
     if jid:

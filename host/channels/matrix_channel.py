@@ -105,6 +105,10 @@ class MatrixChannel:
         # paths (line 119 in the original).  This meant the error body was
         # incorrectly printed but the original message text was also clobbered.
         # Renamed the error body local to `resp_text` to avoid the collision.
+        # p24c: guard against empty text — Matrix rejects empty body strings with 400.
+        if not text:
+            logger.debug("Matrix send_message: empty text for jid=%s — skipping", jid)
+            return None
         body = text
         room_id = jid if jid else None
         room = room_id or self.default_room
@@ -257,10 +261,25 @@ class MatrixChannel:
         return fn
 
     async def start_listening(self):
-        """Start listening for messages (long-poll loop)."""
+        """Start listening for messages (long-poll loop).
+
+        p24c: added exponential backoff on repeated sync failures to prevent a
+        tight CPU-burning loop when the homeserver is unreachable or returning
+        errors.  Backoff resets to 0 on the first successful sync.
+        """
         logger.info(f"Matrix listening: {self.user_id}")
+        _backoff = 0.0
+        _MAX_BACKOFF = 60.0
         while True:
-            messages = await self.sync(timeout_ms=30000)
+            try:
+                messages = await self.sync(timeout_ms=30000)
+                _backoff = 0.0  # reset backoff on any successful sync call
+            except Exception as e:
+                logger.error(f"Matrix sync error in start_listening: {e}")
+                _backoff = min(_backoff * 2 if _backoff > 0 else 2.0, _MAX_BACKOFF)
+                logger.info("Matrix: backing off %.0fs before next sync attempt", _backoff)
+                await asyncio.sleep(_backoff)
+                continue
             for msg in messages:
                 for handler in self._message_handlers:
                     try:

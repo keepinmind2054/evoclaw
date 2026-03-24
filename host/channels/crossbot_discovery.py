@@ -61,12 +61,11 @@ class CrossbotDiscovery:
             # Don't append — sender is blocked; keep the existing timestamps
             self._handshake_timestamps[author_id] = active
             return True
+        # p24c: after appending `now`, active is always non-empty.
+        # The previous `if active / else` guard had a dead else-branch.
+        # Store updated timestamps unconditionally.
         active.append(now)
-        if active:
-            self._handshake_timestamps[author_id] = active
-        else:
-            # Evict the key when no active timestamps remain to prevent memory leak
-            self._handshake_timestamps.pop(author_id, None)
+        self._handshake_timestamps[author_id] = active
         return False
 
     async def _add_trusted(self, author_id: str) -> None:

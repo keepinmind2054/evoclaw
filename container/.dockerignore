@@ -1,0 +1,31 @@
+# Exclude files that should not be in the Docker build context.
+# Without this, Docker sends the entire container/ directory to the daemon,
+# including __pycache__ and any stale .pyc files, which pollutes the build
+# cache and slightly increases image size.
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Byte-compiled / optimized Python
+.Python
+
+# Development and test artifacts
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+*.cover
+.coverage
+
+# Editor / OS metadata
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Git
+.git/

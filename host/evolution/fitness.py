@@ -100,7 +100,11 @@ def compute_fitness(jid: str, window_days: int = 7) -> float:
         speed_score = 0.5
 
     # 可靠性：重試次數越多，代表系統不穩定
-    avg_retries = sum(r.get("retry_count", 0) for r in rows) / n
+    # p24c: clamp individual retry_count values to >= 0 before averaging.
+    # A corrupted DB row with a negative retry_count would produce avg_retries < 0,
+    # which makes reliability > 1.0 and pushes the composite fitness above 1.0
+    # even before the final clamp.  Using max(0, ...) per row prevents this.
+    avg_retries = sum(max(0, r.get("retry_count", 0)) for r in rows) / n
     reliability = 1.0 / (1.0 + avg_retries)
 
     fitness = success_rate * 0.5 + speed_score * 0.3 + reliability * 0.2
