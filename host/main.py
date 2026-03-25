@@ -459,8 +459,12 @@ async def _handle_setup_command(jid: str, command: str) -> str:
                 is_main=False,
             )
             (config.GROUPS_DIR / _monitor_folder).mkdir(parents=True, exist_ok=True)
-            # Persist to .env so it survives restart
-            _write_monitor_jid_to_env(jid)
+            # Persist to .env so it survives restart.
+            # p28a: _write_monitor_jid_to_env does read_text + write_text (blocking
+            # I/O).  Run it in an executor so the event loop is not stalled.
+            await asyncio.get_running_loop().run_in_executor(
+                None, _write_monitor_jid_to_env, jid
+            )
             # Update in-memory state immediately (no restart needed)
             _MONITOR_JID = jid
             _registered_groups = db.get_all_registered_groups()
@@ -1049,7 +1053,12 @@ async def _message_loop() -> None:
             if reset_flag.exists():
                 try:
                     import json as _rjson
-                    _rflag_data = _rjson.loads(reset_flag.read_text(encoding="utf-8"))
+                    # p28a: read_text() is blocking I/O — run in executor so the
+                    # event loop is not stalled on a slow filesystem.
+                    _rflag_text = await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: reset_flag.read_text(encoding="utf-8")
+                    )
+                    _rflag_data = _rjson.loads(_rflag_text)
                     reset_flag.unlink(missing_ok=True)
                     _target_jid = _rflag_data.get("jid", "")
                     if _target_jid:
@@ -1088,7 +1097,14 @@ async def _message_loop() -> None:
                     try:
                         _alert_key, _alert_msg = _health_alert_queue.get_nowait()
                         if _MONITOR_JID:
-                            asyncio.create_task(route_outbound(_MONITOR_JID, _alert_msg))
+                            # p28a: add done-callback so exceptions from this
+                            # fire-and-forget task are logged rather than silently
+                            # swallowed by the event loop.
+                            _ha_task = asyncio.create_task(
+                                route_outbound(_MONITOR_JID, _alert_msg),
+                                name=f"health-alert-{_alert_key}",
+                            )
+                            _ha_task.add_done_callback(_task_done_callback_main)
                         else:
                             log.debug("Health alert dropped (MONITOR_JID not set): %s", _alert_key)
                     except asyncio.QueueEmpty:
