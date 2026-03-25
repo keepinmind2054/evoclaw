@@ -2174,7 +2174,18 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                 _exec_outputs = []
                 for _cmd in _runnable:
                     _log("🔧 TOOL", f"Bash (fallback) args={_cmd[:300]}")
-                    _res = execute_tool("Bash", {"command": _cmd}, chat_jid)
+                    # Sanity check: reject commands that look like git log output
+                    # (lines starting with 7-40 hex chars + space, e.g. "c43faa8 feat: ...")
+                    # This prevents AUTO-EXEC from running git log output as bash commands.
+                    _auto_lines = [_l for _l in _cmd.strip().splitlines() if _l.strip()]
+                    _GIT_LOG_RE = _re_cb.compile(r'^[0-9a-f]{7,40} \S')
+                    if _auto_lines and len(_auto_lines) >= 2 and all(
+                        _GIT_LOG_RE.match(_l) for _l in _auto_lines[:4]
+                    ):
+                        _res = "✗ Skipped: this looks like git log output, not a valid bash command. Use `git log --oneline` explicitly if you need commit history."
+                        _log("⚠️ AUTO-EXEC-SKIP", f"Rejected fallback block that looks like git log output: {_cmd[:120]}")
+                    else:
+                        _res = execute_tool("Bash", {"command": _cmd}, chat_jid)
                     _log("🔧 RESULT", str(_res)[:1500])
                     _exec_outputs.append(f"$ {_cmd[:200]}\n{_res}")
                 _combined = "\n\n".join(_exec_outputs)
@@ -2331,6 +2342,26 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                     "格式：`[YYYY-MM-DD] <做了什麼、關鍵決策、解決方法>`"
                 ),
             })
+
+        # Penultimate-turn send_message enforcer:
+        # The normal milestone fires at _turns_since_notify >= 5 AND n < MAX_ITER - 2.
+        # For Level A sessions (MAX_ITER=6) that condition can never be satisfied
+        # (you'd need 5 silent turns but the window closes at n<4).
+        # Fix: at n == MAX_ITER - 2, if the agent has not sent ANY message yet,
+        # inject a CRITICAL reminder so it delivers the result on the final turn.
+        if _turns_since_notify > 0 and n == MAX_ITER - 2:
+            _log("⏰ MILESTONE-FINAL", f"No send_message in {_turns_since_notify} turns, penultimate turn {n} — injecting CRITICAL send reminder")
+            _deferred_user_msgs.append({
+                "role": "user",
+                "content": (
+                    "【CRITICAL 系統警告】你尚未向用戶發送任何回應（send_message）。\n"
+                    f"這是倒數第二輪（turn {n+1}/{MAX_ITER}），下一輪是最後一輪。\n"
+                    "你必須在下一輪立刻呼叫 mcp__evoclaw__send_message 把結果告知用戶，"
+                    "否則用戶將看到「處理完成，但未能產生文字回應」錯誤。\n"
+                    "不要再執行其他工具——把你已掌握的資訊直接發送出去。"
+                ),
+            })
+            _turns_since_notify = 0  # reset to prevent re-trigger
 
         # Execute all tool calls and add results
         for tc in msg.tool_calls:
