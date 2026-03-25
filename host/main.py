@@ -1644,9 +1644,12 @@ async def main() -> None:
     #
     # Some channels (e.g. Discord) connect asynchronously in a background thread:
     # connect() starts the thread and returns immediately, while on_ready fires
-    # only after the API handshake completes.  Wait briefly so background channels
-    # have time to set is_connected() = True before we snapshot their status.
-    await asyncio.sleep(3)
+    # only after the API handshake completes.  Wait for each channel that exposes
+    # wait_connected() so the summary reflects the actual final state instead of
+    # racing against the handshake.
+    for _ch in _loaded_channels:
+        if hasattr(_ch, "wait_connected"):
+            await _ch.wait_connected(timeout=10.0)
     _llm_status = "OK" if _llm_secrets_ok else "MISSING — agents will fail"
     log.info("--- EvoClaw startup summary ---")
     log.info("  LLM key:       %s", _llm_status)
