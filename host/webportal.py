@@ -275,7 +275,16 @@ class _WebPortalHandler(http.server.BaseHTTPRequestHandler):
             # Store user message in session (cap per-session message list to prevent OOM)
             ts = time.time()
             with _sessions_lock:
-                msgs = _sessions[session_id]["messages"]
+                # BUG-WP-10 FIX (MEDIUM): Between the first _sessions_lock block
+                # (line ~252) and this one, _expire_sessions() may have run in
+                # another ThreadingHTTPServer worker thread and removed the session
+                # from _sessions.  Using _sessions[session_id] directly raises
+                # KeyError in that case.  Use _sessions.get() and bail out safely.
+                _live_session = _sessions.get(session_id)
+                if _live_session is None:
+                    self._send_json({"error": "session expired"}, 400)
+                    return
+                msgs = _live_session["messages"]
                 if len(msgs) >= _MAX_SESSION_MESSAGES:
                     msgs.pop(0)  # evict oldest to make room
                 msgs.append({"role": "user", "text": text, "ts": ts})
