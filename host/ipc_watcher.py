@@ -804,7 +804,11 @@ async def _run_start_remote_control(jid: str, sender: str, route_fn: Callable) -
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     stdout_path = config.DATA_DIR / "remote-control.stdout"
     stderr_path = config.DATA_DIR / "remote-control.stderr"
-    stdout_path.write_text("", encoding="utf-8")
+    # p28a: write_text() is a blocking I/O syscall.  Run in an executor so the
+    # event loop is not stalled if the filesystem is slow (NFS, overlayfs).
+    await asyncio.get_running_loop().run_in_executor(
+        None, lambda: stdout_path.write_text("", encoding="utf-8")
+    )
 
     # p17c BUG-FIX (MEDIUM): open() is a blocking syscall.  Calling it directly
     # inside an async function can block the event loop if the filesystem is slow
@@ -957,7 +961,12 @@ async def _run_self_update(jid: str, route_fn: Callable) -> None:
 
         # ── write flag for main loop to pick up and os.execv() ───────────────
         flag = config.DATA_DIR / "self_update.flag"
-        flag.write_text(git_output[:1000], encoding="utf-8")
+        # p28a: write_text() is blocking I/O — run in executor to avoid
+        # stalling the event loop on a slow or pressured filesystem.
+        _flag_content = git_output[:1000]
+        await asyncio.get_running_loop().run_in_executor(
+            None, lambda: flag.write_text(_flag_content, encoding="utf-8")
+        )
         log.info("self_update: flag written at %s — restart pending", flag)
 
         if jid:
@@ -1372,7 +1381,10 @@ async def start_ipc_watcher(get_groups_fn: Callable, route_fn: Callable, stop_ev
     完全向後相容。
     """
     global _result_cleanup_cycle
-    restore_remote_control()  # Re-adopt any surviving remote-control session from previous run
+    # p28a: restore_remote_control() does blocking read_text() on the state file.
+    # Run it in an executor so the event loop is not stalled at startup on a slow
+    # filesystem (NFS, overlayfs with disk pressure).
+    await asyncio.get_running_loop().run_in_executor(None, restore_remote_control)
     log.info("IPC watcher started")
 
     # Try inotify on Linux
