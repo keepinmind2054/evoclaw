@@ -1600,6 +1600,12 @@ async def main() -> None:
     # Emit a clear, scannable status block so operators immediately know whether
     # all required components connected successfully.  Fails fast with a CRITICAL
     # log if zero channels loaded — the bot would run but never receive messages.
+    #
+    # Some channels (e.g. Discord) connect asynchronously in a background thread:
+    # connect() starts the thread and returns immediately, while on_ready fires
+    # only after the API handshake completes.  Wait briefly so background channels
+    # have time to set is_connected() = True before we snapshot their status.
+    await asyncio.sleep(3)
     _llm_status = "OK" if _llm_secrets_ok else "MISSING — agents will fail"
     log.info("--- EvoClaw startup summary ---")
     log.info("  LLM key:       %s", _llm_status)
