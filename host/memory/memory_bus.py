@@ -645,10 +645,15 @@ class MemoryBus:
                 memory_file.parent.mkdir(parents=True, exist_ok=True)
                 current = memory_file.read_text(encoding="utf-8") if memory_file.exists() else ""
                 updated = current + "\n" + patch
-                # Truncate to max_bytes, being careful with UTF-8 boundaries
+                # Truncate to max_bytes, being careful with UTF-8 boundaries.
+                # BUG-MB-01 FIX: the naive encoded[:max_bytes].decode(errors="ignore")
+                # can silently discard the last partial multi-byte character at the
+                # cut boundary.  Use the same safe boundary-walking truncation that
+                # hot.py employs so we never produce invalid UTF-8 or lose more
+                # data than necessary.
                 if len(updated.encode("utf-8")) > max_bytes:
-                    encoded = updated.encode("utf-8")[:max_bytes]
-                    updated = encoded.decode("utf-8", errors="ignore")
+                    from .hot import _safe_truncate_utf8
+                    updated = _safe_truncate_utf8(updated, max_bytes)
                 tmp_path = memory_file.with_suffix('.tmp')
                 tmp_path.write_text(updated, encoding="utf-8")
                 os.replace(tmp_path, memory_file)
