@@ -167,6 +167,16 @@ class SdkApi:
                 "type": "error", "code": "too_many_connections",
                 "message": f"Max {self.MAX_CONNECTIONS} concurrent connections"
             }))
+            # BUG-P27A-SDKAPI-1 FIX: explicitly close the WebSocket after
+            # rejecting a connection.  Without this the rejected socket stays
+            # open indefinitely (waiting for the remote to close it), holding a
+            # file descriptor and an OS-level socket resource even though it is
+            # not tracked in self._connections and will never send another
+            # message.  Closing proactively returns the resource immediately.
+            try:
+                await websocket.close()
+            except Exception:
+                pass
             return
 
         self._connections.add(websocket)
