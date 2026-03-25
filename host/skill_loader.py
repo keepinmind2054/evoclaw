@@ -165,8 +165,17 @@ class SkillLoader:
         # BUG-FIX: wrap skill execution so a misbehaving handler cannot crash the
         # host process.  Callers receive a descriptive error string instead of an
         # unhandled exception propagating up the stack.
+        #
+        # BUG-SL-01 FIX: if the skill's entry-point function is itself a
+        # coroutine function (async def), calling it without await returns a
+        # coroutine object — always truthy, never executed, and eventually
+        # garbage-collected with a "coroutine was never awaited" warning.
+        # Detect this case and await the result so async handlers work correctly.
         try:
-            return func(**kwargs)
+            result = func(**kwargs)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return result
         except Exception as exc:
             logger.error("skill_loader: skill '%s' fn '%s' raised: %s", name, fn, exc)
             raise
