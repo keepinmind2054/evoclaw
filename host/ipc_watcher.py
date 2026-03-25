@@ -133,6 +133,19 @@ def _notify_main_group_error(filename: str, error: str) -> None:
         log.debug("_notify_main_group_error failed: %s", exc)
 
 
+# p28b: IPC backpressure — maximum number of JSON files to process per group per
+# cycle.  Without a cap a runaway agent (e.g. a tight container loop writing IPC
+# files faster than they are processed) can monopolise the event loop and prevent
+# other groups from receiving messages.  Files beyond this limit are left on disk
+# and processed in the next watcher cycle.  At default IPC_POLL_INTERVAL of 1 s
+# this means a 500-file burst is drained in ~5 cycles (~5 s), which is acceptable.
+# Set IPC_MAX_FILES_PER_CYCLE=0 in the environment to disable the cap (not recommended).
+_IPC_MAX_FILES_PER_CYCLE: int = int(os.environ.get("IPC_MAX_FILES_PER_CYCLE", "100"))
+
+# Warn operators when IPC files accumulate above this threshold across all groups.
+_IPC_FLOOD_WARN_THRESHOLD: int = 500
+
+
 async def process_ipc_dir(group_folder: str, is_main: bool, route_fn: Callable) -> None:
     """
     掃描某個群組的 IPC 目錄，處理所有待辦的 JSON 指令檔案。
@@ -145,6 +158,11 @@ async def process_ipc_dir(group_folder: str, is_main: bool, route_fn: Callable) 
     每個 JSON 檔案處理完畢後立即刪除（避免重複執行）。
     若處理失敗，檔案移動到 data/ipc/errors/ 目錄供事後診斷，
     而不是直接刪除，以便排查問題。
+
+    p28b: Per-cycle file limit (_IPC_MAX_FILES_PER_CYCLE) provides backpressure
+    so a runaway container cannot monopolise the event loop.  Remaining files are
+    processed in subsequent cycles.  A flood warning is emitted when the pending
+    file count exceeds _IPC_FLOOD_WARN_THRESHOLD so operators are alerted early.
     """
     ipc_dir = config.DATA_DIR / "ipc" / group_folder
     msg_dir = ipc_dir / "messages"
@@ -163,7 +181,24 @@ async def process_ipc_dir(group_folder: str, is_main: bool, route_fn: Callable) 
         # timestamp prefix with a monotonically-increasing sequence number (e.g.
         # using an atomic integer in shared memory or a database sequence) so that
         # ordering is guaranteed regardless of clock skew.
-        for f in sorted(d.glob("*.json")):
+        # p28b: collect file list once (for count) then slice for backpressure.
+        all_files = sorted(d.glob("*.json"))
+        pending_count = len(all_files)
+        if pending_count > _IPC_FLOOD_WARN_THRESHOLD:
+            log.warning(
+                "IPC backpressure: %d pending files in %s/%s (threshold=%d). "
+                "A container may be writing files faster than they are processed. "
+                "Processing up to %d files this cycle; remainder deferred.",
+                pending_count, group_folder, d.name,
+                _IPC_FLOOD_WARN_THRESHOLD,
+                _IPC_MAX_FILES_PER_CYCLE if _IPC_MAX_FILES_PER_CYCLE > 0 else pending_count,
+            )
+        files_to_process = (
+            all_files[:_IPC_MAX_FILES_PER_CYCLE]
+            if _IPC_MAX_FILES_PER_CYCLE > 0
+            else all_files
+        )
+        for f in files_to_process:
             try:
                 # TOCTOU fix (p22d-B): the file can be deleted between glob()
                 # and read_text() (e.g. a concurrent watcher process or manual
@@ -804,7 +839,11 @@ async def _run_start_remote_control(jid: str, sender: str, route_fn: Callable) -
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     stdout_path = config.DATA_DIR / "remote-control.stdout"
     stderr_path = config.DATA_DIR / "remote-control.stderr"
-    stdout_path.write_text("", encoding="utf-8")
+    # p28a: write_text() is a blocking I/O syscall.  Run in an executor so the
+    # event loop is not stalled if the filesystem is slow (NFS, overlayfs).
+    await asyncio.get_running_loop().run_in_executor(
+        None, lambda: stdout_path.write_text("", encoding="utf-8")
+    )
 
     # p17c BUG-FIX (MEDIUM): open() is a blocking syscall.  Calling it directly
     # inside an async function can block the event loop if the filesystem is slow
@@ -957,7 +996,12 @@ async def _run_self_update(jid: str, route_fn: Callable) -> None:
 
         # ── write flag for main loop to pick up and os.execv() ───────────────
         flag = config.DATA_DIR / "self_update.flag"
-        flag.write_text(git_output[:1000], encoding="utf-8")
+        # p28a: write_text() is blocking I/O — run in executor to avoid
+        # stalling the event loop on a slow or pressured filesystem.
+        _flag_content = git_output[:1000]
+        await asyncio.get_running_loop().run_in_executor(
+            None, lambda: flag.write_text(_flag_content, encoding="utf-8")
+        )
         log.info("self_update: flag written at %s — restart pending", flag)
 
         if jid:
@@ -1372,7 +1416,10 @@ async def start_ipc_watcher(get_groups_fn: Callable, route_fn: Callable, stop_ev
     完全向後相容。
     """
     global _result_cleanup_cycle
-    restore_remote_control()  # Re-adopt any surviving remote-control session from previous run
+    # p28a: restore_remote_control() does blocking read_text() on the state file.
+    # Run it in an executor so the event loop is not stalled at startup on a slow
+    # filesystem (NFS, overlayfs with disk pressure).
+    await asyncio.get_running_loop().run_in_executor(None, restore_remote_control)
     log.info("IPC watcher started")
 
     # Try inotify on Linux

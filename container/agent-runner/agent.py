@@ -2670,9 +2670,24 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
         if fn_responses is not None:
             history.append(types.Content(role="user", parts=fn_responses))
 
-        # Fix 4 (STABILITY_ANALYSIS 3.5): inject retry warning as a user message
+        # BUG-P27A-GEMINI-1 FIX: when the milestone enforcer took the sentinel
+        # path (fn_responses = None, meaning fn_responses + a warning text were
+        # already appended as two consecutive user turns), appending _retry_warning
+        # as yet another role="user" message creates a third (or fourth) consecutive
+        # user turn in a row.  While Gemini's API tolerates consecutive user turns,
+        # consolidating the retry warning into the most recent user message avoids
+        # a structurally confusing history and prevents the history trimmer from
+        # potentially leaving an orphaned user(warning) message at the tail boundary.
+        # When fn_responses was already flushed by the sentinel path, append
+        # _retry_warning text to the last history entry (which is a user text Part)
+        # rather than inserting a new user message.
         if _retry_warning:
-            history.append(types.Content(role="user", parts=[types.Part(text=_retry_warning)]))
+            if fn_responses is None and history and history[-1].role == "user":
+                # Extend the last user message's parts with the retry warning
+                # so it arrives in the same turn as the milestone warning.
+                history[-1].parts.append(types.Part(text="\n\n" + _retry_warning))
+            else:
+                history.append(types.Content(role="user", parts=[types.Part(text=_retry_warning)]))
             _retry_warning = ""
 
         # ── MEMORY.md reminder on penultimate turn ────────────────────────────

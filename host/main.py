@@ -459,8 +459,12 @@ async def _handle_setup_command(jid: str, command: str) -> str:
                 is_main=False,
             )
             (config.GROUPS_DIR / _monitor_folder).mkdir(parents=True, exist_ok=True)
-            # Persist to .env so it survives restart
-            _write_monitor_jid_to_env(jid)
+            # Persist to .env so it survives restart.
+            # p28a: _write_monitor_jid_to_env does read_text + write_text (blocking
+            # I/O).  Run it in an executor so the event loop is not stalled.
+            await asyncio.get_running_loop().run_in_executor(
+                None, _write_monitor_jid_to_env, jid
+            )
             # Update in-memory state immediately (no restart needed)
             _MONITOR_JID = jid
             _registered_groups = db.get_all_registered_groups()
@@ -1049,7 +1053,12 @@ async def _message_loop() -> None:
             if reset_flag.exists():
                 try:
                     import json as _rjson
-                    _rflag_data = _rjson.loads(reset_flag.read_text(encoding="utf-8"))
+                    # p28a: read_text() is blocking I/O — run in executor so the
+                    # event loop is not stalled on a slow filesystem.
+                    _rflag_text = await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: reset_flag.read_text(encoding="utf-8")
+                    )
+                    _rflag_data = _rjson.loads(_rflag_text)
                     reset_flag.unlink(missing_ok=True)
                     _target_jid = _rflag_data.get("jid", "")
                     if _target_jid:
@@ -1088,7 +1097,14 @@ async def _message_loop() -> None:
                     try:
                         _alert_key, _alert_msg = _health_alert_queue.get_nowait()
                         if _MONITOR_JID:
-                            asyncio.create_task(route_outbound(_MONITOR_JID, _alert_msg))
+                            # p28a: add done-callback so exceptions from this
+                            # fire-and-forget task are logged rather than silently
+                            # swallowed by the event loop.
+                            _ha_task = asyncio.create_task(
+                                route_outbound(_MONITOR_JID, _alert_msg),
+                                name=f"health-alert-{_alert_key}",
+                            )
+                            _ha_task.add_done_callback(_task_done_callback_main)
                         else:
                             log.debug("Health alert dropped (MONITOR_JID not set): %s", _alert_key)
                     except asyncio.QueueEmpty:
@@ -1554,6 +1570,31 @@ async def main() -> None:
         "slack": "SlackChannel",
         "gmail": "GmailChannel",
     }
+
+    # p28b: Startup token pre-validation — warn for each enabled channel whose
+    # required token is missing or empty BEFORE attempting connect().  The
+    # individual channel connect() methods already warn when their token is
+    # absent, but those warnings are per-channel and easy to miss when multiple
+    # channels fail silently.  This block emits a single consolidated WARNING
+    # at the start of the channel-loading section so operators see all missing
+    # tokens in one place.
+    from .env import read_env_file as _read_env
+    _channel_token_keys = {
+        "telegram": "TELEGRAM_BOT_TOKEN",
+        "discord": "DISCORD_BOT_TOKEN",
+        "whatsapp": "WHATSAPP_TOKEN",
+        "slack": "SLACK_BOT_TOKEN",
+    }
+    _enabled_set = set(config.ENABLED_CHANNELS)
+    _env_vals = _read_env(list(_channel_token_keys.values()))
+    for _ch_name, _token_key in _channel_token_keys.items():
+        if _ch_name in _enabled_set and not _env_vals.get(_token_key, "").strip():
+            log.warning(
+                "STARTUP WARNING: channel %r is enabled (ENABLED_CHANNELS) but %s is "
+                "not set in .env — this channel will be disabled. "
+                "Set the token and restart to enable it.",
+                _ch_name, _token_key,
+            )
 
     # Validate ENABLED_CHANNELS at startup: warn loudly for unrecognised names
     # so operators catch typos immediately rather than silently running with no channels.

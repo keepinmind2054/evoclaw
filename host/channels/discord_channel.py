@@ -53,6 +53,16 @@ class DiscordChannel:
         def run_client():
             try:
                 self._loop.run_until_complete(self._client.start(self._token))
+            except discord.LoginFailure as auth_exc:
+                # p28b: Invalid or revoked token.  Retrying will not help.
+                # Log CRITICAL so the operator rotates the token in the
+                # Discord developer portal and updates .env.
+                log.critical(
+                    "Discord: LoginFailure — DISCORD_BOT_TOKEN is invalid or revoked. "
+                    "Obtain a new token from the Discord Developer Portal and update .env, "
+                    "then restart. Error: %s",
+                    auth_exc,
+                )
             except Exception as exc:
                 log.error("Discord client thread exited with error: %s", exc)
 
@@ -300,9 +310,43 @@ class DiscordChannel:
 
             async def _send():
                 channel = await self._get_channel(jid)
-                if channel is not None:
-                    for chunk in chunks:
+                if channel is None:
+                    return
+                for chunk in chunks:
+                    try:
                         await channel.send(chunk)
+                    except discord.Forbidden as forbidden_exc:
+                        # p28b: Bot lacks permissions in this channel or was removed.
+                        # Log at WARNING — this is a normal operational event (e.g. admin
+                        # restricted the bot's write permissions) and does not indicate
+                        # token revocation.  Stop sending remaining chunks.
+                        log.warning(
+                            "Discord send_message: Forbidden for jid=%s — "
+                            "bot may lack permissions or was removed from the channel. "
+                            "Error: %s",
+                            jid, forbidden_exc,
+                        )
+                        return
+                    except discord.HTTPException as http_exc:
+                        # p28b: Handle unexpected HTTP status codes from Discord.
+                        # 429 (RateLimit) is handled by discord.py automatically.
+                        # 401 means the token was revoked — log CRITICAL.
+                        # 5xx codes are transient; log ERROR but continue (discord.py
+                        # may retry internally; this is a last-resort guard).
+                        if http_exc.status == 401:
+                            log.critical(
+                                "Discord send_message: HTTP 401 Unauthorized — "
+                                "DISCORD_BOT_TOKEN may have been revoked. "
+                                "Obtain a new token from the Discord Developer Portal "
+                                "and update .env, then restart. Error: %s",
+                                http_exc,
+                            )
+                            return  # Token is unusable; abort remaining chunks
+                        log.error(
+                            "Discord send_message: HTTP %d for jid=%s: %s",
+                            http_exc.status, jid, http_exc,
+                        )
+
             await self._run_in_discord_loop(_send())
         except Exception as exc:
             log.error("Discord send_message exception: %s", exc)
