@@ -122,6 +122,12 @@ CONTAINER_TMPFS_SIZE: str = os.environ.get("CONTAINER_TMPFS_SIZE", "64m")
 # before being force-killed.  Intentionally short (5 s) to avoid delaying
 # overall shutdown.
 CONTAINER_STOP_GRACE_SECS: int = _env_int("CONTAINER_STOP_GRACE_SECS", 5, minimum=1)
+# CONTAINER_NETWORK: Docker network mode for agent containers.
+# Default "none" isolates containers from the network (most secure).
+# Set to "bridge" if agents need direct outbound internet access to call LLM APIs
+# (e.g. NIM, OpenAI) — required when the agent makes API calls directly rather than
+# routing them through the host.
+CONTAINER_NETWORK: str = os.environ.get("CONTAINER_NETWORK", "none")
 
 # Timezone
 TIMEZONE = os.environ.get("TZ", os.environ.get("TIMEZONE", "UTC"))
