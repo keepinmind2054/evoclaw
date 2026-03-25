@@ -15,8 +15,12 @@ log = logging.getLogger(__name__)
 # The opt-in env var is checked at module load time so that the decision is
 # logged once during startup, not silently on every message.
 import os as _os
+from .env import read_env_file as _read_env_file
 _ALLOW_ALL_IF_MISSING: bool = (
-    _os.environ.get("SENDER_ALLOWLIST_ALLOW_ALL_IF_MISSING", "false").lower() == "true"
+    (
+        _os.environ.get("SENDER_ALLOWLIST_ALLOW_ALL_IF_MISSING")
+        or _read_env_file(["SENDER_ALLOWLIST_ALLOW_ALL_IF_MISSING"]).get("SENDER_ALLOWLIST_ALLOW_ALL_IF_MISSING", "false")
+    ).lower() == "true"
 )
 if _ALLOW_ALL_IF_MISSING:
     log.warning(
