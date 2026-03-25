@@ -60,6 +60,40 @@ def init_database(db_path: Path) -> None:
     global _db
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with _db_lock:
+        # p28b: Integrity check before opening.  A corrupt SQLite file can cause
+        # silent data loss or cryptic errors at query time.  Run a quick
+        # integrity_check at startup so operators are warned immediately rather
+        # than discovering corruption hours later via cascading failures.
+        # The check is performed on a temporary connection so a failed connection
+        # attempt (e.g. file is not a valid SQLite DB) is caught and the
+        # corruption is surfaced as a CRITICAL log rather than an unhandled
+        # OperationalError that crashes the startup.
+        if db_path.exists():
+            try:
+                _check_conn = sqlite3.connect(str(db_path), timeout=5.0)
+                _check_result = _check_conn.execute("PRAGMA integrity_check").fetchone()
+                _check_conn.close()
+                if _check_result and _check_result[0] != "ok":
+                    log.critical(
+                        "DATABASE CORRUPTION DETECTED at %s — integrity_check returned: %r. "
+                        "The database may be partially readable.  "
+                        "To recover: stop EvoClaw, rename the file to messages.db.corrupt, "
+                        "restart (a fresh DB will be created), then manually restore data "
+                        "from a backup if available.  "
+                        "Continuing startup with the existing file — expect potential errors.",
+                        db_path, _check_result[0],
+                    )
+            except sqlite3.DatabaseError as _ic_exc:
+                log.critical(
+                    "DATABASE CORRUPTION DETECTED at %s — could not open file: %s. "
+                    "Rename the file to messages.db.corrupt and restart to allow EvoClaw "
+                    "to create a fresh database.  Data will be lost unless a backup exists.",
+                    db_path, _ic_exc,
+                )
+                # Do not raise — allow startup to continue; a new connection attempt below
+                # will either succeed (file is an unusual but valid SQLite format) or fail
+                # with a clear OperationalError rather than a silent corruption.
+
         new_conn = sqlite3.connect(str(db_path), check_same_thread=False)
         new_conn.row_factory = sqlite3.Row
         new_conn.execute("PRAGMA journal_mode=WAL")

@@ -198,6 +198,20 @@ class TelegramChannel:
                     )
                     raise  # Conflict is unrecoverable, re-raise immediately
 
+                # p28b: Detect token revocation / authorization failures at connect time.
+                # Unauthorized (401) or Forbidden (403) from Telegram means the bot
+                # token is invalid or has been revoked.  Retrying will not help and
+                # clutters logs — raise immediately with a clear CRITICAL message so
+                # the operator knows to rotate the token.
+                if any(kw in err_str for kw in ("unauthorized", "invalid token", "forbidden", "bot was kicked")):
+                    log.critical(
+                        "Telegram: Authorization failure (%s: %s) — "
+                        "TELEGRAM_BOT_TOKEN may be invalid or revoked. "
+                        "Rotate the token in BotFather and update .env, then restart.",
+                        type(e).__name__, e,
+                    )
+                    raise  # Unrecoverable — re-raise immediately
+
                 if attempt < MAX_RETRIES:
                     wait = min(2 ** attempt, 30)  # 2s, 4s, 8s, 16s (capped at 30s)
                     log.warning(
@@ -293,7 +307,9 @@ class TelegramChannel:
                 # p24c: handle Telegram FloodWait (429 RetryAfter) rate-limit errors.
                 # When Telegram tells us to back off, wait the specified number of seconds
                 # and retry once before giving up.
-                from telegram.error import RetryAfter, TimedOut, NetworkError
+                # p28b: also handle token revocation (Unauthorized/Forbidden) and other
+                # unexpected HTTP status codes (402, 503, etc.) explicitly.
+                from telegram.error import RetryAfter, TimedOut, NetworkError, Forbidden, Unauthorized
                 try:
                     await self._app.bot.send_message(chat_id=chat_id, text=chunk)
                 except RetryAfter as flood_exc:
@@ -304,6 +320,24 @@ class TelegramChannel:
                     )
                     await asyncio.sleep(wait_secs)
                     await self._app.bot.send_message(chat_id=chat_id, text=chunk)
+                except Unauthorized as auth_exc:
+                    # p28b: Token revoked mid-run.  Do not retry — further sends
+                    # will also fail.  Log CRITICAL so the operator rotates the token.
+                    log.critical(
+                        "send_message: Telegram Unauthorized (token revoked?) for %s: %s — "
+                        "rotate TELEGRAM_BOT_TOKEN in BotFather and restart.",
+                        jid, auth_exc,
+                    )
+                    return  # Abort remaining chunks — they will all fail too
+                except Forbidden as forbidden_exc:
+                    # p28b: Bot was kicked from the chat or blocked by the user.
+                    # Log at WARNING (not error) — this is a normal lifecycle event.
+                    log.warning(
+                        "send_message: Telegram Forbidden for %s: %s — "
+                        "bot may have been removed from the group or blocked.",
+                        jid, forbidden_exc,
+                    )
+                    return  # No point sending remaining chunks
                 except (TimedOut, NetworkError) as transient_exc:
                     # p24c: retry once on transient network errors (timeouts, brief disconnects).
                     log.warning(
@@ -313,7 +347,9 @@ class TelegramChannel:
                     await asyncio.sleep(2.0)
                     await self._app.bot.send_message(chat_id=chat_id, text=chunk)
             except Exception as exc:
-                log.error("send_message: failed to deliver to %s: %s", jid, exc)
+                # p28b: Log the exception type so unexpected HTTP codes (402, 503, etc.)
+                # are identifiable in logs without requiring a second investigation pass.
+                log.error("send_message: failed to deliver to %s (%s): %s", jid, type(exc).__name__, exc)
 
     async def send_file(self, jid: str, file_path: str, caption: str = "") -> None:
         """Send a document/file to a Telegram chat.
