@@ -566,9 +566,10 @@ async def run_container_agent(
         "-e", f"TZ={config.TIMEZONE}",  # 時區設定，確保 agent 顯示正確時間
         "-e", "PYTHONUNBUFFERED=1",  # 強制 Python stdout 立即 flush，讓 Docker Desktop 日誌即時顯示
         # ── Network isolation (p13d) ───────────────────────────────────────────
-        # Agent containers must not make arbitrary outbound network calls.
-        # LLM API calls are initiated by the host, not the container.
-        "--network", "none",
+        # Default: "none" — fully isolates the container from the network.
+        # Set CONTAINER_NETWORK=bridge in .env when agents call LLM APIs directly
+        # (e.g. NIM, OpenAI, Gemini) rather than routing through the host proxy.
+        "--network", config.CONTAINER_NETWORK,
         # ── Capability hardening (p13d) ────────────────────────────────────────
         # Drop all Linux capabilities; grant none back.  The agent only needs to
         # read/write files in mounted volumes — no raw sockets, no mknod, etc.
