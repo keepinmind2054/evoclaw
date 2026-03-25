@@ -27,6 +27,7 @@ class DiscordChannel:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._discord_thread: Optional[threading.Thread] = None
+        self._ready_event = asyncio.Event()
 
         env = read_env_file(["DISCORD_BOT_TOKEN"])
         self._token = env.get("DISCORD_BOT_TOKEN", "")
@@ -101,6 +102,10 @@ class DiscordChannel:
         async def on_ready():
             self._connected = True
             log.info("Discord channel connected as %s", self._client.user)
+            # Signal wait_connected() that the handshake is complete.
+            # run_coroutine_threadsafe because on_ready fires on the Discord
+            # background loop, but _ready_event lives on the main loop.
+            _main_loop.call_soon_threadsafe(self._ready_event.set)
 
         # Capture the main event loop NOW (before the background thread starts)
         # so the on_message handler can forward callbacks to it.
@@ -198,6 +203,17 @@ class DiscordChannel:
         self._loop = asyncio.new_event_loop()
         self._discord_thread = self._start_discord_thread()
         log.info("Discord channel starting in background thread")
+
+    async def wait_connected(self, timeout: float = 10.0) -> bool:
+        """Wait until on_ready fires or timeout expires. Returns True if connected."""
+        if self._connected:
+            return True
+        try:
+            await asyncio.wait_for(self._ready_event.wait(), timeout=timeout)
+            return self._connected
+        except asyncio.TimeoutError:
+            log.warning("Discord did not connect within %.0fs", timeout)
+            return False
 
     async def _get_channel(self, jid: str) -> Optional[discord.abc.Messageable]:
         if not self._client:
