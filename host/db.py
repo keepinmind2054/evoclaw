@@ -1047,6 +1047,70 @@ def log_evolution_event(jid: str, event_type: str, **kwargs) -> None:
             raise
 
 
+def upsert_group_genome_with_event(jid: str, genome_fields: dict, event_kwargs: dict) -> None:
+    """Atomically update group_genome and insert an evolution_log row.
+
+    p29a BUG-FIX (MEDIUM): The previous code committed genome updates and audit
+    log inserts as two separate transactions in evolve_genome_from_fitness().  A
+    process crash between the first commit and the second left the genome advanced
+    by one generation but the corresponding audit event missing, making the
+    evolution log inconsistent with the genome table.
+
+    This function wraps both writes inside a single _db_lock / transaction so
+    either both succeed or both are rolled back.
+
+    Parameters
+    ----------
+    jid:           Group JID.
+    genome_fields: Whitelisted genome columns to update (same as upsert_group_genome).
+    event_kwargs:  Whitelisted keyword arguments for evolution_log (same as log_evolution_event).
+    """
+    import json as _json
+
+    genome_allowed = {"response_style", "formality", "technical_depth", "generation"}
+    event_allowed = {"generation_before", "generation_after", "fitness_score",
+                     "avg_response_ms", "genome_before", "genome_after", "notes"}
+
+    fields = {k: v for k, v in genome_fields.items() if k in genome_allowed}
+    event_fields = {k: v for k, v in event_kwargs.items() if k in event_allowed}
+
+    # Serialise genome dicts to JSON strings for the event log.
+    for key in ("genome_before", "genome_after"):
+        if key in event_fields and isinstance(event_fields[key], dict):
+            event_fields[key] = _json.dumps(event_fields[key], ensure_ascii=False)
+
+    event_type = event_kwargs.get("event_type", "genome_evolved")
+
+    with _db_lock:
+        db = get_db()
+        try:
+            # ── genome upsert ──────────────────────────────────────────────
+            db.execute("INSERT OR IGNORE INTO group_genome (jid) VALUES (?)", (jid,))
+            if fields:
+                assert all(k in genome_allowed for k in fields), \
+                    f"Unexpected column in genome_fields: {set(fields) - genome_allowed}"
+                set_parts = [f"{k} = ?" for k in fields]
+                set_parts.append("updated_at = datetime('now')")
+                values = list(fields.values())
+                db.execute(
+                    f"UPDATE group_genome SET {', '.join(set_parts)} WHERE jid = ?",
+                    (*values, jid),
+                )
+
+            # ── evolution_log insert ────────────────────────────────────────
+            assert all(k in event_allowed for k in event_fields), \
+                f"Unexpected column in event_kwargs: {set(event_fields) - event_allowed}"
+            cols = ", ".join(["jid", "event_type"] + list(event_fields.keys()))
+            placeholders = ", ".join(["?"] * (2 + len(event_fields)))
+            ev_values = [jid, event_type] + list(event_fields.values())
+            db.execute(f"INSERT INTO evolution_log ({cols}) VALUES ({placeholders})", ev_values)
+
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+
 def get_evolution_log(jid: str = None, limit: int = 100, event_type: str = None) -> list:
     """
     查詢演化歷程日誌。

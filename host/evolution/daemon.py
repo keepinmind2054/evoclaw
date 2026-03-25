@@ -136,7 +136,25 @@ async def _run_cycle() -> None:
     DB 查詢都是同步的（sqlite3），用 executor 避免阻塞 event loop。
     """
     log.info("Evolution cycle starting")
-    await asyncio.to_thread(_sync_evolve)
+    # BUG-EVO-01 FIX (MEDIUM): _sync_evolve() iterates all active JIDs and
+    # executes several DB queries per JID.  On a deployment with many active
+    # groups or a slow/locked SQLite, this can hang indefinitely while the
+    # asyncio.to_thread call occupies a ThreadPoolExecutor slot.  _sync_prune_logs
+    # already uses asyncio.wait_for() for this reason; apply the same guard here
+    # so a stalled evolution cycle cannot block the thread pool forever.
+    # 300 seconds matches the prune_logs timeout and should be more than enough
+    # even for large deployments.
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(_sync_evolve),
+            timeout=300.0,
+        )
+    except asyncio.TimeoutError:
+        log.error(
+            "Evolution cycle timed out after 300s — skipping this cycle. "
+            "Check for DB lock contention or an unusually large number of active groups."
+        )
+        return
     log.info("Evolution cycle complete")
 
 
