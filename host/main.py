@@ -306,6 +306,12 @@ def _is_rate_limited(jid: str) -> bool:
 # SENDER_RATE_LIMIT_WINDOW_SECS will be rate-limited and notified.
 # Config: SENDER_RATE_LIMIT_MAX (default 5), SENDER_RATE_LIMIT_WINDOW_SECS (default 60)
 _sender_msg_timestamps: dict[str, deque] = {}  # sender_id → deque of float timestamps
+# BUG-P30A-01: cap _sender_msg_timestamps to prevent unbounded memory growth.
+# _group_msg_timestamps is cleaned up on group deregistration (via refresh_groups.flag),
+# but _sender_msg_timestamps has no analogous cleanup path — unique senders accumulate
+# indefinitely.  Evict the oldest-inserted sender when the dict exceeds this cap.
+# 5000 entries × ~120 bytes each ≈ 600 KB maximum footprint.
+_SENDER_TIMESTAMPS_MAX = 5000
 # Track the last time we notified a sender they're rate-limited, to avoid spamming them.
 _sender_rate_limit_notify: dict[str, float] = {}
 _SENDER_RATE_NOTIFY_COOLDOWN = 30.0  # seconds between rate-limit notifications to same sender
@@ -317,10 +323,27 @@ def _is_sender_rate_limited(sender: str) -> bool:
     Config via env vars:
       SENDER_RATE_LIMIT_MAX          (default 5 messages)
       SENDER_RATE_LIMIT_WINDOW_SECS  (default 60 seconds)
+
+    BUG-CFG-RL-01 FIX (mirrored here): clamp max_msgs to minimum 1 so that
+    SENDER_RATE_LIMIT_MAX=0 does not create deque(maxlen=0), which would make
+    len(q) >= 0 always True and silently block every sender permanently.
+    BUG-CFG-RL-02 FIX (mirrored here): clamp window to minimum 1 so that
+    SENDER_RATE_LIMIT_WINDOW_SECS=0 does not silently disable rate limiting by
+    making every timestamp appear outside the window.
     """
-    max_msgs = int(os.environ.get("SENDER_RATE_LIMIT_MAX", 5))
-    window = float(os.environ.get("SENDER_RATE_LIMIT_WINDOW_SECS", 60))
+    try:
+        max_msgs = max(1, int(os.environ.get("SENDER_RATE_LIMIT_MAX", 5)))
+    except (ValueError, TypeError):
+        max_msgs = 5
+    try:
+        window = max(1.0, float(os.environ.get("SENDER_RATE_LIMIT_WINDOW_SECS", 60)))
+    except (ValueError, TypeError):
+        window = 60.0
     now = time.time()
+    # Evict oldest entry when the dict is at capacity to bound memory usage.
+    if sender not in _sender_msg_timestamps and len(_sender_msg_timestamps) >= _SENDER_TIMESTAMPS_MAX:
+        _oldest = next(iter(_sender_msg_timestamps))
+        _sender_msg_timestamps.pop(_oldest, None)
     q = _sender_msg_timestamps.setdefault(sender, deque(maxlen=max_msgs * 2))
     while q and now - q[0] > window:
         q.popleft()

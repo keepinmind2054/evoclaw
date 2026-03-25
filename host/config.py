@@ -140,8 +140,16 @@ LOG_FORMAT = os.environ.get("LOG_FORMAT", "text").lower()
 # Per-group message rate limiting (sliding window)
 # A group that sends more than RATE_LIMIT_MAX_MSGS within RATE_LIMIT_WINDOW_SECS
 # will have excess messages dropped to protect system fairness.
-RATE_LIMIT_MAX_MSGS = _env_int("RATE_LIMIT_MAX_MSGS", 20)
-RATE_LIMIT_WINDOW_SECS = _env_int("RATE_LIMIT_WINDOW_SECS", 60)
+# BUG-CFG-RL-01 FIX: enforce minimum=1 for RATE_LIMIT_MAX_MSGS.
+# A value of 0 creates deque(maxlen=0) whose len() is always >= 0, causing
+# every single message to be rate-limited and the bot to become completely
+# unresponsive.  Minimum 1 ensures the deque has capacity and messages flow.
+RATE_LIMIT_MAX_MSGS = _env_int("RATE_LIMIT_MAX_MSGS", 20, minimum=1)
+# BUG-CFG-RL-02 FIX: enforce minimum=1 for RATE_LIMIT_WINDOW_SECS.
+# A value of 0 means all timestamps are always outside the window (now-ts > 0
+# for any past ts), so the deque stays empty and rate limiting is silently
+# disabled, bypassing the intended fairness control.
+RATE_LIMIT_WINDOW_SECS = _env_int("RATE_LIMIT_WINDOW_SECS", 60, minimum=1)
 
 # Gmail
 GMAIL_POLL_INTERVAL = _env_int("GMAIL_POLL_INTERVAL", 30)
