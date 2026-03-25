@@ -2526,22 +2526,36 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
         candidate = response.candidates[0] if response.candidates else None
         stop_reason = str(candidate.finish_reason) if candidate else "none"
         _log("🧠 LLM ←", f"stop={stop_reason}")
-        if not candidate or not candidate.content or not candidate.content.parts:
-            # P15A-FIX-11: Distinguish safety/recitation blocks from ordinary empty
-            # responses so the caller can surface a meaningful message to the user.
+
+        # P31A-FIX-1: Check for terminal finish_reason values (SAFETY, RECITATION,
+        # MAX_TOKENS) BEFORE inspecting content.  Gemini sometimes returns partial
+        # content alongside a SAFETY or RECITATION finish_reason; the old code only
+        # checked these in the `not candidate.content` branch, so a response that
+        # had content *and* finish_reason=SAFETY would silently fall through, treat
+        # the partial text as a normal reply, and never surface the safety message.
+        _sr_lower = stop_reason.lower()
+        _is_safety_block = "safety" in _sr_lower or "recitation" in _sr_lower
+        _is_max_tokens   = "max_tokens" in _sr_lower or stop_reason.strip() == "2"
+        if _is_safety_block or _is_max_tokens:
             _feedback = getattr(response, "prompt_feedback", None)
             if _feedback:
                 _log("⚠️ GEMINI-BLOCK", f"prompt_feedback={_feedback}")
-            _sr_lower = stop_reason.lower()
             if "safety" in _sr_lower:
                 final_response = "（系統：回應被安全過濾器攔截，請調整問題後重試。）"
                 _log("🚨 GEMINI-SAFETY", f"finish_reason={stop_reason} — safety block; returning user-visible error")
             elif "recitation" in _sr_lower:
                 final_response = "（系統：回應被版權偵測攔截，請以不同方式重新提問。）"
                 _log("⚠️ GEMINI-RECITATION", f"finish_reason={stop_reason} — recitation block")
-            elif "max_tokens" in _sr_lower or stop_reason.strip() == "2":
+            else:
                 final_response = "（系統：輸入超出模型 context 限制，請縮短對話記錄或簡化提示後重試。）"
                 _log("⚠️ GEMINI-MAXTOKEN", f"finish_reason={stop_reason} — context limit hit")
+            break
+
+        if not candidate or not candidate.content or not candidate.content.parts:
+            # No content and no recognised terminal finish_reason — unexpected empty
+            # response (e.g. network truncation).  Log and break without overwriting
+            # any final_response already accumulated.
+            _log("⚠️ GEMINI-EMPTY", f"finish_reason={stop_reason} — no content/parts; breaking")
             break
 
         parts = candidate.content.parts
