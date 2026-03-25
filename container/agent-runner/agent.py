@@ -3152,6 +3152,9 @@ def main():
         "automate", "自動化", "integrate", "整合", "pipeline", "流程",
         "compare", "比較", "summarize", "summarise", "摘要",
         "npm", "pip", "yarn", "cargo", "make", "cmake", "gradle",
+        # Repo / file inspection tasks — need Glob+Read, classify as Level B
+        "repo", "repository", "倉庫", "更新", "有沒有", "有沒", "檢查", "check",
+        "看看", "看一下", "有什麼", "列出", "list", "show", "顯示",
     ]
     _prompt_lower = prompt.lower() if prompt else ""
     _is_level_b = (
