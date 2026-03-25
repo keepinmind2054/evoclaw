@@ -867,8 +867,10 @@ async def run_container_agent(
             #   125, 126, 127 = Docker itself failed (image not found, permission, etc.)
             #   other non-zero = likely Docker/container issue
             _AGENT_EXIT_CODES = {0, 124, 137, 143}  # exit codes where container itself ran fine
-            # Guard against proc being None (Docker failed to spawn at OS level)
-            _container_ran = proc is not None and proc.returncode in _AGENT_EXIT_CODES
+            # Guard against proc being None (Docker failed to spawn at OS level).
+            # On Windows proc is always None — use _win_exit_code instead.
+            _effective_exit = (proc.returncode if proc is not None else _win_exit_code)
+            _container_ran = _effective_exit in _AGENT_EXIT_CODES
 
             # p16c BUG-FIX (MEDIUM): distinguish OOM (exit 137) in the user-facing
             # on_error notification.  Previously the OOM path emitted the same generic
