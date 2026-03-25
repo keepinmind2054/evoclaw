@@ -1555,6 +1555,31 @@ async def main() -> None:
         "gmail": "GmailChannel",
     }
 
+    # p28b: Startup token pre-validation — warn for each enabled channel whose
+    # required token is missing or empty BEFORE attempting connect().  The
+    # individual channel connect() methods already warn when their token is
+    # absent, but those warnings are per-channel and easy to miss when multiple
+    # channels fail silently.  This block emits a single consolidated WARNING
+    # at the start of the channel-loading section so operators see all missing
+    # tokens in one place.
+    from .env import read_env_file as _read_env
+    _channel_token_keys = {
+        "telegram": "TELEGRAM_BOT_TOKEN",
+        "discord": "DISCORD_BOT_TOKEN",
+        "whatsapp": "WHATSAPP_TOKEN",
+        "slack": "SLACK_BOT_TOKEN",
+    }
+    _enabled_set = set(config.ENABLED_CHANNELS)
+    _env_vals = _read_env(list(_channel_token_keys.values()))
+    for _ch_name, _token_key in _channel_token_keys.items():
+        if _ch_name in _enabled_set and not _env_vals.get(_token_key, "").strip():
+            log.warning(
+                "STARTUP WARNING: channel %r is enabled (ENABLED_CHANNELS) but %s is "
+                "not set in .env — this channel will be disabled. "
+                "Set the token and restart to enable it.",
+                _ch_name, _token_key,
+            )
+
     # Validate ENABLED_CHANNELS at startup: warn loudly for unrecognised names
     # so operators catch typos immediately rather than silently running with no channels.
     _known_channels = set(_channel_module_map.keys())

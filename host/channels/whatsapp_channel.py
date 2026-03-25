@@ -296,9 +296,43 @@ class WhatsAppChannel:
                             if resp2.status not in (200, 201):
                                 body2 = await resp2.text()
                                 log.error("WhatsApp send_message retry failed: %s %s", resp2.status, body2)
+                    elif resp.status in (401, 403):
+                        # p28b: Token revoked or permissions problem.  Further sends
+                        # will also fail.  Log CRITICAL so the operator rotates the token.
+                        body = await resp.text()
+                        log.critical(
+                            "WhatsApp send_message: HTTP %d for %s — "
+                            "WHATSAPP_TOKEN may be revoked or expired. "
+                            "Rotate the token in Meta Business Suite and update .env, then restart. "
+                            "Response: %s",
+                            resp.status, jid, body[:200],
+                        )
+                        return  # Abort remaining chunks — token is unusable
+                    elif resp.status in (502, 503, 504):
+                        # p28b: Transient upstream error from Meta's API — retry once
+                        # with a short backoff.  These are server-side issues, not
+                        # client-side, and typically resolve within a few seconds.
+                        body = await resp.text()
+                        log.warning(
+                            "WhatsApp send_message: HTTP %d (transient) for %s — retrying once. Response: %s",
+                            resp.status, jid, body[:200],
+                        )
+                        await asyncio.sleep(3.0)
+                        async with self._session.post(url, json=payload) as resp3:
+                            if resp3.status not in (200, 201):
+                                body3 = await resp3.text()
+                                log.error(
+                                    "WhatsApp send_message: retry after %d still failed with %d for %s: %s",
+                                    resp.status, resp3.status, jid, body3[:200],
+                                )
                     elif resp.status not in (200, 201):
                         body = await resp.text()
-                        log.error("WhatsApp send_message failed: %s %s", resp.status, body)
+                        # p28b: Log the status code prominently so unexpected codes
+                        # (e.g. 402 Payment Required) are immediately identifiable.
+                        log.error(
+                            "WhatsApp send_message: unexpected HTTP %d for %s: %s",
+                            resp.status, jid, body[:300],
+                        )
             except Exception as exc:
                 log.error("WhatsApp send_message exception: %s", exc)
 
