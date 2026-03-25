@@ -309,7 +309,7 @@ class TelegramChannel:
                 # and retry once before giving up.
                 # p28b: also handle token revocation (Unauthorized/Forbidden) and other
                 # unexpected HTTP status codes (402, 503, etc.) explicitly.
-                from telegram.error import RetryAfter, TimedOut, NetworkError, Forbidden, Unauthorized
+                from telegram.error import RetryAfter, TimedOut, NetworkError, Forbidden
                 try:
                     await self._app.bot.send_message(chat_id=chat_id, text=chunk)
                 except RetryAfter as flood_exc:
