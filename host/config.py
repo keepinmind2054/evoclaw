@@ -73,16 +73,6 @@ IPC_POLL_INTERVAL = _env_int("IPC_POLL_INTERVAL", 1000, minimum=100) / 1000
 
 # Container
 CONTAINER_IMAGE = os.environ.get("CONTAINER_IMAGE", "evoclaw-agent:latest")
-# p22c: Warn at config import time when CONTAINER_IMAGE uses the mutable ':latest'
-# tag.  ':latest' is the default but is mutable — a rebuild or 'docker pull' can
-# silently change the agent behaviour without any config change.  Operators should
-# pin to a specific version (e.g., evoclaw-agent:v1.27.0) in production.
-if CONTAINER_IMAGE.endswith(":latest"):
-    import logging as _log_tmp
-    _log_tmp.getLogger(__name__).warning(
-        "CONTAINER_IMAGE uses ':latest' tag — image may change unexpectedly on rebuild. "
-        "Consider pinning to a specific version (e.g., evoclaw-agent:v1.27.0) for reproducibility."
-    )
 # CONTAINER_TIMEOUT: maximum wall-clock seconds a single container run may take before
 # it is force-killed.  Configured as milliseconds in the env var for consistency with
 # other interval vars (e.g. POLL_INTERVAL), then divided by 1000 for runtime use.
