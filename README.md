@@ -1,6 +1,6 @@
 # EvoClaw
 
-[![Version](https://img.shields.io/badge/version-v1.26.0-blue)](https://github.com/KeithKeepGoing/evoclaw/blob/main/docs/CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v1.35.0-blue)](https://github.com/KeithKeepGoing/evoclaw/blob/main/docs/CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Docker](https://img.shields.io/badge/docker-required-blue)](https://www.docker.com/)
