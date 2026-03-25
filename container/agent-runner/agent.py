@@ -213,6 +213,15 @@ def _check_path_allowed(file_path: str) -> str | None:
     prompt-injection attacks from reading sensitive container files like
     /proc/self/environ (which may contain env vars) or /etc/passwd.
     """
+    # BUG-P26B-4: reject empty paths and paths containing null bytes before
+    # calling Path().resolve().  An empty string resolves to the Python process
+    # CWD which may or may not be inside /workspace/ (non-deterministic).  A
+    # path with embedded null bytes (\x00) would be silently truncated by the
+    # C-level open() syscall, potentially accessing a different file than intended.
+    if not file_path:
+        return "Error: file path must not be empty"
+    if "\x00" in file_path:
+        return "Error: file path must not contain null bytes"
     try:
         resolved = str(Path(file_path).resolve())
     except Exception as exc:
@@ -282,6 +291,14 @@ def tool_bash(command: str) -> str:
             _log("🚨 SECURITY", f"Bash: blocked dangerous command pattern: {_cmd_strip[:200]}")
             return "Error: command blocked — matches dangerous command pattern (rm -rf /, dd to block device, mkfs, etc.)"
 
+    # BUG-P26B-5: a command string containing a null byte (\x00) would be
+    # silently truncated at the C-level execve() boundary, executing only the
+    # portion before the first null byte.  This can allow a prompt-injected
+    # payload to hide commands after a null byte that only partially execute.
+    # Reject such commands early with a clear error message.
+    if "\x00" in command:
+        return "\u2717 [exit ?] Error: command must not contain null bytes"
+
     _BASH_OUTPUT_LIMIT = 50 * 1024  # 50 KB
 
     proc = None
@@ -327,6 +344,24 @@ def tool_bash(command: str) -> str:
         else:
             return f"\u2717 [exit {_exit_code}] {out or '(no output)'}"
     except Exception as e:
+        # BUG-P26B-6: if an unexpected exception occurs after Popen() succeeds
+        # (e.g. MemoryError decoding output), the child process may still be
+        # running or waiting for pipes to be drained.  Kill and reap it so no
+        # zombie remains.
+        if proc is not None:
+            try:
+                import os as _os_cleanup
+                import signal as _sig_cleanup
+                _os_cleanup.killpg(_os_cleanup.getpgid(proc.pid), _sig_cleanup.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            try:
+                proc.communicate(timeout=5)
+            except Exception:
+                pass
         return f"\u2717 [exit ?] Error: {e}"
 
 
@@ -1602,9 +1637,12 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
 
         if response.stop_reason == "end_turn":
             # Collect all text blocks
+            # BUG-P26B-1: block.text may be None even when the attribute exists
+            # (e.g. a text content block returned with a null value by the API).
+            # Joining None would raise TypeError; guard with an explicit None check.
             final_response = " ".join(
                 block.text for block in response.content
-                if hasattr(block, "text")
+                if hasattr(block, "text") and block.text is not None
             )
             # ── Fake status detection on end_turn (no tool calls made) ─────────
             _fake_hits = _FAKE_STATUS_RE.findall(final_response)
@@ -1668,9 +1706,10 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
                     _partial_results.append({"type": "tool_result", "tool_use_id": _tb.id, "content": _tr_str})
                 messages.append({"role": "user", "content": _partial_results})
             # Unexpected / terminal stop reason — collect text and exit
+            # BUG-P26B-1: same None guard as in the end_turn branch above.
             final_response = " ".join(
                 block.text for block in response.content
-                if hasattr(block, "text")
+                if hasattr(block, "text") and block.text is not None
             )
             _log("⚠️ UNEXPECTED-STOP", f"Claude stop_reason={response.stop_reason} — exiting loop")
             break
@@ -2204,6 +2243,18 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
         # 導致模型用假進度報告（完全虛構內容）冒充在工作。
         # 修正：只有「實質工具 + send_message」的組合才算真里程碑。
         #       連續多輪「只有 send_message」→ 強硬警告：停止假報告，立即做事。
+        #
+        # BUG-P26B-3: the OpenAI API requires that every tool-role message
+        # immediately follows the assistant message that issued the tool_calls —
+        # no user-role message may be inserted between them.  The milestone
+        # enforcer and MEMORY.md reminder previously injected user messages into
+        # history BEFORE the tool-execution loop, which placed them between the
+        # assistant tool_calls message and its tool-role results, causing a 400
+        # validation error on the next API call.  Fix: collect deferred injection
+        # messages in _deferred_user_msgs and append them AFTER all tool results
+        # have been added to history.
+        _deferred_user_msgs: list = []
+
         _tool_names_this_turn = {tc.function.name for tc in msg.tool_calls}
         _sent_message_this_turn = "mcp__evoclaw__send_message" in _tool_names_this_turn
         _did_real_work = bool(_tool_names_this_turn & _SUBSTANTIVE_TOOLS)
@@ -2218,7 +2269,7 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
             _log("⚠️ FAKE-PROGRESS", f"Model called only send_message (no real work) — streak={_only_notify_turns}")
             if _only_notify_turns >= 2 and n < MAX_ITER - 2:
                 _log("🚨 FAKE-PROGRESS", f"Injecting anti-fabrication warning after {_only_notify_turns} fake-report turns")
-                history.append({
+                _deferred_user_msgs.append({
                     "role": "user",
                     "content": (
                         "【系統警告】你已連續多輪只呼叫 send_message，沒有呼叫任何實質工具（Bash、Read、Write、run_agent 等）。"
@@ -2233,7 +2284,7 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
             _turns_since_notify += 1
             if _turns_since_notify >= 5 and n < MAX_ITER - 2:
                 _log("⏰ MILESTONE", f"No send_message for {_turns_since_notify} turns — injecting reminder")
-                history.append({
+                _deferred_user_msgs.append({
                     "role": "user",
                     "content": (
                         f"⏰ 你已執行 {_turns_since_notify} 輪未向用戶回報進度。"
@@ -2256,9 +2307,10 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                         break
 
         # 倒數第二輪若 MEMORY.md 仍未寫入 → CRITICAL 提醒
+        # BUG-P26B-3 (cont): defer this injection as well so it lands after tool results.
         if not _memory_written and n == MAX_ITER - 2:
             _log("⚠️ MEMORY-REMIND", f"MEMORY.md not updated by turn {n} — injecting CRITICAL reminder")
-            history.append({
+            _deferred_user_msgs.append({
                 "role": "user",
                 "content": (
                     f"【CRITICAL 系統警告】你在本 session 中尚未更新 MEMORY.md（{_memory_path_str}）。\n"
@@ -2330,6 +2382,13 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                 "tool_call_id": tc.id,
                 "content": result_str,
             })
+
+        # BUG-P26B-3 (cont): now that all tool-role messages have been appended,
+        # it is safe to inject deferred user messages (milestone enforcer warnings,
+        # MEMORY.md reminders) without violating the OpenAI API constraint that
+        # tool-role messages must directly follow the assistant tool_calls message.
+        for _deferred_msg in _deferred_user_msgs:
+            history.append(_deferred_msg)
 
         # Inject retry warning if any tool failed repeatedly this turn
         if _retry_warning:
@@ -2997,7 +3056,11 @@ def main():
                     _mf.seek(max(0, _mem_size - _MEMORY_READ_LIMIT))
                     _memory_content = _mf.read().decode("utf-8", errors="replace").strip()
             else:
-                _memory_content = _memory_path.read_text(encoding="utf-8").strip()
+                # BUG-P26B-2: use errors="replace" so a MEMORY.md file that
+                # contains null bytes or Latin-1 characters (e.g. from filesystem
+                # corruption) does not raise UnicodeDecodeError and silently drop
+                # the entire long-term memory injection.
+                _memory_content = _memory_path.read_text(encoding="utf-8", errors="replace").strip()
         except Exception as _mem_read_err:
             _log("⚠️ MEMORY", f"Failed to read MEMORY.md: {_mem_read_err}")
             _memory_content = ""
