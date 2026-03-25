@@ -60,22 +60,6 @@ def _get_container_semaphore() -> asyncio.Semaphore:
     return _container_semaphore
 
 
-# ── Container image version pin warning ───────────────────────────────────────
-# Log a warning at import time when the image tag uses the mutable ':latest' tag.
-# Operators should pin to a specific version or digest to prevent silent behavioral
-# regressions when the image is rebuilt (e.g. CONTAINER_IMAGE=evoclaw-agent:1.10.12).
-def _warn_if_latest_image() -> None:
-    img = config.CONTAINER_IMAGE
-    if img.endswith(":latest") or ":" not in img:
-        log.warning(
-            "CONTAINER_IMAGE is using an unpinned tag (%r). "
-            "A 'docker pull' or rebuild can silently change agent behavior. "
-            "Consider pinning to a specific version tag, e.g. evoclaw-agent:1.10.22",
-            img,
-        )
-
-_warn_if_latest_image()
-
 # ── Named constants for thresholds (Fix #193) ─────────────────────────────────
 # Stderr length threshold: above this, we assume the container ran (Docker OK)
 # but the agent process crashed before emitting output markers.
