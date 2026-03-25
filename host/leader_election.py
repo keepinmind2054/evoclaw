@@ -162,13 +162,19 @@ class LeaderElection:
             expiry = now - _LEASE_TIMEOUT
             try:
                 # BUG-LE-2 FIX: use timeout-guarded execute
+                # BUG-LE-6 FIX: commit() is also a blocking SQLite call and
+                # must run in the executor alongside the execute, not on the
+                # event loop.  Combining both into a single executor closure
+                # keeps them in the same thread (important for SQLite's
+                # check_same_thread) and avoids a second executor round-trip.
+                def _acquire_and_commit():
+                    c = _db_execute(self._conn, _ACQUIRE, (_INSTANCE_ID, now, now, expiry))
+                    self._conn.commit()
+                    return c
+
                 cur = await asyncio.get_running_loop().run_in_executor(
-                    None,
-                    lambda: _db_execute(
-                        self._conn, _ACQUIRE, (_INSTANCE_ID, now, now, expiry)
-                    ),
+                    None, _acquire_and_commit
                 )
-                self._conn.commit()
                 if cur.rowcount > 0:
                     self._is_leader = True
                     log.info("LeaderElection: acquired leadership (%s)", _INSTANCE_ID)
@@ -178,8 +184,16 @@ class LeaderElection:
                 log.debug("LeaderElection: acquire attempt failed: %s", exc)
 
             # Check who holds the lease
+            # BUG-LE-6 FIX: _db_execute() calls conn.execute() in a thread but
+            # fetchone() on the returned cursor runs on the event loop.  For
+            # SQLite cursors the fetchone() is negligible (data is already in
+            # memory after execute), but to be consistent with the threading
+            # contract we move the entire read into the executor.
             try:
-                row = _db_execute(self._conn, _READ).fetchone()
+                row = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda: _db_execute(self._conn, _READ).fetchone(),
+                )
                 if row:
                     log.info(
                         "LeaderElection: standby — leader is %s (heartbeat %.0fs ago)",
@@ -232,11 +246,17 @@ class LeaderElection:
                 now = time.time()
                 # BUG-LE-2 FIX: use timeout-guarded execute in executor so a
                 # stuck DB does not freeze the event loop here either.
+                # BUG-LE-6 FIX: commit() is blocking — run it in the same
+                # executor closure as the execute() so both run off the event
+                # loop thread and in the same OS thread (SQLite check_same_thread).
+                def _heartbeat_and_commit():
+                    c = _db_execute(self._conn, _HEARTBEAT, (now, _INSTANCE_ID))
+                    self._conn.commit()
+                    return c
+
                 cur = await asyncio.get_running_loop().run_in_executor(
-                    None,
-                    lambda: _db_execute(self._conn, _HEARTBEAT, (now, _INSTANCE_ID)),
+                    None, _heartbeat_and_commit
                 )
-                self._conn.commit()
                 if cur.rowcount == 0:
                     # Another instance stole the lease (genuine split-brain)
                     log.warning(

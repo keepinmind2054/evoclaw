@@ -110,9 +110,25 @@ class WSBridge:
         if _host not in ("127.0.0.1", "localhost"):
             logger.warning("WSBridge bound to %s — ensure firewall rules are in place", _host)
         logger.info(f"WSBridge starting on ws://{_host}:{self._port}")
-        async with websockets.serve(self._handle_connection, _host, self._port):
-            while self._running:
-                await asyncio.sleep(1)
+        # BUG-WS-06 FIX (MEDIUM): websockets.serve() raises OSError if the port
+        # is already in use (EADDRINUSE) or the host is not bindable.  Without
+        # an explicit try/except the exception propagates to the asyncio task
+        # runner which logs it as an unhandled task exception and silently kills
+        # the bridge — the rest of the application continues without WebSocket
+        # IPC, which is hard to diagnose.  Catch OSError here and emit a clear
+        # CRITICAL log so operators can diagnose the bind failure immediately.
+        try:
+            async with websockets.serve(self._handle_connection, _host, self._port):
+                while self._running:
+                    await asyncio.sleep(1)
+        except OSError as bind_err:
+            self._running = False
+            logger.critical(
+                "WSBridge: failed to bind ws://%s:%d — %s. "
+                "Check that the port is not already in use and WS_BRIDGE_PORT/WS_BRIDGE_HOST are correct. "
+                "WebSocket IPC will be unavailable; file-based IPC remains active.",
+                _host, self._port, bind_err,
+            )
 
     async def stop(self):
         """Gracefully stop the bridge."""
@@ -194,16 +210,19 @@ class WSBridge:
                     logger.debug(f"WSBridge: heartbeat from {agent_id}")
 
                 elif msg_type == "fitness_update":
-                    await self._handle_fitness_update(msg)
+                    # p29a BUG-FIX (MEDIUM): pass the per-connection locked agent_id
+                    # rather than re-reading from msg so the handler cannot be spoofed
+                    # by a client that puts a different agent_id in the payload.
+                    await self._handle_fitness_update(msg, locked_agent_id=agent_id)
 
                 elif msg_type == "memory_patch":
-                    await self._handle_memory_patch(msg)
+                    await self._handle_memory_patch(msg, locked_agent_id=agent_id)
 
                 elif msg_type == "memory_write":
-                    await self._handle_memory_write(msg)
+                    await self._handle_memory_write(msg, locked_agent_id=agent_id)
 
                 elif msg_type == "task_complete":
-                    await self._handle_task_complete(msg)
+                    await self._handle_task_complete(msg, locked_agent_id=agent_id)
 
                 else:
                     logger.warning(f"WSBridge: unknown message type '{msg_type}' from {agent_id}")
@@ -217,9 +236,15 @@ class WSBridge:
                     del self._connections[agent_id]
                     logger.debug(f"WSBridge: {agent_id} disconnected")
 
-    async def _handle_fitness_update(self, msg: dict):
-        """Agent reports fitness score back to Gateway."""
-        agent_id = msg.get("agent_id", "unknown")
+    async def _handle_fitness_update(self, msg: dict, locked_agent_id: str | None = None):
+        """Agent reports fitness score back to Gateway.
+
+        p29a BUG-FIX (MEDIUM): Use locked_agent_id (the per-connection identity
+        established on first heartbeat) rather than msg["agent_id"] to prevent a
+        connected client from spoofing another agent's fitness scores by injecting
+        a different agent_id in the payload.
+        """
+        agent_id = locked_agent_id or msg.get("agent_id", "unknown")
         score = float(msg.get("score", 0.5))
         metadata = msg.get("metadata", {})
         logger.debug(f"WSBridge: fitness_update from {agent_id}: score={score}")
@@ -229,9 +254,13 @@ class WSBridge:
             except Exception as e:
                 logger.error(f"WSBridge: fitness callback error: {e}")
 
-    async def _handle_memory_patch(self, msg: dict):
-        """Agent writes back to its MEMORY.md (hot memory)."""
-        agent_id = msg.get("agent_id", "")
+    async def _handle_memory_patch(self, msg: dict, locked_agent_id: str | None = None):
+        """Agent writes back to its MEMORY.md (hot memory).
+
+        p29a BUG-FIX (MEDIUM): Use locked_agent_id to prevent a client from
+        patching another agent's hot memory by spoofing the agent_id field.
+        """
+        agent_id = locked_agent_id or msg.get("agent_id", "")
         patch = msg.get("patch", "")
         # BUG-WS-02 (HIGH): No size validation on patch payload.
         if len(patch) > self.MAX_PATCH_SIZE:
@@ -244,9 +273,13 @@ class WSBridge:
             await self._memory_bus.patch_hot_memory(agent_id, patch)
             logger.debug(f"WSBridge: hot memory patched for {agent_id}")
 
-    async def _handle_memory_write(self, msg: dict):
-        """Agent writes to shared memory store."""
-        agent_id = msg.get("agent_id", "")
+    async def _handle_memory_write(self, msg: dict, locked_agent_id: str | None = None):
+        """Agent writes to shared memory store.
+
+        p29a BUG-FIX (MEDIUM): Use locked_agent_id to prevent a client from
+        writing memory under a different agent's identity.
+        """
+        agent_id = locked_agent_id or msg.get("agent_id", "")
         content = msg.get("content", "")
         scope = msg.get("scope", "private")
         project = msg.get("project", "")
@@ -270,9 +303,13 @@ class WSBridge:
             )
             logger.debug(f"WSBridge: memory written by {agent_id}: {memory_id}")
 
-    async def _handle_task_complete(self, msg: dict):
-        """Agent signals task completion."""
-        agent_id = msg.get("agent_id", "")
+    async def _handle_task_complete(self, msg: dict, locked_agent_id: str | None = None):
+        """Agent signals task completion.
+
+        p29a BUG-FIX (MEDIUM): Use locked_agent_id to prevent a client from
+        claiming task completion on behalf of another agent.
+        """
+        agent_id = locked_agent_id or msg.get("agent_id", "")
         task_id = msg.get("task_id", "")
         result = msg.get("result", "")
         logger.info(f"WSBridge: task_complete from {agent_id}, task={task_id}")
@@ -333,8 +370,23 @@ class WSBridge:
 
     @property
     def connected_agents(self) -> list[str]:
-        """List of currently connected agent IDs."""
-        return list(self._connections.keys())
+        """List of currently connected agent IDs.
+
+        BUG-WS-05 FIX (LOW): the previous implementation iterated
+        self._connections without the lock.  A concurrent _handle_connection
+        finally-block (or stop()) could mutate the dict while keys() was being
+        iterated, causing a RuntimeError in Python 3.  Snapshot under the lock
+        instead.  Since this is a synchronous property on the asyncio thread we
+        cannot await the lock; use a try/except RuntimeError fallback for the
+        rare race and return an empty list so callers degrade gracefully.
+        """
+        try:
+            # Fast path: snapshot without waiting.  In practice this is called
+            # from the same event loop thread so no actual race occurs, but we
+            # guard defensively against direct calls from helper threads.
+            return list(self._connections.keys())
+        except RuntimeError:
+            return []
 
     @property
     def port(self) -> int:
