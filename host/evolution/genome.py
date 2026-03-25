@@ -245,15 +245,13 @@ def evolve_genome_from_fitness(jid: str, fitness: float, avg_response_ms: float)
         f"(fitness={fitness:.2f}, avg_ms={avg_response_ms:.0f})"
     )
 
-    upsert_genome(
-        jid,
-        response_style=new_style,
-        formality=formality,
-        technical_depth=technical_depth,
-        generation=generation + 1,
-    )
-
-    # 記錄演化歷程
+    # p29a BUG-FIX (MEDIUM): Previously upsert_genome() and log_evolution_event()
+    # were two separate DB commits.  A process crash between the first commit and
+    # the second left the genome advanced by one generation but the audit event
+    # missing, making the evolution_log inconsistent with group_genome.
+    #
+    # We now use db.upsert_group_genome_with_event() which wraps both writes in a
+    # single transaction so either both succeed or both are rolled back.
     genome_before = {
         "response_style": response_style,
         "formality": genome.get("formality", 0.5),
@@ -274,16 +272,24 @@ def evolve_genome_from_fitness(jid: str, fitness: float, avg_response_ms: float)
         else f"style unchanged ({response_style}), formality={formality:.3f}, technical_depth={technical_depth:.3f}, fitness={fitness:.3f}"
     )
     try:
-        db.log_evolution_event(
+        db.upsert_group_genome_with_event(
             jid=jid,
-            event_type=event_type,
-            generation_before=generation,
-            generation_after=generation + 1,
-            fitness_score=round(fitness, 4),
-            avg_response_ms=round(avg_response_ms, 1),
-            genome_before=genome_before,
-            genome_after=genome_after,
-            notes=notes,
+            genome_fields={
+                "response_style": new_style,
+                "formality": formality,
+                "technical_depth": technical_depth,
+                "generation": generation + 1,
+            },
+            event_kwargs={
+                "event_type": event_type,
+                "generation_before": generation,
+                "generation_after": generation + 1,
+                "fitness_score": round(fitness, 4),
+                "avg_response_ms": round(avg_response_ms, 1),
+                "genome_before": genome_before,
+                "genome_after": genome_after,
+                "notes": notes,
+            },
         )
     except Exception as e:
-        log.warning(f"Failed to log evolution event for {jid}: {e}")
+        log.warning(f"Failed to evolve/log genome for {jid}: {e}")

@@ -210,16 +210,19 @@ class WSBridge:
                     logger.debug(f"WSBridge: heartbeat from {agent_id}")
 
                 elif msg_type == "fitness_update":
-                    await self._handle_fitness_update(msg)
+                    # p29a BUG-FIX (MEDIUM): pass the per-connection locked agent_id
+                    # rather than re-reading from msg so the handler cannot be spoofed
+                    # by a client that puts a different agent_id in the payload.
+                    await self._handle_fitness_update(msg, locked_agent_id=agent_id)
 
                 elif msg_type == "memory_patch":
-                    await self._handle_memory_patch(msg)
+                    await self._handle_memory_patch(msg, locked_agent_id=agent_id)
 
                 elif msg_type == "memory_write":
-                    await self._handle_memory_write(msg)
+                    await self._handle_memory_write(msg, locked_agent_id=agent_id)
 
                 elif msg_type == "task_complete":
-                    await self._handle_task_complete(msg)
+                    await self._handle_task_complete(msg, locked_agent_id=agent_id)
 
                 else:
                     logger.warning(f"WSBridge: unknown message type '{msg_type}' from {agent_id}")
@@ -233,9 +236,15 @@ class WSBridge:
                     del self._connections[agent_id]
                     logger.debug(f"WSBridge: {agent_id} disconnected")
 
-    async def _handle_fitness_update(self, msg: dict):
-        """Agent reports fitness score back to Gateway."""
-        agent_id = msg.get("agent_id", "unknown")
+    async def _handle_fitness_update(self, msg: dict, locked_agent_id: str | None = None):
+        """Agent reports fitness score back to Gateway.
+
+        p29a BUG-FIX (MEDIUM): Use locked_agent_id (the per-connection identity
+        established on first heartbeat) rather than msg["agent_id"] to prevent a
+        connected client from spoofing another agent's fitness scores by injecting
+        a different agent_id in the payload.
+        """
+        agent_id = locked_agent_id or msg.get("agent_id", "unknown")
         score = float(msg.get("score", 0.5))
         metadata = msg.get("metadata", {})
         logger.debug(f"WSBridge: fitness_update from {agent_id}: score={score}")
@@ -245,9 +254,13 @@ class WSBridge:
             except Exception as e:
                 logger.error(f"WSBridge: fitness callback error: {e}")
 
-    async def _handle_memory_patch(self, msg: dict):
-        """Agent writes back to its MEMORY.md (hot memory)."""
-        agent_id = msg.get("agent_id", "")
+    async def _handle_memory_patch(self, msg: dict, locked_agent_id: str | None = None):
+        """Agent writes back to its MEMORY.md (hot memory).
+
+        p29a BUG-FIX (MEDIUM): Use locked_agent_id to prevent a client from
+        patching another agent's hot memory by spoofing the agent_id field.
+        """
+        agent_id = locked_agent_id or msg.get("agent_id", "")
         patch = msg.get("patch", "")
         # BUG-WS-02 (HIGH): No size validation on patch payload.
         if len(patch) > self.MAX_PATCH_SIZE:
@@ -260,9 +273,13 @@ class WSBridge:
             await self._memory_bus.patch_hot_memory(agent_id, patch)
             logger.debug(f"WSBridge: hot memory patched for {agent_id}")
 
-    async def _handle_memory_write(self, msg: dict):
-        """Agent writes to shared memory store."""
-        agent_id = msg.get("agent_id", "")
+    async def _handle_memory_write(self, msg: dict, locked_agent_id: str | None = None):
+        """Agent writes to shared memory store.
+
+        p29a BUG-FIX (MEDIUM): Use locked_agent_id to prevent a client from
+        writing memory under a different agent's identity.
+        """
+        agent_id = locked_agent_id or msg.get("agent_id", "")
         content = msg.get("content", "")
         scope = msg.get("scope", "private")
         project = msg.get("project", "")
@@ -286,9 +303,13 @@ class WSBridge:
             )
             logger.debug(f"WSBridge: memory written by {agent_id}: {memory_id}")
 
-    async def _handle_task_complete(self, msg: dict):
-        """Agent signals task completion."""
-        agent_id = msg.get("agent_id", "")
+    async def _handle_task_complete(self, msg: dict, locked_agent_id: str | None = None):
+        """Agent signals task completion.
+
+        p29a BUG-FIX (MEDIUM): Use locked_agent_id to prevent a client from
+        claiming task completion on behalf of another agent.
+        """
+        agent_id = locked_agent_id or msg.get("agent_id", "")
         task_id = msg.get("task_id", "")
         result = msg.get("result", "")
         logger.info(f"WSBridge: task_complete from {agent_id}, task={task_id}")
