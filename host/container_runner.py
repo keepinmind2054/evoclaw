@@ -388,6 +388,49 @@ def _get_agent_id(group_name: str, project: str = "", channel: str = "") -> str:
     raw = f"{group_name.lower()}:{project.lower()}:{channel.lower()}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
+async def _poll_container_memory(container_name: str, interval: float = 5.0) -> None:
+    """Background task: sample docker stats every *interval* seconds and log memory usage.
+
+    Runs until cancelled (e.g. when the container exits).  Logs each sample at
+    INFO level so operators can correlate memory growth with agent activity, and
+    logs a summary line with the peak reading on cancellation.
+
+    Useful for diagnosing OOM (exit 137) — shows how memory grew over the run.
+    Silently swallows docker-stats errors (container may not exist yet or may
+    have already exited when we poll).
+    """
+    samples: list[str] = []
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                r = await asyncio.create_subprocess_exec(
+                    "docker", "stats", "--no-stream", "--format",
+                    "{{.MemUsage}} ({{.MemPerc}})",
+                    container_name,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                out, _ = await asyncio.wait_for(r.communicate(), timeout=5.0)
+                line = out.decode("utf-8", errors="replace").strip()
+                if line and "/" in line:  # valid reading looks like "123MiB / 1GiB (12.34%)"
+                    samples.append(line)
+                    log.info("[MEMDEBUG] container=%s mem=%s", container_name, line)
+            except asyncio.CancelledError:
+                raise
+            except Exception as _e:
+                log.debug("[MEMDEBUG] stats poll skipped: %s", _e)
+    except asyncio.CancelledError:
+        if samples:
+            log.info(
+                "[MEMDEBUG] container=%s finished — %d sample(s), last=%s",
+                container_name, len(samples), samples[-1],
+            )
+        else:
+            log.debug("[MEMDEBUG] container=%s — no stats samples collected", container_name)
+        raise
+
+
 async def run_container_agent(
     group: dict,
     prompt: str,
@@ -645,6 +688,7 @@ async def run_container_agent(
                 return r.stdout, r.stderr, r.returncode
 
             log.debug("[DEBUG] Running docker in thread (Windows mode)...")
+            _mem_task = asyncio.create_task(_poll_container_memory(container_name))
             try:
                 stdout_data, stderr_data, _win_exit_code = await asyncio.to_thread(_sync_docker_run)
             except _subprocess.TimeoutExpired:
@@ -654,6 +698,12 @@ async def run_container_agent(
                 # timeout handler below fires with the correct Chinese message.
                 log.error("Container %s timed out after %ds (Windows)", folder, config.CONTAINER_TIMEOUT)
                 raise asyncio.TimeoutError()
+            finally:
+                _mem_task.cancel()
+                try:
+                    await _mem_task
+                except asyncio.CancelledError:
+                    pass
             log.debug("[DEBUG] Docker thread returned. stdout=%db stderr=%db", len(stdout_data), len(stderr_data))
         else:
             proc = await asyncio.create_subprocess_exec(
@@ -742,10 +792,18 @@ async def run_container_agent(
                 stdout_data, _ = await asyncio.gather(stdout_task, stderr_task)
                 return stdout_data, b"\n".join(l.encode() for l in stderr_lines)
 
-            stdout_data, stderr_data = await asyncio.wait_for(
-                _collect(),
-                timeout=config.CONTAINER_TIMEOUT,
-            )
+            _mem_task = asyncio.create_task(_poll_container_memory(container_name))
+            try:
+                stdout_data, stderr_data = await asyncio.wait_for(
+                    _collect(),
+                    timeout=config.CONTAINER_TIMEOUT,
+                )
+            finally:
+                _mem_task.cancel()
+                try:
+                    await _mem_task
+                except asyncio.CancelledError:
+                    pass
 
         stdout = stdout_data.decode(errors="replace")
         stderr = stderr_data.decode(errors="replace")
