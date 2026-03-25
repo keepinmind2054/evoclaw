@@ -231,14 +231,23 @@ def _validate_secrets(secrets: dict) -> bool:
         )
         return False
     else:
-        # Warn on each key that is present but suspiciously short (likely a placeholder).
+        # Warn on each key that is present but appears to be a placeholder.
+        _PLACEHOLDER_FRAGMENTS = ("your_", "_here", "your-", "example", "placeholder", "xxxx", "changeme")
         for key in llm_keys:
             val = secrets.get(key, "").strip()
-            if val and len(val) < 10:
+            if not val:
+                continue
+            if len(val) < 10:
                 log.warning(
                     "Secret %s is set but appears too short (%d chars) — "
                     "check that it is not a placeholder value.",
                     key, len(val),
+                )
+            elif any(frag in val.lower() for frag in _PLACEHOLDER_FRAGMENTS):
+                log.warning(
+                    "Secret %s looks like a placeholder value (%r) — "
+                    "replace it with your real API key or comment it out in .env.",
+                    key, val[:40],
                 )
     return True
 
