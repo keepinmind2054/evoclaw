@@ -619,7 +619,8 @@ async def run_container_agent(
 
     input_bytes = input_json.encode("utf-8")
 
-    proc = None  # asyncio subprocess reference — used for direct kill on CancelledError
+    proc = None       # asyncio subprocess reference — used for direct kill on CancelledError
+    _win_exit_code: int | None = None  # Windows-only: returncode from subprocess.run()
     # p16c BUG-FIX (CRITICAL): stderr_lines must be initialised at function scope
     # before the platform branch.  On Windows the subprocess is run via
     # asyncio.to_thread(), so the Linux-only _stream_stderr() closure that
@@ -634,18 +635,18 @@ async def run_container_agent(
             # Use subprocess.run() in a thread instead — it handles pipes correctly.
             import subprocess as _subprocess
 
-            def _sync_docker_run() -> tuple[bytes, bytes]:
+            def _sync_docker_run() -> tuple[bytes, bytes, int]:
                 r = _subprocess.run(
                     cmd,
                     input=input_bytes,
                     capture_output=True,
                     timeout=config.CONTAINER_TIMEOUT,
                 )
-                return r.stdout, r.stderr
+                return r.stdout, r.stderr, r.returncode
 
             log.debug("[DEBUG] Running docker in thread (Windows mode)...")
             try:
-                stdout_data, stderr_data = await asyncio.to_thread(_sync_docker_run)
+                stdout_data, stderr_data, _win_exit_code = await asyncio.to_thread(_sync_docker_run)
             except _subprocess.TimeoutExpired:
                 # Fix: Windows subprocess.TimeoutExpired is NOT asyncio.TimeoutError,
                 # so it would fall through to the generic Exception handler and produce
@@ -817,7 +818,7 @@ async def run_container_agent(
             # indication that the memory limit was breached and should be raised.
             # We now emit a specific OOM message for exit 137 and keep the generic
             # message for all other non-zero exits.
-            _exit_code = proc.returncode if proc is not None else None
+            _exit_code = proc.returncode if proc is not None else _win_exit_code
             if _container_ran:
                 # Log OOM explicitly so operators can act (raise --memory limit)
                 if _exit_code == 137:
