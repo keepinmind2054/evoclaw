@@ -137,7 +137,13 @@ class DiscordChannel:
         @self._client.event
         async def on_message(message: discord.Message):
             if message.author.bot:
-                return
+                # Allow messages from trusted bot IDs (e.g. NanoClaw/Andy).
+                # Set DISCORD_TRUSTED_BOT_IDS=id1,id2 in .env to whitelist specific bots.
+                # This enables cross-bot interaction between EvoClaw (Eve) and NanoClaw (Andy).
+                trusted_ids_raw = os.environ.get("DISCORD_TRUSTED_BOT_IDS", "")
+                trusted_ids = {s.strip() for s in trusted_ids_raw.split(",") if s.strip()}
+                if str(message.author.id) not in trusted_ids:
+                    return
 
             text = message.content or ""
 
