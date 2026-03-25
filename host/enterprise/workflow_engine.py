@@ -342,7 +342,15 @@ class WorkflowEngine:
                 if module is not None:
                     run_fn = getattr(module, "run", None)
                     if run_fn is not None:
-                        return run_fn(agent_id=agent_id, **_kwargs)
+                        # BUG-WE-01 FIX: if run_fn is an async function, calling
+                        # it without await returns a coroutine object instead of
+                        # the actual result — silently returning a truthy object
+                        # that is never executed and generates a
+                        # "coroutine was never awaited" warning at GC time.
+                        result = run_fn(agent_id=agent_id, **_kwargs)
+                        if inspect.iscoroutine(result):
+                            result = await result
+                        return result
                     # handler.py exists but has no run() — treat as md-only
                     logger.warning(
                         "add_skill_step: handler.py for '%s' has no run() function; "
