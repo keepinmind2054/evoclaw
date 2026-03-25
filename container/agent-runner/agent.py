@@ -1079,6 +1079,13 @@ def tool_web_fetch(url: str) -> str:
                 if _redirect_count > _MAX_REDIRECTS:
                     raise urllib.error.URLError(f"Too many redirects (> {_MAX_REDIRECTS})")
                 # SSRF-check the redirect target too
+                # BUG-P29A-1 FIX (HIGH): the previous bare `except Exception: pass`
+                # silently swallowed any non-URLError exception raised during URL
+                # parsing (e.g. AttributeError, ValueError from a malformed newurl).
+                # This left the SSRF check bypassed — the redirect was allowed to
+                # proceed to an unchecked destination.  Fix: treat ANY exception
+                # during the redirect SSRF check as a reason to block the redirect.
+                # Unknown/unparseable redirect targets are unsafe by default.
                 try:
                     _rp = __import__("urllib.parse", fromlist=["urlparse"]).urlparse(newurl)
                     _rh = _rp.hostname or ""
@@ -1086,8 +1093,11 @@ def tool_web_fetch(url: str) -> str:
                         raise urllib.error.URLError(f"Redirect to private address blocked (SSRF): {_rh}")
                 except urllib.error.URLError:
                     raise
-                except Exception:
-                    pass
+                except Exception as _redir_exc:
+                    # Treat unparseable/unverifiable redirect target as blocked (fail-safe).
+                    raise urllib.error.URLError(
+                        f"Redirect to unverifiable target blocked (SSRF fail-safe): {_redir_exc}"
+                    )
                 return super().redirect_request(req, fp, code, msg, headers, newurl)
 
         # BUG-P18D-07: DNS rebinding TOCTOU mitigation.  The pre-flight

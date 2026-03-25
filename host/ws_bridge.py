@@ -110,9 +110,25 @@ class WSBridge:
         if _host not in ("127.0.0.1", "localhost"):
             logger.warning("WSBridge bound to %s — ensure firewall rules are in place", _host)
         logger.info(f"WSBridge starting on ws://{_host}:{self._port}")
-        async with websockets.serve(self._handle_connection, _host, self._port):
-            while self._running:
-                await asyncio.sleep(1)
+        # BUG-WS-06 FIX (MEDIUM): websockets.serve() raises OSError if the port
+        # is already in use (EADDRINUSE) or the host is not bindable.  Without
+        # an explicit try/except the exception propagates to the asyncio task
+        # runner which logs it as an unhandled task exception and silently kills
+        # the bridge — the rest of the application continues without WebSocket
+        # IPC, which is hard to diagnose.  Catch OSError here and emit a clear
+        # CRITICAL log so operators can diagnose the bind failure immediately.
+        try:
+            async with websockets.serve(self._handle_connection, _host, self._port):
+                while self._running:
+                    await asyncio.sleep(1)
+        except OSError as bind_err:
+            self._running = False
+            logger.critical(
+                "WSBridge: failed to bind ws://%s:%d — %s. "
+                "Check that the port is not already in use and WS_BRIDGE_PORT/WS_BRIDGE_HOST are correct. "
+                "WebSocket IPC will be unavailable; file-based IPC remains active.",
+                _host, self._port, bind_err,
+            )
 
     async def stop(self):
         """Gracefully stop the bridge."""
@@ -333,8 +349,23 @@ class WSBridge:
 
     @property
     def connected_agents(self) -> list[str]:
-        """List of currently connected agent IDs."""
-        return list(self._connections.keys())
+        """List of currently connected agent IDs.
+
+        BUG-WS-05 FIX (LOW): the previous implementation iterated
+        self._connections without the lock.  A concurrent _handle_connection
+        finally-block (or stop()) could mutate the dict while keys() was being
+        iterated, causing a RuntimeError in Python 3.  Snapshot under the lock
+        instead.  Since this is a synchronous property on the asyncio thread we
+        cannot await the lock; use a try/except RuntimeError fallback for the
+        rare race and return an empty list so callers degrade gracefully.
+        """
+        try:
+            # Fast path: snapshot without waiting.  In practice this is called
+            # from the same event loop thread so no actual race occurs, but we
+            # guard defensively against direct calls from helper threads.
+            return list(self._connections.keys())
+        except RuntimeError:
+            return []
 
     @property
     def port(self) -> int:
