@@ -1456,6 +1456,22 @@ async def main() -> None:
     # never blocks startup or message processing.
     async def _prepull_image() -> None:
         img = config.CONTAINER_IMAGE
+        # Check if the image already exists locally before attempting a remote pull.
+        # evoclaw-agent is typically a locally-built image not hosted on any registry,
+        # so skipping the pull avoids a noisy "access denied" warning on every startup.
+        try:
+            inspect = await asyncio.create_subprocess_exec(
+                "docker", "image", "inspect", "--format", "{{.Id}}", img,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await inspect.wait()
+            if inspect.returncode == 0:
+                log.debug("Container image %r already present locally — skipping pull", img)
+                return
+        except Exception:
+            pass  # docker not available yet; fall through to pull attempt
+
         log.info("Pre-pulling container image %r in background…", img)
         try:
             proc = await asyncio.create_subprocess_exec(
