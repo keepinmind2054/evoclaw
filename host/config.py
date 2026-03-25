@@ -99,7 +99,9 @@ IDLE_TIMEOUT = _env_int("IDLE_TIMEOUT", 30 * 60 * 1000) / 1000
 MAX_CONCURRENT_CONTAINERS = _env_int("MAX_CONCURRENT_CONTAINERS", 5, minimum=1)
 # Per-container resource limits (Issue #61): prevent runaway agents from OOM-killing the host.
 # Set to empty string "" to disable the limit (e.g. CONTAINER_MEMORY="" CONTAINER_CPUS="").
-CONTAINER_MEMORY = os.environ.get("CONTAINER_MEMORY", "512m")
+# Default raised to 1g: large-context models (e.g. MiniMax-M2.5 with 192K context) can
+# produce multi-MB JSON responses that exceed 512m during processing.
+CONTAINER_MEMORY = os.environ.get("CONTAINER_MEMORY", "1g")
 CONTAINER_CPUS = os.environ.get("CONTAINER_CPUS", "1.0")
 # CONTAINER_PIDS_LIMIT: maximum number of processes the container may spawn.
 # Prevents fork bombs inside an untrusted agent container.
