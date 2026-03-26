@@ -630,6 +630,7 @@ async def run_container_agent(
     # Both limits are opt-out: set CONTAINER_MEMORY="" or CONTAINER_CPUS="" to disable.
     if config.CONTAINER_MEMORY:
         cmd += ["--memory", config.CONTAINER_MEMORY, "--memory-swap", config.CONTAINER_MEMORY]
+        log.info("[RESOURCE] container=%s memory=%s cpus=%s", container_name, config.CONTAINER_MEMORY, config.CONTAINER_CPUS or "unlimited")
     if config.CONTAINER_CPUS:
         cmd += ["--cpus", config.CONTAINER_CPUS]
     # ── Container log size limit (BUG-19B-01) ─────────────────────────────────

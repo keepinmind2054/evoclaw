@@ -291,6 +291,25 @@ def tool_bash(command: str) -> str:
             _log("🚨 SECURITY", f"Bash: blocked dangerous command pattern: {_cmd_strip[:200]}")
             return "Error: command blocked — matches dangerous command pattern (rm -rf /, dd to block device, mkfs, etc.)"
 
+    # Sanity check: reject commands that are bare filenames (no spaces, no shell
+    # operators).  The LLM sometimes passes a filename like "MEMORY.md" or
+    # "/workspace/group/MEMORY.md" as the bash command, which produces
+    # "bash: MEMORY.md: command not found" (exit 127) and wastes a turn.
+    # Legitimate bash commands always contain at least one space OR a shell
+    # operator (|, ;, &&, >, <, $, etc.).
+    _cmd_stripped = command.strip()
+    _BARE_FILENAME_RE = _re_bash.compile(
+        r'^[^\s|;&<>$`\'\"()\[\]{}!\\]+\.(md|txt|py|js|ts|sh|json|yaml|yml|toml|csv|log|conf|cfg)$',
+        _re_bash.IGNORECASE,
+    )
+    if _BARE_FILENAME_RE.match(_cmd_stripped):
+        _log("⚠️ BASH-SANITY", f"Rejected bare filename as bash command: {_cmd_stripped[:100]}")
+        return (
+            f"✗ Invalid command: '{_cmd_stripped}' looks like a filename, not a bash command.\n"
+            "To READ a file use the Read tool. To WRITE a file use the Write or Edit tool.\n"
+            "Example: Read({\"file_path\": \"/workspace/group/MEMORY.md\"})"
+        )
+
     # BUG-P26B-5: a command string containing a null byte (\x00) would be
     # silently truncated at the C-level execve() boundary, executing only the
     # portion before the first null byte.  This can allow a prompt-injected
@@ -2221,16 +2240,26 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                 _exec_outputs = []
                 for _cmd in _runnable:
                     _log("🔧 TOOL", f"Bash (fallback) args={_cmd[:300]}")
-                    # Sanity check: reject commands that look like git log output
+                    # Sanity check 1: reject commands that look like git log output
                     # (lines starting with 7-40 hex chars + space, e.g. "c43faa8 feat: ...")
-                    # This prevents AUTO-EXEC from running git log output as bash commands.
                     _auto_lines = [_l for _l in _cmd.strip().splitlines() if _l.strip()]
                     _GIT_LOG_RE = _re_cb.compile(r'^[0-9a-f]{7,40} \S')
+                    # Sanity check 2: reject bare filenames (e.g. "MEMORY.md", "/workspace/group/MEMORY.md")
+                    _BARE_FILE_RE = _re_cb.compile(
+                        r'^[^\s|;&<>$`\'\"()\[\]{}!\\]+\.(md|txt|py|js|ts|sh|json|yaml|yml|toml|csv|log|conf|cfg)$',
+                        _re_cb.IGNORECASE,
+                    )
                     if _auto_lines and len(_auto_lines) >= 2 and all(
                         _GIT_LOG_RE.match(_l) for _l in _auto_lines[:4]
                     ):
                         _res = "✗ Skipped: this looks like git log output, not a valid bash command. Use `git log --oneline` explicitly if you need commit history."
                         _log("⚠️ AUTO-EXEC-SKIP", f"Rejected fallback block that looks like git log output: {_cmd[:120]}")
+                    elif _auto_lines and len(_auto_lines) == 1 and _BARE_FILE_RE.match(_cmd.strip()):
+                        _res = (
+                            f"✗ Skipped: '{_cmd.strip()}' is a filename, not a bash command.\n"
+                            "Use the Read tool to read it, or Write/Edit tool to write it."
+                        )
+                        _log("⚠️ AUTO-EXEC-SKIP", f"Rejected bare filename as bash command: {_cmd.strip()[:100]}")
                     else:
                         _res = execute_tool("Bash", {"command": _cmd}, chat_jid)
                     _log("🔧 RESULT", str(_res)[:1500])
