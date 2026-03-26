@@ -483,6 +483,15 @@ def tool_write(file_path: str, content: str) -> str:
                 f"[ERROR] access denied — parent directory of {file_path!r} resolves to "
                 f"{_resolved_parent!r} which is outside the allowed workspace (symlink escape prevention)."
             )
+        # BUG-P32-02 FIX (LOW): Reject writes where the target path is an
+        # existing directory.  Without this check, the attempt proceeds until
+        # tmp.rename(p) raises "IsADirectoryError: [Errno 21] Is a directory"
+        # which is caught and returned as a confusing [ERROR] message.  An
+        # explicit check here produces a clear, actionable error message and
+        # avoids writing a .tmp file into the parent directory unnecessarily.
+        if p.exists() and p.is_dir():
+            return f"[ERROR] {file_path!r} is an existing directory — cannot overwrite a directory with a file"
+
         # P14D-WRITE-1: capture existing permissions before overwriting
         existing_mode = None
         if p.exists():
@@ -884,13 +893,33 @@ def tool_glob(pattern: str, path: str = WORKSPACE) -> str:
 
     import threading as _threading
 
+    # BUG-P32-01 FIX (MEDIUM): Validate the pattern argument for path traversal.
+    # os.path.join(path, pattern) with pattern="../../../etc/passwd" produces a
+    # path that resolves outside /workspace/, bypassing the _check_path_allowed
+    # sandbox check that only validated the `path` argument.  The pattern is not
+    # a filesystem path (it may contain * and ** wildcards), so we cannot resolve
+    # it directly; instead we reject any pattern that contains ".." segments which
+    # are the only mechanism for escaping the search root.
+    if ".." in pattern.split(os.sep) or ".." in pattern.replace("\\", "/").split("/"):
+        _log("⚠️ SECURITY", f"Glob: path traversal in pattern blocked: {pattern!r}")
+        return "Error: access denied — pattern must not contain '..' path traversal segments"
+
     _result_holder: list = []
     _exc_holder: list = []
 
     def _do_glob() -> None:
         try:
             search_path = os.path.join(path, pattern)
-            _result_holder.append(_glob_module.glob(search_path, recursive=True))
+            raw_matches = _glob_module.glob(search_path, recursive=True)
+            # BUG-P32-01 FIX: Filter matches to ensure all returned paths are
+            # inside the allowed workspace.  This is a defence-in-depth check
+            # so that even if the pattern check above is somehow bypassed the
+            # agent never receives paths for files outside /workspace/.
+            safe_matches = [
+                m for m in raw_matches
+                if any(os.path.realpath(m).startswith(pfx) for pfx in _ALLOWED_PATH_PREFIXES)
+            ]
+            _result_holder.append(safe_matches)
         except Exception as exc:
             _exc_holder.append(exc)
 
