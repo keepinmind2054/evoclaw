@@ -1604,7 +1604,7 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
     MAX_ITER = max_iter
     final_response = ""
     _memory_written = False  # True once agent writes to MEMORY.md this session
-    _memory_path_str = str(Path(group_folder) / "MEMORY.md") if group_folder else "/workspace/group/MEMORY.md"
+    _memory_path_str = f"{WORKSPACE}/MEMORY.md"  # BUG-FIX #424: group_folder is a name, not a path; use WORKSPACE
     _tool_fail_counter: dict = {}  # (tool_name, args_hash) -> consecutive_fail_count
     _MAX_CONSECUTIVE_TOOL_FAILS = 3
     _retry_warning: str = ""  # injected before next LLM call when tool retries detected
@@ -2069,7 +2069,7 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
     # P16B-FIX-3: guard against empty group_folder so the path does not resolve to
     # the relative string "MEMORY.md", which would never match an absolute path in
     # tool arguments and silently disable the MEMORY.md write-detection logic.
-    _memory_path_str = str(Path(group_folder) / "MEMORY.md") if group_folder else "/workspace/group/MEMORY.md"
+    _memory_path_str = f"{WORKSPACE}/MEMORY.md"  # BUG-FIX #424: group_folder is a name, not a path; use WORKSPACE
     _tool_fail_counter: dict = {}  # (tool_name, args_hash) -> consecutive_fail_count
     _MAX_CONSECUTIVE_TOOL_FAILS = 3
     _retry_warning: str = ""  # injected before next LLM call when tool retries detected
@@ -2526,7 +2526,7 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
     MAX_ITER = max_iter  # 由呼叫方動態設定（Level A=6, Level B=20）
     final_response = ""
     _memory_written = False   # True once agent writes to MEMORY.md this session
-    _memory_path_str = str(Path(group_folder) / "MEMORY.md") if group_folder else "/workspace/group/MEMORY.md"
+    _memory_path_str = f"{WORKSPACE}/MEMORY.md"  # BUG-FIX #424: group_folder is a name, not a path; use WORKSPACE
     _tool_fail_counter: dict = {}  # (tool_name, args_hash) -> consecutive_fail_count
     _MAX_CONSECUTIVE_TOOL_FAILS = 3
     _retry_warning: str = ""  # injected before next LLM call when tool retries detected
@@ -3079,7 +3079,7 @@ def main():
         "Respond in the same language the user uses. Default to Traditional Chinese (繁體中文) unless instructed otherwise.",
         "You run inside a secure Docker container.",
         f"Working directory: {WORKSPACE}",
-        f"Group folder: {safe_group_folder}",
+        f"Group folder: {WORKSPACE} (group id: {safe_group_folder})",
         f"Chat JID: {safe_chat_jid}",
         f"Date: {time.strftime('%Y-%m-%d')}",
         "",
@@ -3133,7 +3133,11 @@ def main():
                 if len(_soul_text) > _SOUL_MAX_CHARS:
                     _log("⚠️ SOUL", f"soul.md is very large ({len(_soul_text)} chars > {_SOUL_MAX_CHARS}) — "
                          "consider trimming to avoid consuming excessive context-window tokens.")
-                _soul_text = _soul_text.replace("{{GROUP_FOLDER}}", str(group_folder))
+                # BUG-FIX #424: group_folder is the folder *name* (e.g. "telegram_8259652816"),
+                # not a container filesystem path.  The group is mounted at WORKSPACE (/workspace/group).
+                # Replace {{GROUP_FOLDER}} with the actual container path so soul.md instructions
+                # referencing files use the correct absolute path.
+                _soul_text = _soul_text.replace("{{GROUP_FOLDER}}", WORKSPACE)
                 lines.append("")
                 lines.append(_soul_text)
                 _log("🧠 SOUL", f"Injected soul.md ({len(_soul_text)} chars)")
@@ -3145,7 +3149,11 @@ def main():
     # 每次 session 啟動時讀取 MEMORY.md，注入為「長期記憶」section。
     # 智慧分割：身份區段永遠完整保留，任務記錄取最後 3000 字元（防止截斷身份）。
     # 若缺少身份區段 → 注入模板 + 填寫指令（身份引導 Bootstrap）。
-    _memory_path = Path(group_folder) / "MEMORY.md"
+    # BUG-FIX #424: group_folder is the folder *name* (e.g. "telegram_8259652816"), NOT a
+    # container filesystem path.  The group folder is mounted at WORKSPACE (/workspace/group).
+    # Using Path(group_folder) produced a relative path like "telegram_8259652816/MEMORY.md"
+    # which resolved to /app/telegram_8259652816/MEMORY.md — never found → memory always empty.
+    _memory_path = Path(WORKSPACE) / "MEMORY.md"
     _IDENTITY_MARKER = "## 身份 (Identity)"
     _TASK_MARKER = "## 任務記錄 (Task Log)"
     _MEMORY_READ_LIMIT = 512 * 1024  # 512 KB — prevent huge MEMORY.md from blowing context window
