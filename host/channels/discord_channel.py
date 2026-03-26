@@ -137,12 +137,23 @@ class DiscordChannel:
 
         @self._client.event
         async def on_message(message: discord.Message):
+            log.debug(
+                "Discord on_message: author=%s (id=%s, bot=%s) channel=%s content=%.80r",
+                message.author.name, message.author.id, message.author.bot,
+                getattr(message.channel, "name", str(message.channel)),
+                (message.content or ""),
+            )
             if message.author.bot:
                 # Allow messages from trusted bot IDs (e.g. NanoClaw/Andy).
                 # Set DISCORD_TRUSTED_BOT_IDS=id1,id2 in .env to whitelist specific bots.
                 # This enables cross-bot interaction between EvoClaw (Eve) and NanoClaw (Andy).
                 trusted_ids_raw = os.environ.get("DISCORD_TRUSTED_BOT_IDS", "")
                 trusted_ids = {s.strip() for s in trusted_ids_raw.split(",") if s.strip()}
+                log.info(
+                    "Discord on_message: bot msg from %s (id=%s) — trusted_ids=%s — %s",
+                    message.author.name, message.author.id, trusted_ids or "(empty)",
+                    "ALLOWED" if str(message.author.id) in trusted_ids else "IGNORED",
+                )
                 if str(message.author.id) not in trusted_ids:
                     return
 
@@ -182,12 +193,20 @@ class DiscordChannel:
 
             groups = {g["jid"]: g for g in registered_groups}
             group = groups.get(jid)
+            log.debug(
+                "Discord on_message: jid=%s group=%s text=%.80r trigger_pattern=%s",
+                jid, "found" if group else "NOT_REGISTERED",
+                text, config.TRIGGER_PATTERN.pattern,
+            )
             if group and group.get("requires_trigger", True):
                 if not config.TRIGGER_PATTERN.match(text):
+                    log.debug("Discord on_message: trigger not matched — IGNORED (jid=%s)", jid)
                     return
             elif not group and not is_dm:
                 if not config.TRIGGER_PATTERN.match(text):
+                    log.debug("Discord on_message: unregistered group trigger not matched — IGNORED (jid=%s)", jid)
                     return
+            log.info("Discord on_message: PROCESSING jid=%s sender=%s text=%.80r", jid, message.author.id, text)
 
             sender = str(message.author.id)
             sender_name = message.author.display_name or message.author.name
