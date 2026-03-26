@@ -1874,6 +1874,24 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
                 ),
             })
 
+        # ── Penultimate-turn send_message enforcer (Claude) ──────────────────
+        # Mirror of the OpenAI loop's enforcer: for Level A (MAX_ITER=6) the
+        # normal milestone (5 silent turns AND n < MAX_ITER-2) can never fire,
+        # so we add an explicit penultimate check here.
+        if _turns_since_notify > 0 and n == MAX_ITER - 2:
+            _log("⏰ MILESTONE-FINAL", f"Claude: no send_message in {_turns_since_notify} turns, penultimate turn {n} — injecting CRITICAL send reminder")
+            messages.append({
+                "role": "user",
+                "content": (
+                    "【CRITICAL 系統警告】你尚未向用戶發送任何回應（send_message）。\n"
+                    f"這是倒數第二輪（turn {n+1}/{MAX_ITER}），下一輪是最後一輪。\n"
+                    "你必須在下一輪立刻呼叫 mcp__evoclaw__send_message 把結果告知用戶，"
+                    "否則用戶將看到「處理完成，但未能產生文字回應」錯誤。\n"
+                    "不要再執行其他工具——把你已掌握的資訊直接發送出去。"
+                ),
+            })
+            _turns_since_notify = 0
+
     # If the loop exhausted MAX_ITER without an end_turn, return whatever we have.
     # Avoids returning silent empty string to the host.
     if not final_response:
@@ -2756,6 +2774,20 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
                 "3. 若 `## 身份 (Identity)` 有新發現（弱點、原則），同步更新\n"
                 "格式：`[YYYY-MM-DD] <做了什麼、關鍵決策、解決方法>`"
             ))]))
+
+        # ── Penultimate-turn send_message enforcer (Gemini) ──────────────────
+        # Mirror of the OpenAI loop's enforcer: for Level A (MAX_ITER=6) the
+        # normal milestone (5 silent turns AND n < MAX_ITER-2) can never fire.
+        if _turns_since_notify > 0 and n == MAX_ITER - 2:
+            _log("⏰ MILESTONE-FINAL", f"Gemini: no send_message in {_turns_since_notify} turns, penultimate turn {n} — injecting CRITICAL send reminder")
+            history.append(types.Content(role="user", parts=[types.Part(text=(
+                "【CRITICAL 系統警告】你尚未向用戶發送任何回應（send_message）。\n"
+                f"這是倒數第二輪（turn {n+1}/{MAX_ITER}），下一輪是最後一輪。\n"
+                "你必須在下一輪立刻呼叫 mcp__evoclaw__send_message 把結果告知用戶，"
+                "否則用戶將看到「處理完成，但未能產生文字回應」錯誤。\n"
+                "不要再執行其他工具——把你已掌握的資訊直接發送出去。"
+            ))]))
+            _turns_since_notify = 0
 
         # P15A-FIX-9: Trim history to prevent unbounded growth while preserving
         # model(function_call) + user(function_response) pairs.  The naive slice
