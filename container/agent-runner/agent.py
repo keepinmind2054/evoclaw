@@ -1672,6 +1672,7 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
     messages.append({"role": "user", "content": user_message})
     MAX_ITER = max_iter
     final_response = ""
+    _no_tool_calls_claude = 0  # consecutive turns without any tool_use block (fixes #450)
     _memory_written = False  # True once agent writes to MEMORY.md this session
     _memory_path_str = f"{WORKSPACE}/MEMORY.md"  # BUG-FIX #424: group_folder is a name, not a path; use WORKSPACE
     _tool_fail_counter: dict = {}  # (tool_name, args_hash) -> consecutive_fail_count
@@ -1723,6 +1724,14 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
                 block.text for block in response.content
                 if hasattr(block, "text") and block.text is not None
             )
+            # ── No-tool-turns guard (fixes #450) ─────────────────────────────
+            # Track consecutive end_turn responses with no tool_use blocks.
+            # If the model keeps returning text-only turns, break early to avoid
+            # burning all MAX_ITER iterations, matching OpenAI/Gemini loop behavior.
+            _no_tool_calls_claude += 1
+            if _no_tool_calls_claude >= 3:
+                _log("❌ NO-TOOL", f"Claude made no tool call for {_no_tool_calls_claude} consecutive turns — breaking")
+                break
             # ── Fake status detection on end_turn (no tool calls made) ─────────
             _fake_hits = _FAKE_STATUS_RE.findall(final_response)
             if _fake_hits and n < MAX_ITER - 1:
@@ -1794,6 +1803,7 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
             break
 
         # Execute all tool calls
+        _no_tool_calls_claude = 0  # reset: tool_use blocks are present this turn (fixes #450)
         tool_results = []
         _tool_names_this_turn: set = set()
         for block in response.content:
