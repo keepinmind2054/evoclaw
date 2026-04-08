@@ -1157,7 +1157,8 @@ async def _message_loop() -> None:
                 jid = group["jid"]
                 cursor = _per_jid_cursors.get(jid, _last_timestamp)
                 # Per-JID query: only check this group's own cursor
-                msgs = db.get_new_messages([jid], cursor)
+                # Issue #443: use async wrapper to avoid blocking the event loop
+                msgs = await db.async_get_new_messages([jid], cursor)
                 if msgs:
                     # GroupQueue ensures only one container runs per group
                     _group_queue.enqueue_message_check(jid)
@@ -1550,7 +1551,8 @@ async def main() -> None:
         if not group:
             return True
         cursor = _per_jid_cursors.get(jid, _last_timestamp)
-        msgs = db.get_new_messages([jid], cursor)
+        # Issue #443: use async wrapper to avoid blocking the event loop
+        msgs = await db.async_get_new_messages([jid], cursor)
         if not msgs:
             return True
         ts = max(m["timestamp"] for m in msgs)

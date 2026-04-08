@@ -20,7 +20,13 @@ _db: Optional[sqlite3.Connection] = None
 # background threads (evolution daemon via asyncio.to_thread, dashboard thread,
 # webportal thread).  check_same_thread=False disables SQLite's own check but
 # does NOT make the Connection thread-safe — the lock provides that guarantee.
-_db_lock: threading.Lock = threading.Lock()
+#
+# Issue #443: Use RLock (reentrant lock) instead of Lock.  The reentrant lock
+# allows the same thread to acquire the lock multiple times without deadlock,
+# which can occur when a DB helper calls another DB helper (e.g. during
+# init_database's integrity check → schema migration path).  RLock has the same
+# thread-safety guarantees as Lock for multi-threaded callers.
+_db_lock: threading.RLock = threading.RLock()
 
 def get_db() -> sqlite3.Connection:
     """取得全域 DB 連線，若尚未初始化則拋出例外。
@@ -1677,6 +1683,32 @@ def get_container_logs(jid: str = "", limit: int = 50, status: str = "") -> list
             params,
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── Async-friendly wrappers (issue #443) ──────────────────────────────────────
+# The hot-path DB functions (get_new_messages, get_due_tasks) are called from
+# the asyncio event loop.  Running them synchronously blocks the loop while the
+# thread lock is held, preventing other coroutines from progressing.
+#
+# These async wrappers use asyncio.to_thread() to offload each call to a thread
+# pool worker.  The underlying _db_lock still serialises actual SQLite access,
+# but the event loop is free to run other coroutines while the thread waits for
+# the lock and executes the query.
+#
+# Callers in the asyncio event loop should use the async_ variants.
+# Background threads (evolution daemon, webportal) should continue using the
+# synchronous versions directly.
+
+import asyncio as _asyncio  # local alias to avoid polluting the module namespace
+
+async def async_get_new_messages(jids: list, last_timestamp: int) -> list:
+    """Async wrapper for get_new_messages — runs in a thread pool to avoid blocking the event loop."""
+    return await _asyncio.to_thread(get_new_messages, jids, last_timestamp)
+
+
+async def async_get_due_tasks(now_ms: int) -> list:
+    """Async wrapper for get_due_tasks — runs in a thread pool to avoid blocking the event loop."""
+    return await _asyncio.to_thread(get_due_tasks, now_ms)
 
 
 # ── Shutdown cleanup ───────────────────────────────────────────────────────────
