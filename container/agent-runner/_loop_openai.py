@@ -10,12 +10,37 @@ except ImportError:
     _OPENAI_AVAILABLE = False
     httpx = None  # type: ignore
 
+import re as _re_openai
+
 from _constants import (
     _MAX_TOOL_RESULT_CHARS, _MAX_HISTORY_MESSAGES,
 )
 from _utils import _log, _llm_call_with_retry, _KeyPool
 from _constants import _ACTION_CLAIM_RE
 from _tools import _messages_sent_via_tool
+
+# ── Module-level compiled regexes (issue #453: avoid re-compiling every loop iteration) ──
+_CODE_BLOCK_RE = _re_openai.compile(r'```(?:bash|sh|shell)?\n([\s\S]*?)```')
+_GIT_LOG_LINE_RE = _re_openai.compile(r'^[0-9a-f]{7,40} \S')
+_BARE_FILE_RE = _re_openai.compile(
+    r'^[^\s|;&<>$`\'\"()\[\]{}!\\]+\.(md|txt|py|js|ts|sh|json|yaml|yml|toml|csv|log|conf|cfg)$',
+    _re_openai.IGNORECASE,
+)
+_FAKE_STATUS_RE = _re_openai.compile(
+    r'\*\([^)]*\)\*'                                                   # *(正在執行...)*
+    r'|\*\[[^\]]*\]\*'                                                  # *[running...]*
+    r'|✅\s*Done'                                                      # ✅ Done
+    r'|✅\s*完成'                                                      # ✅ 完成
+    r'|【[^】]*(?:已|正在|將|完成|處理|執行)[^】]*】'                    # 【已完成】
+    r'|（[^）]{2,30}(?:已|正在|處理|執行)[^）]{0,20}）'                 # （已完成）
+    r'|(?:I\s+have\s+(?:completed|finished|executed|run|written))'     # English fake-done
+    r'|(?:Task\s+(?:is\s+)?(?:complete|done|finished))'               # Task complete
+    r'|(?:Successfully\s+(?:completed|executed|ran|written))',          # Successfully executed
+    _re_openai.DOTALL | _re_openai.IGNORECASE,
+)
+_EXTENDED_FAKE_RE = _re_openai.compile(
+    r'(?:已|正在|即將).{0,8}(?:完成|處理|執行|分析)',  # 已完成、正在處理
+)
 
 
 def run_agent_openai(client_holder, system_instruction: str, user_message: str, chat_jid: str, model: str, conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None, group_folder: str = "", max_iter: int = 20) -> str:
@@ -176,9 +201,8 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
             # ── Fallback: detect bash code blocks the model forgot to run ─────
             # Some models (Qwen/NIM) output ```bash blocks as text instead of
             # calling the Bash tool. Auto-execute them and feed results back.
-            import re as _re_cb
             content = msg.content or ""
-            _code_blocks = _re_cb.findall(r'```(?:bash|sh|shell)?\n([\s\S]*?)```', content)
+            _code_blocks = _CODE_BLOCK_RE.findall(content)
             _runnable = [b.strip() for b in _code_blocks if b.strip()]
             if _runnable and n < MAX_ITER - 1:
                 _log("⚠️ AUTO-EXEC", f"model output {len(_runnable)} code block(s) as text — auto-executing")
@@ -189,14 +213,9 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                     # Sanity check 1: reject commands that look like git log output
                     # (lines starting with 7-40 hex chars + space, e.g. "c43faa8 feat: ...")
                     _auto_lines = [_l for _l in _cmd.strip().splitlines() if _l.strip()]
-                    _GIT_LOG_RE = _re_cb.compile(r'^[0-9a-f]{7,40} \S')
                     # Sanity check 2: reject bare filenames (e.g. "MEMORY.md", "/workspace/group/MEMORY.md")
-                    _BARE_FILE_RE = _re_cb.compile(
-                        r'^[^\s|;&<>$`\'\"()\[\]{}!\\]+\.(md|txt|py|js|ts|sh|json|yaml|yml|toml|csv|log|conf|cfg)$',
-                        _re_cb.IGNORECASE,
-                    )
                     if _auto_lines and len(_auto_lines) >= 2 and all(
-                        _GIT_LOG_RE.match(_l) for _l in _auto_lines[:4]
+                        _GIT_LOG_LINE_RE.match(_l) for _l in _auto_lines[:4]
                     ):
                         _res = "✗ Skipped: this looks like git log output, not a valid bash command. Use `git log --oneline` explicitly if you need commit history."
                         _log("⚠️ AUTO-EXEC-SKIP", f"Rejected fallback block that looks like git log output: {_cmd[:120]}")
@@ -221,33 +240,13 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
             # Log the detection; the real enforcement happens via tool_choice="required"
             # on the NEXT iteration (Fix #167 + #169: API-level enforcement is primary,
             # text re-prompt is secondary fallback for providers that don't support "required").
-            # BUG-FIX: the original regex only matched *(...)* and *[...]* patterns.
-            # Add the same extended set used by the Claude/Gemini loops so that
-            # non-Qwen OpenAI models (GPT-4, etc.) also get full fake-status coverage.
-            _FAKE_STATUS_RE = _re_cb.compile(
-                r'\*\([^)]*\)\*'                                                   # *(正在執行...)*
-                r'|\*\[[^\]]*\]\*'                                                  # *[running...]*
-                r'|✅\s*Done'                                                      # ✅ Done
-                r'|✅\s*完成'                                                      # ✅ 完成
-                r'|【[^】]*(?:已|正在|將|完成|處理|執行)[^】]*】'                    # 【已完成】
-                r'|（[^）]{2,30}(?:已|正在|處理|執行)[^）]{0,20}）'                 # （已完成）
-                r'|(?:I\s+have\s+(?:completed|finished|executed|run|written))'     # English fake-done
-                r'|(?:Task\s+(?:is\s+)?(?:complete|done|finished))'               # Task complete
-                r'|(?:Successfully\s+(?:completed|executed|ran|written))',          # Successfully executed
-                _re_cb.DOTALL | _re_cb.IGNORECASE,
-            )
+            # Both _FAKE_STATUS_RE and _EXTENDED_FAKE_RE are compiled at module level
+            # (issue #453: avoid recompiling on every loop iteration).
             _fake_hits = _FAKE_STATUS_RE.findall(content)
             # 擴展假狀態偵測，涵蓋常見的虛假回應格式（所有 OpenAI-compatible models）
-            _EXTENDED_FAKE_PATTERNS = [
-                r'(?:已|正在|即將).{0,8}(?:完成|處理|執行|分析)',  # 已完成、正在處理
-            ]
-            for _qp in _EXTENDED_FAKE_PATTERNS:
-                try:
-                    _ext_fake_hits = _re_cb.findall(_qp, content)
-                    if _ext_fake_hits:
-                        _fake_hits = (_fake_hits or []) + _ext_fake_hits
-                except Exception:
-                    pass
+            _ext_fake_hits = _EXTENDED_FAKE_RE.findall(content)
+            if _ext_fake_hits:
+                _fake_hits = (_fake_hits or []) + _ext_fake_hits
             if _fake_hits and n < MAX_ITER - 1:
                 _log("⚠️ FAKE-STATUS", f"model wrote {len(_fake_hits)} fake status line(s) — tool_choice='required' on next turn")
                 history.append({
@@ -395,9 +394,8 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                 _recovered = False
                 if _raw_args.strip() and _raw_args != "{}":
                     try:
-                        import re as _re_fix_args
-                        # 修復常見問題：末尾多餘逗號
-                        _fixed = _re_fix_args.sub(r',\s*([}\]])', r'\1', _raw_args)
+                        # 修復常見問題：末尾多餘逗號 (use module-level _re_openai, issue #453)
+                        _fixed = _re_openai.sub(r',\s*([}\]])', r'\1', _raw_args)
                         args = _json.loads(_fixed)
                         _recovered = True
                         _log("🔧 ARG-RECOVERY", f"Recovered malformed args for {tc.function.name}")
