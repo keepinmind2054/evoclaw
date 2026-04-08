@@ -118,6 +118,33 @@ def _atomic_ipc_write(fname: Path, data: str) -> None:
     tmp.rename(fname)  # POSIX rename() is atomic
 
 
+def _write_ipc_task(task_type: str, payload: dict, ipc_dir: str = None) -> str:
+    """Write an IPC task JSON file atomically and return the filename stem.
+
+    Encapsulates the repeated pattern of:
+      mkdir -> random uid -> millisecond timestamp filename -> atomic write JSON
+
+    Args:
+        task_type: The ``"type"`` field value and filename slug (e.g. ``"cancel_task"``).
+        payload:   Dict to serialise as JSON; ``{"type": task_type}`` is merged in.
+        ipc_dir:   Directory to write into; defaults to ``IPC_TASKS_DIR``.
+
+    Returns:
+        The ``Path.name`` of the written file (useful for log messages).
+
+    Raises:
+        Any ``OSError`` / ``Exception`` from mkdir or write -- callers should
+        wrap in ``try/except`` and return ``f"Error: {e}"`` as usual.
+    """
+    target_dir = Path(ipc_dir) if ipc_dir else Path(IPC_TASKS_DIR)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    uid = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+    slug = task_type.replace("_", "-")
+    fname = target_dir / f"{int(time.time() * 1000)}-{slug}-{uid}.json"
+    _atomic_ipc_write(fname, json.dumps({"type": task_type, **payload}))
+    return fname.name
+
+
 class _KeyPool:
     """Round-robin key rotation pool with per-key failure tracking."""
 
@@ -696,12 +723,7 @@ def tool_cancel_task(task_id: str) -> str:
     if not task_id:
         return "Error: task_id is required."
     try:
-        Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
-        # P16B-FIX-2: add random uid suffix (same pattern as schedule_task / spawn_agent)
-        # to prevent filename collision when two cancel calls land in the same millisecond.
-        _uid = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-        fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-{_uid}-cancel.json"
-        _atomic_ipc_write(fname, json.dumps({"type": "cancel_task", "task_id": task_id}))
+        _write_ipc_task("cancel_task", {"task_id": task_id})
         return f"Task {task_id} cancellation request sent."
     except Exception as e:
         return f"Error: {e}"
@@ -714,11 +736,7 @@ def tool_pause_task(task_id: str) -> str:
     if not task_id:
         return "Error: task_id is required."
     try:
-        Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
-        # P16B-FIX-2: add random uid suffix to prevent filename collision.
-        _uid = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-        fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-{_uid}-pause.json"
-        _atomic_ipc_write(fname, json.dumps({"type": "pause_task", "task_id": task_id}))
+        _write_ipc_task("pause_task", {"task_id": task_id})
         return f"Task {task_id} pause request sent."
     except Exception as e:
         return f"Error: {e}"
@@ -731,11 +749,7 @@ def tool_resume_task(task_id: str) -> str:
     if not task_id:
         return "Error: task_id is required."
     try:
-        Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
-        # P16B-FIX-2: add random uid suffix to prevent filename collision.
-        _uid = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-        fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-{_uid}-resume.json"
-        _atomic_ipc_write(fname, json.dumps({"type": "resume_task", "task_id": task_id}))
+        _write_ipc_task("resume_task", {"task_id": task_id})
         return f"Task {task_id} resume request sent."
     except Exception as e:
         return f"Error: {e}"

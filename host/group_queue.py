@@ -7,6 +7,7 @@ over pending messages. Includes exponential backoff retry on failure.
 """
 
 import asyncio
+import collections
 import logging
 from dataclasses import dataclass, field
 from typing import Callable, Awaitable, Optional
@@ -59,6 +60,7 @@ class _GroupState:
     running_task_id: Optional[str] = None  # 正在執行的任務 ID（去重複用）
     pending_messages: bool = False  # 是否有訊息等待下一輪處理
     pending_tasks: list = field(default_factory=list)  # 等待執行的 _QueuedTask 清單
+    pending_task_ids: set = field(default_factory=set)  # O(1) dedup lookup for pending_tasks
     retry_count: int = 0            # 目前連續失敗次數（用於退避計算）
 
 
@@ -87,7 +89,7 @@ class GroupQueue:
     def __init__(self):
         self._groups: dict[str, _GroupState] = {}  # 各群組的狀態，以 JID 為 key
         self._active_count: int = 0                 # 目前正在執行的 container 總數
-        self._waiting_groups: list[str] = []        # 等待 concurrency 槽位的群組 JID 清單（FIFO）
+        self._waiting_groups: collections.deque[str] = collections.deque()  # 等待 concurrency 槽位的群組 JID 清單（FIFO）
         self._process_messages_fn: Optional[Callable[[str], Awaitable[bool]]] = None
         self._shutting_down: bool = False
         self._retry_tasks: set = set()
@@ -176,7 +178,7 @@ class GroupQueue:
         if state.running_task_id == task_id:
             log.debug(f"[{group_jid}] Task {task_id} already running — skipped")
             return
-        if any(t.id == task_id for t in state.pending_tasks):
+        if task_id in state.pending_task_ids:
             log.debug(f"[{group_jid}] Task {task_id} already queued — skipped")
             return
 
@@ -206,6 +208,7 @@ class GroupQueue:
                     log.warning("Failed to send task-queue-full notification to %s: %s", group_jid, _ne)
                 return
             state.pending_tasks.append(task)
+            state.pending_task_ids.add(task_id)
             log.debug(f"[{group_jid}] Container active — task {task_id} queued")
             return
 
@@ -218,6 +221,7 @@ class GroupQueue:
                 )
                 return
             state.pending_tasks.append(task)
+            state.pending_task_ids.add(task_id)
             if group_jid not in self._waiting_groups:
                 if len(self._waiting_groups) < MAX_WAITING_GROUPS:
                     self._waiting_groups.append(group_jid)
@@ -361,6 +365,7 @@ class GroupQueue:
         # 任務優先：先把待辦任務清空
         if state.pending_tasks:
             task = state.pending_tasks.pop(0)
+            state.pending_task_ids.discard(task.id)
             state.active = True
             state.is_task_container = True
             state.running_task_id = task.id
@@ -398,12 +403,13 @@ class GroupQueue:
         FIFO 順序確保早進來的群組不會被後來的群組插隊（公平調度）。
         """
         while self._waiting_groups and self._active_count < config.MAX_CONCURRENT_CONTAINERS:
-            next_jid = self._waiting_groups.pop(0)
+            next_jid = self._waiting_groups.popleft()
             state = self._get_group(next_jid)
 
             # 同樣優先處理任務，再處理訊息
             if state.pending_tasks:
                 task = state.pending_tasks.pop(0)
+                state.pending_task_ids.discard(task.id)
                 state.active = True
                 state.is_task_container = True
                 state.running_task_id = task.id
