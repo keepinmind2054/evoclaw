@@ -72,8 +72,9 @@ class SdkApi:
     Allows external tools to query memory, check agent status,
     and submit tasks without needing direct database access.
 
-    Authentication: Optional bearer token via SDK_API_TOKEN env var.
-    If not set, all connections are accepted (suitable for localhost use).
+    Authentication: Required bearer token via SDK_API_TOKEN env var.
+    If not set, all connections are rejected and a startup warning is logged.
+    Set SDK_API_NO_AUTH=1 to explicitly allow unauthenticated access (dev only).
     """
 
     DEFAULT_PORT = 8767
@@ -98,7 +99,9 @@ class SdkApi:
         self._memory_bus = memory_bus
         self._identity_store = identity_store
         self._port = port or int(os.environ.get("SDK_API_PORT", self.DEFAULT_PORT))
-        self._token = token or os.environ.get("SDK_API_TOKEN", "")
+        _raw_token = token or os.environ.get("SDK_API_TOKEN", "")
+        self._token = _raw_token if _raw_token else None
+        self._no_auth = os.environ.get("SDK_API_NO_AUTH", "") == "1"
         self._connections: Set = set()
         self._running = False
         self._task_submit_callback = None
@@ -128,6 +131,18 @@ class SdkApi:
         _host = os.environ.get("SDK_API_HOST", "127.0.0.1")
         if _host not in ("127.0.0.1", "localhost"):
             logger.warning("SDK API bound to %s — ensure firewall rules are in place", _host)
+        if not self._token:
+            if self._no_auth:
+                logger.warning(
+                    "SDK_API_TOKEN is not set — SDK API authentication is DISABLED "
+                    "(SDK_API_NO_AUTH=1 explicit opt-out active)"
+                )
+            else:
+                logger.warning(
+                    "SDK_API_TOKEN is not set — SDK API authentication is DISABLED; "
+                    "all connections will be rejected. Set SDK_API_TOKEN or use "
+                    "SDK_API_NO_AUTH=1 to allow unauthenticated access."
+                )
         logger.info(f"SdkApi starting on ws://{_host}:{self._port}")
         async with websockets.serve(
             self._handle_connection,
@@ -187,7 +202,15 @@ class SdkApi:
         # client received an error reply but the loop continued, allowing
         # unlimited retry attempts without disconnecting.  Authenticate once on
         # the first message and close the socket on failure.
-        _authenticated = not bool(self._token)  # True when no token required
+        #
+        # Security fix (#441): When SDK_API_TOKEN is unset, reject ALL connections
+        # unless SDK_API_NO_AUTH=1 is explicitly set for development use.
+        if not self._token and not self._no_auth:
+            await self._send_error(websocket, "unauthorized", "SDK API token not configured — connections rejected")
+            await websocket.close()
+            self._connections.discard(websocket)
+            return
+        _authenticated = not bool(self._token)  # True only when no-auth mode is active
 
         # BUG-18C-03 (MEDIUM): Per-connection rate limiting.
         # Track timestamps of recent messages in a deque; prune entries older
