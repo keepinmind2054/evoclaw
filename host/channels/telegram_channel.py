@@ -78,7 +78,13 @@ class TelegramChannel:
                         read_timeout=30.0,
                     )
                     builder = builder.request(req)
-                    log.info("Telegram using proxy: %s", self._proxy)
+                    # Issue #451: redact credentials from proxy URL before logging
+                    # to prevent socks5://user:pass@host:port leaking into log files.
+                    import re as _re_proxy
+                    _proxy_safe = _re_proxy.sub(
+                        r'://[^@]+@', '://<redacted>@', self._proxy
+                    )
+                    log.info("Telegram using proxy: %s", _proxy_safe)
                 self._app = builder.build()
 
                 async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
