@@ -1148,35 +1148,56 @@ def tool_web_fetch(url: str) -> str:
                     )
                 return super().redirect_request(req, fp, code, msg, headers, newurl)
 
-        # BUG-P18D-07: DNS rebinding TOCTOU mitigation.  The pre-flight
-        # _is_ssrf_target() call resolves the hostname at check-time, but the
-        # actual TCP connection is made later by urllib.  A DNS rebinding attack
-        # can return a public IP at check-time, then switch to a private IP at
-        # connect-time to bypass the SSRF filter.
-        # Mitigation: monkey-patch socket.create_connection to re-validate the
-        # resolved IP address at the moment the TCP socket is opened.  This is
-        # the only reliable defence without external libraries (e.g. pycurl).
+        # BUG-P18D-07 / fix for #445: DNS rebinding TOCTOU mitigation.
+        # The pre-flight _is_ssrf_target() call resolves the hostname at
+        # check-time, but the actual TCP connection is made later by urllib.
+        # A DNS rebinding attack can return a public IP at check-time, then
+        # switch to a private IP at connect-time to bypass the SSRF filter.
+        #
+        # Previous mitigation monkey-patched socket.create_connection, which
+        # is thread-unsafe: two concurrent tool_web_fetch() calls race on the
+        # global socket.create_connection reference, so one call's patch can
+        # be overwritten (or prematurely restored) by the other.
+        #
+        # Fix: use a custom urllib.request handler that validates the
+        # destination IP inside the handler itself, scoped to the
+        # OpenerDirector instance.  No global state is mutated, so concurrent
+        # calls are safe.
         import socket as _socket_rebind
-        _orig_create_conn = _socket_rebind.create_connection
 
-        def _safe_create_connection(address, *_args, **_kwargs):
-            _conn_host, _conn_port = address[0], address[1] if len(address) > 1 else None
-            try:
-                _conn_ip = _socket_rebind.getaddrinfo(_conn_host, _conn_port)[0][4][0]
-                _conn_ip_obj = _ipaddress.ip_address(_conn_ip)
-                if (_conn_ip_obj.is_private or _conn_ip_obj.is_loopback or
-                        _conn_ip_obj.is_link_local or _conn_ip_obj.is_reserved or
-                        _conn_ip_obj.is_multicast or _conn_ip_obj.is_unspecified):
-                    raise urllib.error.URLError(
-                        f"SSRF: connection to private IP {_conn_ip!r} blocked (DNS rebinding protection)"
-                    )
-            except urllib.error.URLError:
-                raise
-            except Exception:
-                pass  # DNS error at connect time — let urllib surface it naturally
-            return _orig_create_conn(address, *_args, **_kwargs)
+        class _SSRFBlockingHandler(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):
+            """Thread-safe SSRF protection — validates destination IP before connecting."""
 
-        _opener = urllib.request.build_opener(_LimitedRedirectHandler)
+            def http_open(self, req):
+                self._check_host(req.host)
+                return urllib.request.HTTPHandler.http_open(self, req)
+
+            def https_open(self, req):
+                self._check_host(req.host)
+                return urllib.request.HTTPSHandler.https_open(self, req)
+
+            def _check_host(self, host):
+                hostname = host.split(':')[0]
+                try:
+                    addrs = _socket_rebind.getaddrinfo(hostname, None)
+                except Exception:
+                    raise urllib.error.URLError(f"DNS resolution failed for {hostname}")
+                for _, _, _, _, sockaddr in addrs:
+                    try:
+                        ip = _ipaddress.ip_address(sockaddr[0])
+                    except ValueError:
+                        continue
+                    if (ip.is_private or ip.is_loopback or ip.is_link_local or
+                            ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+                        raise urllib.error.URLError(
+                            f"SSRF: connection to private IP {sockaddr[0]!r} blocked (DNS rebinding protection)"
+                        )
+                    if sockaddr[0].startswith("169.254."):
+                        raise urllib.error.URLError(
+                            f"SSRF: connection to link-local IP {sockaddr[0]!r} blocked"
+                        )
+
+        _opener = urllib.request.build_opener(_LimitedRedirectHandler, _SSRFBlockingHandler())
 
         req = urllib.request.Request(
             url,
@@ -1185,21 +1206,7 @@ def tool_web_fetch(url: str) -> str:
                 "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
             }
         )
-        # BUG-P24A-1: the previous code patched socket.create_connection only
-        # during build_opener() (which makes no network connections) and then
-        # restored the original before _opener.open() was called.  The DNS
-        # rebinding protection was therefore never active during the actual TCP
-        # connection, making it completely ineffective.  Fix: keep the patched
-        # socket.create_connection active for the duration of _opener.open() so
-        # every TCP connection made while fetching the URL is validated.
-        _socket_rebind.create_connection = _safe_create_connection
-        try:
-            _fetch_ctx = _opener.open(req, timeout=30)
-        except Exception:
-            _socket_rebind.create_connection = _orig_create_conn
-            raise
-        _socket_rebind.create_connection = _orig_create_conn
-        with _fetch_ctx as resp:
+        with _opener.open(req, timeout=30) as resp:
             content_type = resp.headers.get("Content-Type", "")
 
             # ── Binary content detection ──────────────────────────────────────
