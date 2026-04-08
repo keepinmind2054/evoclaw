@@ -1,10 +1,19 @@
 """Utility functions for the EvoClaw agent runner."""
-import json, os, sys, time, random, threading
+import json, os, sys, time, random, string, threading
 from pathlib import Path
 from _constants import (
     IPC_MESSAGES_DIR, IPC_TASKS_DIR, IPC_RESULTS_DIR, WORKSPACE,
     _ALLOWED_PATH_PREFIXES, _MAX_TOOL_RESULT_CHARS,
 )
+
+# ── Thread-safety for tool_web_fetch's socket monkey-patch (issue #445) ──────
+# socket.create_connection is a module-level global; patching it in multiple
+# threads simultaneously causes races where one thread restores the original
+# while another thread's request is still in flight through the patched version.
+# Serialise all web fetches through this lock so only one thread can hold the
+# patch at a time.  Performance impact is minimal because tool calls are already
+# serialised per-session by the agentic loop.
+_SSRF_PATCH_LOCK = threading.Lock()
 
 import datetime as _dt
 
@@ -28,6 +37,30 @@ def _atomic_ipc_write(fname: Path, data: str) -> None:
     tmp = fname.with_suffix(".tmp")
     tmp.write_text(data, encoding="utf-8")
     tmp.rename(fname)  # POSIX rename() is atomic
+
+
+def _write_ipc_file(ipc_dir: str, payload: dict, suffix: str = "") -> Path:
+    """Create a timestamped IPC JSON file in *ipc_dir* and write *payload* atomically.
+
+    Centralises the boilerplate that previously appeared in every IPC tool:
+      1. ensure the directory exists
+      2. generate a random uid suffix (prevents millisecond-level collisions)
+      3. build the filename  ``{timestamp_ms}-{uid}[-{suffix}].json``
+      4. write atomically via _atomic_ipc_write
+
+    Returns the Path of the written file.
+
+    Issue #444: IPC write pattern was duplicated 6+ times across _tools.py.
+    """
+    uid = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+    dir_path = Path(ipc_dir)
+    dir_path.mkdir(parents=True, exist_ok=True)
+    name = f"{int(time.time()*1000)}-{uid}"
+    if suffix:
+        name = f"{name}-{suffix}"
+    fname = dir_path / f"{name}.json"
+    _atomic_ipc_write(fname, json.dumps(payload))
+    return fname
 
 
 class _KeyPool:

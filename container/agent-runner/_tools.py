@@ -7,7 +7,7 @@ from _constants import (
     IPC_MESSAGES_DIR, IPC_TASKS_DIR, IPC_RESULTS_DIR, WORKSPACE,
     _ALLOWED_PATH_PREFIXES, _MAX_TOOL_RESULT_CHARS,
 )
-from _utils import _log, _atomic_ipc_write, _check_path_allowed
+from _utils import _log, _atomic_ipc_write, _check_path_allowed, _write_ipc_file, _SSRF_PATCH_LOCK
 
 import _constants
 
@@ -504,12 +504,9 @@ def tool_cancel_task(task_id: str) -> str:
     if not task_id:
         return "Error: task_id is required."
     try:
-        Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
-        # P16B-FIX-2: add random uid suffix (same pattern as schedule_task / spawn_agent)
-        # to prevent filename collision when two cancel calls land in the same millisecond.
-        _uid = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-        fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-{_uid}-cancel.json"
-        _atomic_ipc_write(fname, json.dumps({"type": "cancel_task", "task_id": task_id}))
+        # Issue #444: use _write_ipc_file helper (deduplicates mkdir+uid+atomic-write pattern)
+        fname = _write_ipc_file(IPC_TASKS_DIR, {"type": "cancel_task", "task_id": task_id}, suffix="cancel")
+        _log("📨 IPC", f"type=cancel_task → {fname.name}")
         return f"Task {task_id} cancellation request sent."
     except Exception as e:
         return f"Error: {e}"
@@ -522,11 +519,9 @@ def tool_pause_task(task_id: str) -> str:
     if not task_id:
         return "Error: task_id is required."
     try:
-        Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
-        # P16B-FIX-2: add random uid suffix to prevent filename collision.
-        _uid = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-        fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-{_uid}-pause.json"
-        _atomic_ipc_write(fname, json.dumps({"type": "pause_task", "task_id": task_id}))
+        # Issue #444: use _write_ipc_file helper
+        fname = _write_ipc_file(IPC_TASKS_DIR, {"type": "pause_task", "task_id": task_id}, suffix="pause")
+        _log("📨 IPC", f"type=pause_task → {fname.name}")
         return f"Task {task_id} pause request sent."
     except Exception as e:
         return f"Error: {e}"
@@ -539,11 +534,9 @@ def tool_resume_task(task_id: str) -> str:
     if not task_id:
         return "Error: task_id is required."
     try:
-        Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
-        # P16B-FIX-2: add random uid suffix to prevent filename collision.
-        _uid = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-        fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-{_uid}-resume.json"
-        _atomic_ipc_write(fname, json.dumps({"type": "resume_task", "task_id": task_id}))
+        # Issue #444: use _write_ipc_file helper
+        fname = _write_ipc_file(IPC_TASKS_DIR, {"type": "resume_task", "task_id": task_id}, suffix="resume")
+        _log("📨 IPC", f"type=resume_task → {fname.name}")
         return f"Task {task_id} resume request sent."
     except Exception as e:
         return f"Error: {e}"
@@ -559,20 +552,16 @@ def tool_run_agent(prompt: str, context_mode: str = "isolated") -> str:
     try:
         request_id = str(_uuid.uuid4())
 
-        Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
         Path(IPC_RESULTS_DIR).mkdir(parents=True, exist_ok=True)
 
-        # BUG-P18D-09: add random suffix (same pattern as schedule_task/cancel_task)
-        # to prevent filename collision when two tool_run_agent calls land within
-        # the same millisecond, which would silently overwrite each other's request.
-        _spawn_uid = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-        fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-{_spawn_uid}-spawn.json"
-        _atomic_ipc_write(fname, json.dumps({
+        # Issue #444: use _write_ipc_file helper (deduplicates mkdir+uid+atomic-write)
+        fname = _write_ipc_file(IPC_TASKS_DIR, {
             "type": "spawn_agent",
             "requestId": request_id,
             "prompt": prompt,
             "context_mode": context_mode,
-        }))
+        }, suffix="spawn")
+        _log("📨 IPC", f"type=spawn_agent → {fname.name}")
 
         # Poll for result — reduced from 300s to 60s to free the parent group
         # faster (STABILITY_ANALYSIS 5.3).
@@ -653,14 +642,12 @@ def tool_start_remote_control(chat_jid: str = "", sender: str = "") -> str:
     if not effective_jid:
         return "Error: chat_jid not provided and not available from input"
     try:
-        Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
-        uid = str(uuid.uuid4())[:8]
-        fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-remote-control-{uid}.json"
-        _atomic_ipc_write(fname, json.dumps({
+        # Issue #444: use _write_ipc_file helper
+        fname = _write_ipc_file(IPC_TASKS_DIR, {
             "type": "start_remote_control",
             "jid": effective_jid,
             "sender": sender,
-        }))
+        }, suffix="remote-control")
         _log("📨 IPC", f"type=start_remote_control jid={effective_jid} → {fname.name}")
         return "Remote control session requested — URL will be sent to this chat shortly (up to 30s)."
     except Exception as exc:
@@ -672,13 +659,11 @@ def tool_self_update(chat_jid: str = "") -> str:
     The host will run `git pull` + `pip install -e .` then restart via os.execv()."""
     effective_jid = chat_jid or _constants._input_chat_jid or ""
     try:
-        Path(IPC_TASKS_DIR).mkdir(parents=True, exist_ok=True)
-        uid = str(uuid.uuid4())[:8]
-        fname = Path(IPC_TASKS_DIR) / f"{int(time.time()*1000)}-self-update-{uid}.json"
-        _atomic_ipc_write(fname, json.dumps({
+        # Issue #444: use _write_ipc_file helper
+        fname = _write_ipc_file(IPC_TASKS_DIR, {
             "type": "self_update",
             "jid": effective_jid,
-        }))
+        }, suffix="self-update")
         _log("📨 IPC", f"type=self_update jid={effective_jid} → {fname.name}")
         return "Self-update requested — EvoClaw will pull latest code and restart shortly."
     except Exception as exc:
@@ -972,13 +957,18 @@ def tool_web_fetch(url: str) -> str:
         # connection, making it completely ineffective.  Fix: keep the patched
         # socket.create_connection active for the duration of _opener.open() so
         # every TCP connection made while fetching the URL is validated.
-        _socket_rebind.create_connection = _safe_create_connection
-        try:
-            _fetch_ctx = _opener.open(req, timeout=30)
-        except Exception:
-            _socket_rebind.create_connection = _orig_create_conn
-            raise
-        _socket_rebind.create_connection = _orig_create_conn
+        #
+        # Issue #445 (thread-safety): socket.create_connection is a module-level
+        # global.  Without a lock, two concurrent tool_web_fetch calls could race:
+        # thread A sets the patched fn, thread B restores the original, then thread
+        # A's fetch runs without SSRF protection.  Serialise via _SSRF_PATCH_LOCK
+        # (defined in _utils.py) so only one fetch holds the patch at a time.
+        with _SSRF_PATCH_LOCK:
+            _socket_rebind.create_connection = _safe_create_connection
+            try:
+                _fetch_ctx = _opener.open(req, timeout=30)
+            finally:
+                _socket_rebind.create_connection = _orig_create_conn
         with _fetch_ctx as resp:
             content_type = resp.headers.get("Content-Type", "")
 
