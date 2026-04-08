@@ -390,10 +390,9 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
         # Using file flag avoids cross-task direct coupling (same pattern as refresh_groups)
         # p16c BUG-FIX (MEDIUM): use atomic tmp+rename so the main loop never reads
         # a partial JSON payload if it polls exactly at write time.
-        import json as _json
         flag = config.DATA_DIR / "reset_group.flag"
         _reset_tmp = flag.with_suffix(".flag.tmp")
-        _reset_tmp.write_text(_json.dumps({"jid": target_jid, "ts": time.time()}), encoding="utf-8")
+        _reset_tmp.write_text(json.dumps({"jid": target_jid, "ts": time.time()}), encoding="utf-8")
         _reset_tmp.rename(flag)
         log.info("reset_group requested via IPC for jid=%s by group=%s", target_jid, group_folder)
 
@@ -531,11 +530,33 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
             log.warning("start_remote_control IPC: could not resolve JID for group %s", group_folder)
 
     elif msg_type == "self_update":
+        # Security: require an out-of-band confirmation token to prevent
+        # prompt-injection attacks from triggering unattended code updates.
+        confirm_token = payload.get("confirm_token", "")
+        expected_token = os.environ.get("SELF_UPDATE_TOKEN", "")
         _su_jid = payload.get("jid", "")
         if not _su_jid:
             _su_groups = db.get_all_registered_groups()
             _su_match = next((g for g in _su_groups if g.get("folder") == group_folder), None)
             _su_jid = _su_match["jid"] if _su_match else ""
+        if not expected_token:
+            # If no token configured, self_update is disabled entirely
+            log.warning(
+                "self_update IPC: SELF_UPDATE_TOKEN not set — "
+                "self_update is disabled. Set SELF_UPDATE_TOKEN in .env to enable."
+            )
+            if _su_jid:
+                _asyncio.create_task(route_fn(_su_jid,
+                    "❌ self_update 已停用。請在 .env 設定 SELF_UPDATE_TOKEN，再以 token 確認後執行。"
+                ))
+            return
+        if confirm_token != expected_token:
+            log.warning(
+                "self_update IPC: invalid or missing confirm_token from group %s — rejected",
+                group_folder,
+            )
+            return
+        # Token valid — proceed with update
         t = _asyncio.create_task(_run_self_update(_su_jid, route_fn))
         t.add_done_callback(_ipc_task_done_callback)
 
@@ -1148,17 +1169,15 @@ def _resolve_container_path(container_path: str, group_folder: str) -> str | Non
         log.warning("_resolve_container_path: empty group_folder for path %r", container_path)
         return None
 
-    import pathlib
-
     # Normalize to forward slashes for prefix matching (container paths are always POSIX)
     p = container_path.replace("\\", "/").strip()
 
-    groups_dir = pathlib.Path(config.GROUPS_DIR)
-    base_dir = pathlib.Path(config.BASE_DIR)
-    data_dir = pathlib.Path(config.DATA_DIR)
+    groups_dir = _pathlib.Path(config.GROUPS_DIR)
+    base_dir = _pathlib.Path(config.BASE_DIR)
+    data_dir = _pathlib.Path(config.DATA_DIR)
 
-    host: pathlib.Path | None = None
-    expected_root: pathlib.Path | None = None
+    host: _pathlib.Path | None = None
+    expected_root: _pathlib.Path | None = None
 
     if p.startswith("/workspace/group/"):
         rel = p[len("/workspace/group/"):]
