@@ -5,6 +5,7 @@ Reads ContainerInput JSON from stdin, runs agentic loop, outputs to stdout.
 Supports Gemini (default) or any OpenAI-compatible API (NVIDIA NIM, OpenAI, Groq, etc.)
 """
 
+import hashlib
 import json
 import os
 import sys
@@ -112,10 +113,17 @@ def _atomic_ipc_write(fname: Path, data: str) -> None:
     before the write completes.  This helper centralises the
     ``tmp = fname.with_suffix('.tmp'); tmp.write_text(...); tmp.rename(fname)``
     pattern that previously appeared 10+ times across tool implementations.
+
+    Fix #311: added try/except to clean up the .tmp file on write failure,
+    preventing stale partial files from accumulating on disk after crashes.
     """
     tmp = fname.with_suffix(".tmp")
-    tmp.write_text(data, encoding="utf-8")
-    tmp.rename(fname)  # POSIX rename() is atomic
+    try:
+        tmp.write_text(data, encoding="utf-8")
+        os.replace(tmp, fname)  # atomic on POSIX; works cross-device unlike rename()
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 class _KeyPool:
@@ -1070,6 +1078,18 @@ def tool_web_fetch(url: str) -> str:
         _re_url.IGNORECASE,
     )
 
+    # Explicit private/reserved IP ranges for auditable SSRF protection.
+    _PRIVATE_RANGES = [
+        _ipaddress.ip_network("10.0.0.0/8"),
+        _ipaddress.ip_network("172.16.0.0/12"),
+        _ipaddress.ip_network("192.168.0.0/16"),
+        _ipaddress.ip_network("127.0.0.0/8"),
+        _ipaddress.ip_network("169.254.0.0/16"),   # AWS/GCP/Azure metadata, link-local
+        _ipaddress.ip_network("::1/128"),
+        _ipaddress.ip_network("fc00::/7"),          # IPv6 unique-local
+        _ipaddress.ip_network("fe80::/10"),         # IPv6 link-local
+    ]
+
     def _is_ssrf_target(hostname: str) -> bool:
         """Return True if the hostname resolves to a private/reserved address."""
         if not hostname:
@@ -1086,11 +1106,12 @@ def tool_web_fetch(url: str) -> str:
                 ip_str = info[4][0]
                 try:
                     ip = _ipaddress.ip_address(ip_str)
+                    # Check against explicit blocklist
+                    if any(ip in net for net in _PRIVATE_RANGES):
+                        return True
+                    # Also check stdlib properties for completeness
                     if (ip.is_private or ip.is_loopback or ip.is_link_local or
                             ip.is_reserved or ip.is_multicast or ip.is_unspecified):
-                        return True
-                    # Explicitly block 169.254.x.x (AWS/GCP/Azure metadata)
-                    if ip_str.startswith("169.254."):
                         return True
                 except ValueError:
                     pass
@@ -2121,6 +2142,9 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
     _tool_fail_counter: dict = {}  # (tool_name, args_hash) -> consecutive_fail_count
     _MAX_CONSECUTIVE_TOOL_FAILS = 3
     _retry_warning: str = ""  # injected before next LLM call when tool retries detected
+    # Fix #309: hallucination loop detection — track recent (tool_name, input_hash) tuples
+    _recent_call_sigs_oai: list[tuple[str, str]] = []
+    _REPEAT_WINDOW_OAI = 3  # break if last N calls are all identical
     # Tools that represent actual work (not just reporting)
     _SUBSTANTIVE_TOOLS = frozenset([
         "Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch",

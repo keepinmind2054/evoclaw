@@ -112,6 +112,9 @@ class WhatsAppChannel:
             except Exception:
                 return web.Response(status=400, text="Bad Request")
         else:
+            log.debug(
+                "WhatsApp webhook: skipping HMAC verification (WHATSAPP_APP_SECRET not configured)"
+            )
             try:
                 body = await request.json()
             except Exception:
@@ -223,6 +226,12 @@ class WhatsAppChannel:
         if not self._verify_token:
             log.warning("WHATSAPP_VERIFY_TOKEN not set — WhatsApp disabled")
             return
+
+        if not self._app_secret:
+            log.warning(
+                "WHATSAPP_APP_SECRET not set — webhook signature verification is DISABLED. "
+                "All incoming webhooks will be accepted without authentication."
+            )
 
         self._session = aiohttp.ClientSession(
             headers={"Authorization": f"Bearer {self._token}"}
