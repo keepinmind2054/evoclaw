@@ -99,6 +99,8 @@ def init_database(db_path: Path) -> None:
         new_conn.execute("PRAGMA journal_mode=WAL")
         new_conn.execute("PRAGMA synchronous=NORMAL")
         new_conn.execute("PRAGMA busy_timeout=5000")  # 5s retry on SQLITE_BUSY
+        new_conn.execute("PRAGMA cache_size=-32000")   # 32MB page cache for faster reads
+        new_conn.execute("PRAGMA temp_store=MEMORY")   # Keep temp tables in memory
         # Enable foreign key enforcement (Issue #64).
         # SQLite disables FK constraints by default; without this pragma, any schema
         # additions using ON DELETE CASCADE / ON DELETE RESTRICT are silently ignored,
