@@ -14,7 +14,8 @@ except ImportError:
 from _constants import (
     _MAX_TOOL_RESULT_CHARS, _MAX_HISTORY_MESSAGES, WORKSPACE,
 )
-from _utils import _log, _llm_call_with_retry, _KeyPool, _ACTION_CLAIM_RE
+from _utils import _log, _llm_call_with_retry, _KeyPool
+from _constants import _ACTION_CLAIM_RE
 from _tools import _messages_sent_via_tool
 
 
