@@ -1837,6 +1837,19 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
                         _memory_written = True
                         _log("🧠 MEMORY-WRITE", f"Claude updated MEMORY.md via {block.name} on turn {n}")
 
+        # Fix #309: hallucination loop detection — if last N tool calls are identical, break
+        if _tool_use_blocks:
+            for _tb in _tool_use_blocks:
+                _call_sig = (_tb.name, hashlib.md5(json.dumps(_tb.input, sort_keys=True, default=str).encode()).hexdigest())
+                _recent_call_sigs.append(_call_sig)
+            # Keep only the last _REPEAT_WINDOW entries
+            if len(_recent_call_sigs) > _REPEAT_WINDOW:
+                _recent_call_sigs = _recent_call_sigs[-_REPEAT_WINDOW:]
+            if len(_recent_call_sigs) >= _REPEAT_WINDOW and len(set(_recent_call_sigs[-_REPEAT_WINDOW:])) == 1:
+                _log("🚨 HALLUCINATION-LOOP", f"Same tool call repeated {_REPEAT_WINDOW} times: {_recent_call_sigs[-1][0]} — breaking loop")
+                messages.append({"role": "user", "content": tool_results})
+                break
+
         # P15A-FIX-3: if stop_reason was tool_use but we found zero tool_use blocks,
         # the response is malformed.  Breaking here leaves the last assistant message
         # (already appended) without a paired tool_result, corrupting history for any
@@ -2524,6 +2537,17 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                 "content": result_str,
             })
 
+        # Fix #309: hallucination loop detection — if last N tool calls are identical, break
+        if msg.tool_calls:
+            for _tc in msg.tool_calls:
+                _call_sig_oai = (_tc.function.name, hashlib.md5((_tc.function.arguments or "").encode()).hexdigest())
+                _recent_call_sigs_oai.append(_call_sig_oai)
+            if len(_recent_call_sigs_oai) > _REPEAT_WINDOW_OAI:
+                _recent_call_sigs_oai = _recent_call_sigs_oai[-_REPEAT_WINDOW_OAI:]
+            if len(_recent_call_sigs_oai) >= _REPEAT_WINDOW_OAI and len(set(_recent_call_sigs_oai[-_REPEAT_WINDOW_OAI:])) == 1:
+                _log("🚨 HALLUCINATION-LOOP", f"Same tool call repeated {_REPEAT_WINDOW_OAI} times: {_recent_call_sigs_oai[-1][0]} — breaking loop")
+                break
+
         # BUG-P26B-3 (cont): now that all tool-role messages have been appended,
         # it is safe to inject deferred user messages (milestone enforcer warnings,
         # MEMORY.md reminders) without violating the OpenAI API constraint that
@@ -2612,6 +2636,9 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
     _tool_fail_counter: dict = {}  # (tool_name, args_hash) -> consecutive_fail_count
     _MAX_CONSECUTIVE_TOOL_FAILS = 3
     _retry_warning: str = ""  # injected before next LLM call when tool retries detected
+    # Fix #309: hallucination loop detection — track recent (tool_name, input_hash) tuples
+    _recent_call_sigs_gem: list[tuple[str, str]] = []
+    _REPEAT_WINDOW_GEM = 3  # break if last N calls are all identical
     _turns_since_notify = 0   # turns since last mcp__evoclaw__send_message call
     _only_notify_turns = 0    # consecutive turns with ONLY send_message (no real work)
     _no_tool_turns = 0        # consecutive turns without any tool call
@@ -2781,6 +2808,19 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
                     response={"result": result_str},
                 ))
             )
+
+        # Fix #309: hallucination loop detection — if last N tool calls are identical, break
+        if function_calls:
+            for _fc in function_calls:
+                _call_sig_gem = (_fc.name, hashlib.md5(json.dumps(_fc.args, sort_keys=True, default=str).encode()).hexdigest())
+                _recent_call_sigs_gem.append(_call_sig_gem)
+            if len(_recent_call_sigs_gem) > _REPEAT_WINDOW_GEM:
+                _recent_call_sigs_gem = _recent_call_sigs_gem[-_REPEAT_WINDOW_GEM:]
+            if len(_recent_call_sigs_gem) >= _REPEAT_WINDOW_GEM and len(set(_recent_call_sigs_gem[-_REPEAT_WINDOW_GEM:])) == 1:
+                _log("🚨 HALLUCINATION-LOOP", f"Same tool call repeated {_REPEAT_WINDOW_GEM} times: {_recent_call_sigs_gem[-1][0]} — breaking loop")
+                # Append fn_responses so history stays valid, then break
+                history.append(types.Content(role="user", parts=fn_responses))
+                break
 
         # ── Milestone Enforcer: anti-fabrication (same logic as OpenAI loop) ──
         _sent_message_this_turn = "mcp__evoclaw__send_message" in _tool_names_this_turn
