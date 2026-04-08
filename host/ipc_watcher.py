@@ -278,6 +278,19 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
         # 直接路由：把 container 的訊息透過 route_fn 發送到對應的聊天室
         jid = payload.get("chatJid", "")
         text = payload.get("text", "")
+        # Fix #442: validate that the target JID belongs to this group_folder.
+        # A container should only be able to send messages to its own group's JID
+        # to prevent cross-group message injection.
+        if jid and not is_main:
+            groups = db.get_all_registered_groups()
+            own_group = next((g for g in groups if g.get("folder") == group_folder), None)
+            if own_group and own_group.get("jid") != jid:
+                log.warning(
+                    "IPC cross-group message rejected: group_folder=%r tried to target jid=%r "
+                    "(expected %r) — dropping",
+                    group_folder, jid, own_group.get("jid"),
+                )
+                return
         if jid and text:
             await route_fn(jid, text, payload.get("sender"))
 

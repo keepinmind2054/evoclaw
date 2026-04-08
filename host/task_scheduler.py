@@ -287,16 +287,29 @@ async def recover_stale_running_tasks() -> int:
         for row in rows:
             task = dict(row)
             task_id = task["id"]
+            task_type = task.get("schedule_type", "once")
             log.warning(
                 "task_scheduler: task %s was stuck in 'running' state (process crash?) — recovering",
                 task_id,
             )
-            next_run_ts = compute_next_run(
-                task.get("schedule_type", "once"),
-                task.get("schedule_value", ""),
-                task.get("next_run"),
-            )
-            db.update_task(task_id, status="active", next_run=next_run_ts)
+            # Don't re-run once tasks after crash — they may have already partially executed
+            if task_type == "once":
+                db.update_task(
+                    task_id,
+                    status="failed",
+                    last_result="Interrupted by host restart — not retried to prevent duplicate execution",
+                )
+                log.warning(
+                    "task_scheduler: once-type task %s marked as failed (not retried) to prevent duplicate execution",
+                    task_id,
+                )
+            else:
+                next_run_ts = compute_next_run(
+                    task_type,
+                    task.get("schedule_value", ""),
+                    task.get("next_run"),
+                )
+                db.update_task(task_id, status="active", next_run=next_run_ts)
             recovered += 1
         if recovered:
             log.info("task_scheduler: recovered %d stale 'running' task(s)", recovered)

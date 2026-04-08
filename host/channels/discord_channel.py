@@ -78,21 +78,40 @@ class DiscordChannel:
         # did NOT re-register the on_ready / on_message event handlers (those are
         # closures registered on the *original* client in connect()).  The new
         # bare client would start but never set self._connected = True and never
-        # deliver any messages — silently broken.  Log the failure and mark the
-        # channel as disconnected so the calling code can attempt a full reconnect
-        # via connect() rather than leaving a broken unhandled client running.
+        # deliver any messages — silently broken.
+        # Fix #452: schedule a full reconnect via _reconnect_blocking() in a
+        # background thread so event handlers are re-registered properly.
         if (
             hasattr(self, "_discord_thread")
             and self._discord_thread is not None
             and not self._discord_thread.is_alive()
             and self._client is not None
         ):
-            log.error(
-                "Discord daemon thread died unexpectedly — marking disconnected. "
-                "A full reconnect via connect() is required to restore event handlers."
-            )
+            log.warning("Discord daemon thread died — scheduling reconnect")
             self._connected = False
+            # Schedule reconnect (non-blocking — runs in background thread)
+            t = threading.Thread(target=self._reconnect_blocking, daemon=True, name="discord-reconnect")
+            t.start()
         return self._connected and self._client is not None and not self._client.is_closed()
+
+    def _reconnect_blocking(self) -> None:
+        """Attempt to fully reconnect Discord by calling connect() on a new event loop.
+
+        Runs in a background daemon thread so is_connected() can return
+        immediately without blocking the caller.  Uses exponential back-off
+        (5 s, 15 s, 30 s, 60 s) before giving up.
+        """
+        import time
+        for delay in [5, 15, 30, 60]:
+            time.sleep(delay)
+            try:
+                asyncio.run(self.connect())
+                if self._connected:
+                    log.info("Discord reconnected successfully")
+                    return
+            except Exception as e:
+                log.warning("Discord reconnect attempt failed: %s", e)
+        log.error("Discord reconnect failed after all retries")
 
     async def connect(self) -> None:
         if not self._token:
