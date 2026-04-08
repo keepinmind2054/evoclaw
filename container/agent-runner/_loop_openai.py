@@ -52,9 +52,9 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
     pool/apply_key_fn: optional key pool for automatic rotation on rate-limit errors.
     max_iter: maximum number of agentic loop iterations (default 20; caller sets based on task complexity).
     """
-    from _registry import execute_tool  # lazy import to break circular dep
+    from _registry import execute_tool, OPENAI_TOOL_DECLARATIONS  # lazy import to break circular dep
     from _utils import _is_qwen_model
-    from _constants import WORKSPACE, OPENAI_TOOL_DECLARATIONS
+    from _constants import WORKSPACE
 
     import json as _json
     history = [{"role": "system", "content": system_instruction}]
