@@ -2940,6 +2940,9 @@ def main():
         emit({"status": "error", "result": None, "error": "Invalid JSON input"})
         return
 
+    # Reset session-scoped state so this entry point is safe for future process-pool reuse
+    _messages_sent_via_tool.clear()
+
     # 將解析後的輸入資料存到全域變數，讓工具函式（如 tool_list_tasks）可以存取
     global _input_data, _input_chat_jid
     _input_data = inp
