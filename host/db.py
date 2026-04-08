@@ -366,6 +366,9 @@ CREATE TABLE IF NOT EXISTS dev_events (
 );
 CREATE INDEX IF NOT EXISTS idx_dev_jid ON dev_events(jid);
 CREATE INDEX IF NOT EXISTS idx_dev_stage ON dev_events(stage);
+-- Migration: add missing index for event_type filter queries on dev_events (fixes #461)
+-- Without this index, queries filtering by event_type require a full table scan.
+CREATE INDEX IF NOT EXISTS idx_dev_events_event_type ON dev_events(event_type);
 
 -- ── 三層記憶系統資料表 ──────────────────────────────────────────────────────
 
@@ -490,7 +493,7 @@ def get_new_messages(jids: list[str], last_timestamp: int) -> list[dict]:
         db = get_db()
         placeholders = ",".join("?" * len(jids))
         rows = db.execute(f"""
-            SELECT * FROM messages
+            SELECT chat_jid, sender, sender_name, content, timestamp, is_bot_message FROM messages
             WHERE chat_jid IN ({placeholders}) AND timestamp > ? AND is_from_me = 0 AND is_bot_message = 0
             ORDER BY timestamp ASC
         """, (*jids, last_timestamp)).fetchall()
@@ -711,7 +714,7 @@ def get_due_tasks(now_ms: int) -> list[dict]:
     with _db_lock:
         db = get_db()
         rows = db.execute("""
-            SELECT * FROM scheduled_tasks
+            SELECT id, group_folder, chat_jid, prompt, schedule_type, schedule_value, next_run, context_mode FROM scheduled_tasks
             WHERE status='active' AND next_run IS NOT NULL AND next_run <= ?
         """, (now_ms,)).fetchall()
         return [dict(r) for r in rows]
