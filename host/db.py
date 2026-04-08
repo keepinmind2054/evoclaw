@@ -448,6 +448,43 @@ CREATE TABLE IF NOT EXISTS group_memory_sync (
     """)
     db.commit()
 
+    # ── Post-schema incremental migrations ──────────────────────────────────
+    # These migrations run on every startup but are idempotent (IF NOT EXISTS /
+    # ADD COLUMN checks).  They add columns or indexes that were missing from
+    # the original CREATE TABLE statements without touching existing data.
+
+    # Migration: add missing indexes for evolution log queries (fixes #461)
+    # idx_dev_events_event_type is also defined inline above; this cursor.execute
+    # form guarantees it is applied even on databases created before that line
+    # was added to the schema string.
+    cursor = db.cursor()
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_dev_events_event_type
+        ON dev_events(event_type)
+    """)
+
+    # evolution_runs.group_folder — new column added so that callers can look up
+    # runs by the filesystem folder name (e.g. "telegram_main") in addition to
+    # the raw JID.  Existing rows will have NULL for this column, which is
+    # acceptable: the index still works for new inserts.
+    #
+    # Issue #460 note: evolution_runs.timestamp is stored as TEXT
+    # (datetime('now') format) in existing rows.  Do NOT alter the column type
+    # as that would break all existing data.  New code should write INTEGER
+    # unix timestamps via strftime('%s','now') and the index below covers both
+    # orderings since SQLite sorts TEXT timestamps lexicographically which
+    # coincides with chronological order for ISO-8601 strings.
+    try:
+        cursor.execute("ALTER TABLE evolution_runs ADD COLUMN group_folder TEXT")
+    except Exception:
+        # Column already exists — safe to ignore.
+        pass
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_evolution_runs_group_ts
+        ON evolution_runs(group_folder, timestamp DESC)
+    """)
+    db.commit()
+
 # ── Messages ──────────────────────────────────────────────────────────────────
 
 def store_message(msg_id: str, chat_jid: str, sender: str, sender_name: str,
