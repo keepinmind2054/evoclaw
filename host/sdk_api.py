@@ -467,6 +467,13 @@ class SdkApi:
             )
             return
 
+        # Validate group is registered
+        from host import db as _db
+        registered = [g.get("folder") for g in _db.get_all_registered_groups()]
+        if group not in registered:
+            await self._send_error(websocket, "invalid_group", f"Group '{group}' is not registered")
+            return
+
         if self._task_submit_callback:
             try:
                 task_id = await self._task_submit_callback(group, message)

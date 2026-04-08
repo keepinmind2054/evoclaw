@@ -719,6 +719,8 @@ async def run_container_agent(
             proc.stdin.write(input_bytes)
             await proc.stdin.drain()
             proc.stdin.close()
+            # Zero secrets from memory — keys no longer needed after stdin write
+            input_data["secrets"] = {}
             # BUG-CR-02 FIX (MEDIUM): await wait_closed() so the underlying
             # StreamWriter transport is fully torn down before we proceed.
             # Without this Python 3.12+ emits ResourceWarning: unclosed
