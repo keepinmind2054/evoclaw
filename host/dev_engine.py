@@ -11,6 +11,7 @@ Each stage (1-6) runs via Docker container so the LLM powers the generation.
 Stage 7 (Deploy) runs in the host process and writes files to disk.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -435,24 +436,40 @@ Note: The host process will write the actual files. Your output is the deploymen
 # ── Stage execution ───────────────────────────────────────────────────────────
 
 async def _run_llm_stage(stage: DevStage, session: DevSession, group: dict) -> Optional[str]:
-    """Run a single stage via Docker container. Returns artifact text or None."""
+    """Run a single stage via Docker container. Returns artifact text or None.
+
+    DEV-01 FIX: The call to run_container_agent() is wrapped with a 10-minute
+    asyncio timeout.  Without this guard, a hung container would block the
+    pipeline indefinitely (and potentially the entire event loop).  On timeout
+    the stage fails gracefully so the pipeline can record the error and move on.
+    """
     from .container_runner import run_container_agent
 
     prompt = _build_prompt(stage, session)
     log.info(f"DevEngine [{session.session_id}] stage={stage.value} group={group['folder']}")
 
     try:
-        result = await run_container_agent(
-            group=group,
-            prompt=prompt,
-            is_scheduled_task=False,
-            conversation_history=[],          # isolated per-stage context
+        # DEV-01: 10-minute timeout guards against hung LLM containers.
+        result = await asyncio.wait_for(
+            run_container_agent(
+                group=group,
+                prompt=prompt,
+                is_scheduled_task=False,
+                conversation_history=[],          # isolated per-stage context
+            ),
+            timeout=600,
         )
         text = (result.get("result") or "").strip()
         if not text:
             log.warning(f"DevEngine stage {stage.value}: empty LLM output (status={result.get('status')})")
             return None
         return text
+    except asyncio.TimeoutError:
+        log.error(
+            f"DevEngine stage {stage.value}: LLM container timed out after 600s "
+            f"(session={session.session_id})"
+        )
+        return None
     except Exception as e:
         log.error(f"DevEngine stage {stage.value} exception: {e}")
         return None

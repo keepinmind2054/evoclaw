@@ -111,8 +111,18 @@ class SharedMemoryStore:
     END;
     """
 
-    def __init__(self, conn: sqlite3.Connection):
-        self._conn = conn
+    def __init__(self, conn: sqlite3.Connection, db_path: str = ""):
+        # MEM-01: each Store owns its own sqlite3.Connection so that
+        # SharedMemoryStore and VectorStore cannot corrupt each other's
+        # transaction state through a shared connection object.
+        # For in-memory databases (db_path == "") we reuse the caller's
+        # connection to preserve test-fixture behaviour (each :memory: URL
+        # is a distinct database; opening a second connection would give an
+        # empty, unrelated database).
+        if db_path:
+            self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        else:
+            self._conn = conn
         self._lock = threading.Lock()
         self._ensure_schema()
 
@@ -176,29 +186,39 @@ class SharedMemoryStore:
         """FTS5 search across accessible memories."""
         try:
             with self._lock:
-                rows = self._conn.execute(
-                    """SELECT sm.id, sm.content, sm.agent_id, sm.scope,
-                              sm.importance, sm.created_at,
-                              rank as fts_rank
-                       FROM shared_memories_fts fts
-                       JOIN shared_memories sm ON sm.rowid = fts.rowid
-                       WHERE shared_memories_fts MATCH ?
-                         AND (sm.scope = 'shared'
-                              OR (sm.scope = 'private' AND sm.agent_id = ?)
-                              OR (sm.scope = 'project' AND sm.project = ?))
-                       ORDER BY fts_rank, sm.importance DESC
-                       LIMIT ?""",
-                    (query, agent_id, project, k),
-                ).fetchall()
-                # Batch increment access counts
-                ids = [row[0] for row in rows]
-                if ids:
-                    placeholders = ",".join("?" * len(ids))
-                    self._conn.execute(
-                        f"UPDATE shared_memories SET access_count=access_count+1 WHERE id IN ({placeholders})",
-                        ids
-                    )
-                self._conn.commit()
+                # MEM-02: wrap the SELECT and the subsequent UPDATE in a single
+                # BEGIN IMMEDIATE transaction so that no other writer can slip
+                # in between the two statements.  Without this, a concurrent
+                # write could change access_count between our SELECT and UPDATE,
+                # producing a lost-update.
+                self._conn.execute("BEGIN IMMEDIATE")
+                try:
+                    rows = self._conn.execute(
+                        """SELECT sm.id, sm.content, sm.agent_id, sm.scope,
+                                  sm.importance, sm.created_at,
+                                  rank as fts_rank
+                           FROM shared_memories_fts fts
+                           JOIN shared_memories sm ON sm.rowid = fts.rowid
+                           WHERE shared_memories_fts MATCH ?
+                             AND (sm.scope = 'shared'
+                                  OR (sm.scope = 'private' AND sm.agent_id = ?)
+                                  OR (sm.scope = 'project' AND sm.project = ?))
+                           ORDER BY fts_rank, sm.importance DESC
+                           LIMIT ?""",
+                        (query, agent_id, project, k),
+                    ).fetchall()
+                    # Batch increment access counts
+                    ids = [row[0] for row in rows]
+                    if ids:
+                        placeholders = ",".join("?" * len(ids))
+                        self._conn.execute(
+                            f"UPDATE shared_memories SET access_count=access_count+1 WHERE id IN ({placeholders})",
+                            ids
+                        )
+                    self._conn.commit()
+                except sqlite3.Error:
+                    self._conn.rollback()
+                    raise
             return [
                 {
                     "id": r[0], "content": r[1], "agent_id": r[2],
@@ -254,8 +274,16 @@ class VectorStore:
 
     VECTOR_DIM = 768  # Gemini text-embedding-004 dimension
 
-    def __init__(self, conn: sqlite3.Connection):
-        self._conn = conn
+    def __init__(self, conn: sqlite3.Connection, db_path: str = ""):
+        # MEM-01: each Store owns its own sqlite3.Connection so that
+        # SharedMemoryStore and VectorStore cannot corrupt each other's
+        # transaction state through a shared connection object.
+        # For in-memory databases (db_path == "") we reuse the caller's
+        # connection to preserve test-fixture behaviour.
+        if db_path:
+            self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        else:
+            self._conn = conn
         self._lock = threading.Lock()
         self._available = self._try_load_extension()
         if self._available:
@@ -355,7 +383,13 @@ class VectorStore:
         if embedding is None:
             return
         with self._lock:
+            # MEM-04: wrap both INSERTs in one transaction so that vec_memories
+            # and vec_index are never partially written.  A failure after the
+            # first INSERT but before the second would leave an orphaned row in
+            # vec_memories with no corresponding vector in vec_index, causing
+            # silent search misses.
             try:
+                self._conn.execute("BEGIN IMMEDIATE")
                 self._conn.execute(
                     "INSERT OR REPLACE INTO vec_memories "
                     "(memory_id, agent_id, scope, project, content, created_at) "
@@ -461,8 +495,13 @@ class MemoryBus:
         self._conn = conn
         self._groups_dir = groups_dir
         self._hot_memory_locks: Dict[str, asyncio.Lock] = {}
-        self.shared = SharedMemoryStore(conn)
-        self.vector = VectorStore(conn)
+        # MEM-01: derive the on-disk path from the caller's connection so that
+        # each Store can open its own independent connection.  PRAGMA
+        # database_list returns (seq, name, file); file is "" for :memory:.
+        _db_row = conn.execute("PRAGMA database_list").fetchone()
+        _db_path: str = _db_row[2] if _db_row else ""
+        self.shared = SharedMemoryStore(conn, db_path=_db_path)
+        self.vector = VectorStore(conn, db_path=_db_path)
         logger.info(
             f"MemoryBus initialized | "
             f"shared=ok | "
@@ -638,6 +677,13 @@ class MemoryBus:
         safe_id = Path(agent_id).name  # strips any ../ components
         if not safe_id or safe_id != agent_id:
             raise ValueError(f"Invalid agent_id: {agent_id!r}")
+        # MEM-03: dict.setdefault() is atomic in CPython because the GIL
+        # serialises bytecode execution.  Two coroutines racing here will
+        # both create an asyncio.Lock(), but setdefault() guarantees that
+        # only the first one is stored; subsequent calls return that same
+        # Lock so all coroutines for this agent_id share one lock.
+        # This is safe in CPython but would need an explicit asyncio.Lock
+        # guard in a free-threaded or multi-interpreter scenario.
         lock = self._hot_memory_locks.setdefault(safe_id, asyncio.Lock())
         async with lock:
             memory_file = self._groups_dir / safe_id / "MEMORY.md"
