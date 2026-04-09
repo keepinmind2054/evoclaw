@@ -508,6 +508,13 @@ CREATE TABLE IF NOT EXISTS group_memory_sync (
         )
         db.commit()
 
+    # Migration 0003: EvoKnowledgeGraph — temporal triple store (#503)
+    try:
+        from host.migrations.migration_0003_kg_tables import upgrade as _m0003
+        _m0003(db)
+    except ImportError:
+        pass
+
 # ── Messages ──────────────────────────────────────────────────────────────────
 
 def store_message(msg_id: str, chat_jid: str, sender: str, sender_name: str,

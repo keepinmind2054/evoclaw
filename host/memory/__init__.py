@@ -39,6 +39,12 @@ try:
 except ImportError:
     pass  # palace_store.py may not be present in older installs
 
+# ── Phase 4 (UnifiedClaw): EvoKnowledgeGraph — temporal triple store ──────────
+try:
+    from .knowledge_graph import EvoKnowledgeGraph  # noqa: F401
+except ImportError:
+    pass  # knowledge_graph.py may not be present in older installs
+
 __all__ = [
     # ── Original ──────────────────────────────────────────────────────────────
     "get_hot_memory", "update_hot_memory", "MemoryStack",
@@ -51,4 +57,6 @@ __all__ = [
     "MemorySummarizer",
     # ── Phase 3 ───────────────────────────────────────────────────────────────
     "PalaceStore",
+    # ── Phase 4 ───────────────────────────────────────────────────────────────
+    "EvoKnowledgeGraph",
 ]
