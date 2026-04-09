@@ -391,7 +391,9 @@ CREATE TABLE IF NOT EXISTS group_warm_logs (
     jid TEXT NOT NULL,
     log_date TEXT NOT NULL,
     content TEXT NOT NULL,
-    created_at REAL NOT NULL DEFAULT 0
+    created_at REAL NOT NULL DEFAULT 0,
+    importance REAL NOT NULL DEFAULT 0.5,
+    memory_type TEXT NOT NULL DEFAULT 'general'
 );
 CREATE INDEX IF NOT EXISTS idx_warm_logs_jid_date ON group_warm_logs(jid, log_date);
 
@@ -489,6 +491,19 @@ CREATE TABLE IF NOT EXISTS group_memory_sync (
         CREATE INDEX IF NOT EXISTS idx_evolution_runs_group_ts
         ON evolution_runs(group_folder, timestamp DESC)
     """)
+
+    # group_warm_logs.importance + memory_type — GAP-10 columns for keyword
+    # auto-classification metadata.  warm.append_warm_log() passes these but
+    # the DB function and schema were never updated (#501).
+    try:
+        cursor.execute("ALTER TABLE group_warm_logs ADD COLUMN importance REAL NOT NULL DEFAULT 0.5")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE group_warm_logs ADD COLUMN memory_type TEXT NOT NULL DEFAULT 'general'")
+    except Exception:
+        pass
+
     db.commit()
 
     # Migration 0002: VectorIngestor — add vectorized flag to group_warm_logs (#496)
@@ -1286,14 +1301,15 @@ def set_hot_memory(jid: str, content: str) -> None:
 
 # ── Warm Memory ─────────────────────────────────────────────────────────────
 
-def append_warm_log(jid: str, log_date: str, content: str) -> None:
+def append_warm_log(jid: str, log_date: str, content: str, *,
+                    importance: float = 0.5, memory_type: str = "general") -> None:
     import time as _time
     with _db_lock:
         db = get_db()
         try:
             db.execute(
-                "INSERT INTO group_warm_logs(jid, log_date, content, created_at) VALUES(?, ?, ?, ?)",
-                (jid, log_date, content, _time.time()),
+                "INSERT INTO group_warm_logs(jid, log_date, content, created_at, importance, memory_type) VALUES(?, ?, ?, ?, ?, ?)",
+                (jid, log_date, content, _time.time(), importance, memory_type),
             )
             # Keep FTS in sync — must be in the same transaction so a crash
             # between the two INSERTs cannot leave the FTS index out of sync.
