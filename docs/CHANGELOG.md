@@ -1,3 +1,14 @@
+## [1.26.1] — 2026-04-09
+
+### Fixed
+- **`append_warm_log()` TypeError on every warm log write** — GAP-10 added `importance` and `memory_type` keyword args in `host/memory/warm.py` but `host/db.py` function signature and schema were never updated, causing all warm log writes to fail with `got an unexpected keyword argument 'importance'` (#501)
+
+### Technical Details
+- **Modified Files**: `host/db.py`
+- **Schema**: Added `importance REAL` and `memory_type TEXT` columns to `group_warm_logs`
+- **Migration**: Idempotent `ALTER TABLE ADD COLUMN` runs on startup for existing databases
+- **Breaking Changes**: None
+
 ## [1.26.0] — 2026-03-23
 
 ### 第 19 階段 — 測試、容器生命週期、DB 結構、日誌/監控（PRs #387–390）
