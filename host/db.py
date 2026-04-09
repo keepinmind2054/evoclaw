@@ -491,6 +491,23 @@ CREATE TABLE IF NOT EXISTS group_memory_sync (
     """)
     db.commit()
 
+    # Migration 0002: VectorIngestor — add vectorized flag to group_warm_logs (#496)
+    try:
+        from host.migrations.migration_0002_add_vectorized_to_warm_logs import upgrade as _m0002
+        _m0002(db)
+    except ImportError:
+        # Fall back to inline form if the migrations package is unavailable.
+        try:
+            db.execute(
+                "ALTER TABLE group_warm_logs ADD COLUMN vectorized INTEGER NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            pass
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_warm_logs_vec ON group_warm_logs(vectorized)"
+        )
+        db.commit()
+
 # ── Messages ──────────────────────────────────────────────────────────────────
 
 def store_message(msg_id: str, chat_jid: str, sender: str, sender_name: str,

@@ -96,6 +96,15 @@ except ImportError as _e2:
     _MemorySummarizer = None
     logging.getLogger("evoclaw").warning("[Phase2] Components not available: %s", _e2)
 
+# VectorIngestor: background warm-log vectorization (#496)
+try:
+    from .memory.vector_ingestor import VectorIngestor as _VectorIngestor
+    _VECTOR_INGESTOR_AVAILABLE = True
+except ImportError as _evi:
+    _VectorIngestor = None
+    _VECTOR_INGESTOR_AVAILABLE = False
+    logging.getLogger("evoclaw").warning("[VectorIngestor] Not available: %s", _evi)
+
 # Phase 3: Bot Registry + RBAC
 try:
     from .identity.bot_registry import BotRegistry as _BotRegistry, bootstrap_known_bots as _bootstrap_bots
@@ -1292,6 +1301,15 @@ async def main() -> None:
         except Exception as _e3:
             log.error("[Phase2] Initialization failed — memory summarizer unavailable: %s", _e3)
 
+    # VectorIngestor: background warm-log vectorization (#496)
+    _vector_ingestor = None
+    if _VECTOR_INGESTOR_AVAILABLE and _memory_bus is not None:
+        try:
+            _vector_ingestor = _VectorIngestor(_memory_bus.vector, db)
+            log.info("[VectorIngestor] Initialized — warm-log vectorization active")
+        except Exception as _evi2:
+            log.error("[VectorIngestor] Initialization failed: %s", _evi2)
+
     # Phase 3: Bot Registry + RBAC
     _bot_registry = None
     _rbac_store = None
@@ -1774,6 +1792,9 @@ async def main() -> None:
         # Phase 1 (UnifiedClaw): WebSocket bridge — coexists with file IPC
         if _ws_bridge is not None:
             _gather_tasks.append(_ws_bridge.start())
+        # VectorIngestor: near-real-time warm-log vectorization (#496)
+        if _vector_ingestor is not None:
+            _gather_tasks.append(_vector_ingestor.run_forever())
         await asyncio.gather(*_gather_tasks)
     finally:
         # Fix #135: disconnect channels FIRST so Telegram's update_fetcher_task can stop cleanly
