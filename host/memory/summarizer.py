@@ -18,6 +18,7 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -101,6 +102,8 @@ class MemorySummarizer:
         messages: list,
         existing_memory: str = "",
         max_messages: int = 20,
+        kg=None,
+        jid: str = "",
     ) -> str:
         """
         Summarize a conversation session into bullet points for MEMORY.md.
@@ -111,6 +114,17 @@ class MemorySummarizer:
         response does not look like a bullet-point list (e.g. it is an error
         message, empty, or pure whitespace) we fall back to the stub summary
         rather than storing garbage into MEMORY.md.
+
+        Args:
+            agent_id:       ID of the agent whose session is being summarized.
+            messages:       List of message dicts with "role" and "content" keys.
+            existing_memory: Current MEMORY.md content (to avoid repetition).
+            max_messages:   Maximum number of recent messages to include.
+            kg:             Optional EvoKnowledgeGraph instance. When provided,
+                            entities and facts are extracted and populated into
+                            the graph after summarization.
+            jid:            Group JID used as the KG namespace key. Required
+                            when kg is provided.
         """
         if not messages:
             return ""
@@ -141,7 +155,51 @@ class MemorySummarizer:
         date_str = time.strftime("%Y-%m-%d")
         patch = "\n## Session " + date_str + " [" + agent_id + "]\n" + result.strip() + "\n"
         logger.info("MemorySummarizer: session summarized for %s (%d chars)", agent_id, len(patch))
+
+        # Populate KG with entities and facts extracted from this summary.
+        if kg is not None and (jid or agent_id):
+            await self.extract_entities_from_summary(result.strip(), jid or agent_id, kg)
+
         return patch
+
+    async def extract_entities_from_summary(self, summary_text: str, jid: str, kg) -> None:
+        """
+        Call LLM to extract entities and facts from a session summary.
+        Populates the EvoKnowledgeGraph. Errors are logged, never raised.
+        """
+        if not summary_text.strip():
+            return
+
+        prompt = f"""Extract entities and facts from this text as JSON only (no markdown):
+{{
+  "entities": [{{"name": "string", "type": "person|place|project|tool|concept"}}],
+  "facts": [{{"subject": "string", "predicate": "string", "object": "string", "confidence": 0.0-1.0}}]
+}}
+
+Text:
+{summary_text[:2000]}"""
+
+        try:
+            response = await self._call_llm(prompt, max_tokens=400)
+            if not response:
+                logger.warning("KG: entity extraction got no LLM response for %s", jid)
+                return
+            data = json.loads(response)
+
+            for entity in data.get("entities", []):
+                kg.add_entity(entity["name"], entity.get("type", "general"), jid)
+
+            for fact in data.get("facts", []):
+                kg.add_triple(
+                    fact["subject"], fact["predicate"], fact["object"], jid,
+                    confidence=float(fact.get("confidence", 0.8))
+                )
+            logger.info("KG: extracted %d entities, %d facts from summary for %s",
+                        len(data.get("entities", [])), len(data.get("facts", [])), jid)
+        except json.JSONDecodeError as e:
+            logger.warning("KG: entity extraction JSON parse failed: %s", e)
+        except Exception as e:
+            logger.warning("KG: entity extraction failed: %s", e)
 
     async def compress_memory(
         self,

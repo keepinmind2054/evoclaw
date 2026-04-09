@@ -412,9 +412,12 @@ class DreamScheduler:
     - is_dreaming(jid): returns True if a dream pass is in progress for this group
     """
 
-    def __init__(self, idle_minutes: int = 15, enabled: bool = True):
+    def __init__(self, idle_minutes: int = 15, enabled: bool = True, bus=None):
         self._idle_minutes = idle_minutes
         self._enabled = enabled
+        # Optional MemoryBus reference — used to access self._bus.kg for KG
+        # population during dream passes (issues #504, #505).
+        self._bus = bus
         # jid -> last message timestamp (Unix seconds)
         self._last_active: dict[str, float] = {}
         # jid -> True while a dream pass is running (prevents concurrent dreams)
@@ -507,6 +510,14 @@ class DreamScheduler:
                     # Fix 4: write typed section blocks to SharedMemoryStore
                     await self._write_typed_blocks(jid, consolidated)
 
+                    # Check KG stats and surface contradiction summary (#505)
+                    try:
+                        kg_stats = self._bus.kg.stats(jid) if hasattr(self._bus, 'kg') else None
+                        if kg_stats:
+                            logger.info("KG stats for %s: %s", jid, kg_stats)
+                    except Exception as e:
+                        logger.warning("KG stats error: %s", e)
+
                     # GAP-04: also archive the consolidated summary to cold memory
                     # so the long-term history of dream passes is preserved for
                     # future FTS recall even after hot memory is overwritten.
@@ -597,6 +608,25 @@ class DreamScheduler:
                 "dream_task: wrote %d typed memory blocks to SharedMemoryStore for jid=%s",
                 written, jid,
             )
+
+            # Extract entities from Key Facts and Decisions for KG population (#505)
+            for section_name, content in sections.items():
+                if section_name in ("key facts", "decisions") and hasattr(self._bus, 'kg'):
+                    # Simple inline extraction: parse "X is/uses/prefers Y" patterns
+                    patterns = [
+                        (r'(\w[\w\s]+)\s+(?:is|are)\s+(.+)', 'is'),
+                        (r'(\w[\w\s]+)\s+(?:uses?|using)\s+(.+)', 'uses'),
+                        (r'(\w[\w\s]+)\s+(?:prefers?|preferring)\s+(.+)', 'prefers'),
+                    ]
+                    for pattern, predicate in patterns:
+                        for match in re.finditer(pattern, content, re.IGNORECASE):
+                            subject = match.group(1).strip()[:50]
+                            obj = match.group(2).strip()[:100]
+                            if len(subject) > 2 and len(obj) > 2:
+                                try:
+                                    self._bus.kg.add_triple(subject, predicate, obj, jid, confidence=0.7)
+                                except Exception:
+                                    pass
         except Exception as exc:
             logger.warning(
                 "dream_task: failed to write typed blocks to SharedMemoryStore for jid=%s: %s",
