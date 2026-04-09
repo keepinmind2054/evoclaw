@@ -1,4 +1,5 @@
 """OpenAI-compatible agentic loop for the EvoClaw agent runner."""
+import gc
 import json, os, time, random, uuid, traceback
 from pathlib import Path
 
@@ -99,6 +100,9 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
     ])
 
     for n in range(MAX_ITER):
+        # MEMORY-OOM-FIX: force GC every 5 turns to reclaim accumulated objects.
+        if n > 0 and n % 5 == 0:
+            gc.collect()
         # Escalate to "required" when model has been avoiding tools (Fix #169).
         # tool_choice="required" is enforced at the API level — the model CANNOT
         # return a text-only response, it MUST make a tool call.

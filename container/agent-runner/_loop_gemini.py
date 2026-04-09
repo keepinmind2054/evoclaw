@@ -1,4 +1,5 @@
 """Google Gemini agentic loop for the EvoClaw agent runner."""
+import gc
 import json, os, time, random, uuid, traceback
 from pathlib import Path
 
@@ -104,6 +105,11 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
     _gemini_model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 
     for n in range(MAX_ITER):
+        # MEMORY-OOM-FIX: force GC every 5 turns to reclaim response/history objects
+        # before Python's deferred collector would normally run. This reduces peak
+        # memory usage during long multi-turn sessions (exit 137 mitigation).
+        if n > 0 and n % 5 == 0:
+            gc.collect()
         _log("🧠 LLM →", f"turn={n} provider=gemini")
         response = _llm_call_with_retry(lambda: client_holder[0].models.generate_content(
             model=_gemini_model_name,

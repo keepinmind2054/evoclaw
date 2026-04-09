@@ -1,4 +1,5 @@
 """Anthropic Claude agentic loop for the EvoClaw agent runner."""
+import gc
 import json, os, time, random, uuid, traceback
 from pathlib import Path
 
@@ -96,6 +97,9 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
     )
 
     for n in range(MAX_ITER):
+        # MEMORY-OOM-FIX: force GC every 5 turns to reclaim accumulated objects.
+        if n > 0 and n % 5 == 0:
+            gc.collect()
         _log("🧠 LLM →", f"turn={n} provider=claude")
         _claude_msgs = messages  # capture current snapshot for lambda
         response = _llm_call_with_retry(lambda: client_holder[0].messages.create(

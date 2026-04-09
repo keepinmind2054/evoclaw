@@ -24,31 +24,16 @@ import time
 from pathlib import Path
 
 # ── Optional backend SDKs ─────────────────────────────────────────────────────
-# Imported here so main() can check availability flags and create API clients.
-
-try:
-    from google import genai
-    from google.genai import types  # noqa: F401
-    _GOOGLE_AVAILABLE = True
-except ImportError:
-    genai = None          # type: ignore
-    _GOOGLE_AVAILABLE = False
-
-try:
-    from openai import OpenAI as OpenAIClient
-    import httpx
-    _OPENAI_AVAILABLE = True
-except ImportError:
-    OpenAIClient = None   # type: ignore
-    httpx = None          # type: ignore
-    _OPENAI_AVAILABLE = False
-
-try:
-    import anthropic
-    _ANTHROPIC_AVAILABLE = True
-except ImportError:
-    anthropic = None      # type: ignore
-    _ANTHROPIC_AVAILABLE = False
+# MEMORY-OOM-FIX: Do NOT import all three LLM libraries at module startup.
+# Each library (google-genai, openai, anthropic) consumes 50-200 MB of RAM.
+# Loading all three simultaneously was the primary cause of container OOM (exit 137).
+# Libraries are now lazy-imported inside main() after the backend is selected —
+# only the library that will actually be used is loaded into memory.
+# Availability placeholders kept so IDE/type-checkers don't error on the flags.
+genai = None          # type: ignore  — lazy-imported in main() if Gemini backend
+OpenAIClient = None   # type: ignore  — lazy-imported in main() if OpenAI backend
+httpx = None          # type: ignore  — lazy-imported in main() if OpenAI backend
+anthropic = None      # type: ignore  — lazy-imported in main() if Claude backend
 
 # ── Phase 1 (UnifiedClaw): Fitness feedback to Gateway ───────────────────────
 try:
@@ -64,9 +49,11 @@ from _utils import _log, _KeyPool, _is_qwen_model
 from _tools import _messages_sent_via_tool
 import _tools as _tools_module          # for setting _input_data at runtime
 from _registry import _load_dynamic_tools
-from _loop_gemini import run_agent
-from _loop_openai import run_agent_openai
-from _loop_claude import run_agent_claude
+# MEMORY-OOM-FIX: Loop modules are lazy-imported in main() after backend selection.
+# Importing all three here would cause all three LLM SDK dependencies to load.
+run_agent = None          # type: ignore  — assigned in main()
+run_agent_openai = None   # type: ignore  — assigned in main()
+run_agent_claude = None   # type: ignore  — assigned in main()
 
 # Phase 1 reporter instance — initialised inside main() after agentId is known
 _phase1_reporter = None
@@ -245,21 +232,36 @@ def main():
 
     backend = "claude" if use_claude else ("openai-compat" if use_openai_compat else "gemini")
 
-    if use_openai_compat and not _OPENAI_AVAILABLE:
-        emit({"status": "error", "result": None, "error": "openai package not installed in container. Rebuild with updated requirements.txt."})
-        return
-
-    if use_claude and not _ANTHROPIC_AVAILABLE:
-        emit({"status": "error", "result": None, "error": "anthropic package not installed. Rebuild container."})
-        return
-
-    if not use_openai_compat and not use_claude and not google_api_key:
-        emit({"status": "error", "result": None, "error": "No API key found. Set GOOGLE_API_KEY, NIM_API_KEY, CLAUDE_API_KEY, or OPENAI_API_KEY in .env"})
-        return
-
-    if not use_openai_compat and not use_claude and not _GOOGLE_AVAILABLE:
-        emit({"status": "error", "result": None, "error": "google-genai package not installed in container. Run: docker build -t evoclaw-agent:latest container/"})
-        return
+    # ── Lazy-import only the backend library that will actually be used ──────────
+    # MEMORY-OOM-FIX: Each LLM SDK uses 50-200 MB.  Importing all three at module
+    # level was the root cause of container OOM (exit 137).  We now import only the
+    # one library that matches the selected backend, saving 100-300 MB of RAM.
+    if use_openai_compat:
+        try:
+            from openai import OpenAI as OpenAIClient  # type: ignore  # noqa: F811
+            import httpx                                # type: ignore  # noqa: F811
+            from _loop_openai import run_agent_openai  # type: ignore  # noqa: F811
+        except ImportError as _e:
+            emit({"status": "error", "result": None, "error": f"openai package not installed in container ({_e}). Rebuild with updated requirements.txt."})
+            return
+    elif use_claude:
+        try:
+            import anthropic                           # type: ignore  # noqa: F811
+            from _loop_claude import run_agent_claude  # type: ignore  # noqa: F811
+        except ImportError as _e:
+            emit({"status": "error", "result": None, "error": f"anthropic package not installed ({_e}). Rebuild container."})
+            return
+    else:
+        if not google_api_key:
+            emit({"status": "error", "result": None, "error": "No API key found. Set GOOGLE_API_KEY, NIM_API_KEY, CLAUDE_API_KEY, or OPENAI_API_KEY in .env"})
+            return
+        try:
+            from google import genai                   # type: ignore  # noqa: F811
+            from google.genai import types             # noqa: F401, F811
+            from _loop_gemini import run_agent         # type: ignore  # noqa: F811
+        except ImportError as _e:
+            emit({"status": "error", "result": None, "error": f"google-genai package not installed ({_e}). Run: docker build -t evoclaw-agent:latest container/"})
+            return
 
     if use_openai_compat:
         _active_pool = nim_pool if nim_api_key else openai_pool
@@ -562,6 +564,14 @@ def main():
             lines.append(evolution_hints)
 
     system_instruction = "\n".join(lines)
+
+    # MEMORY-OOM-FIX: hard cap on system prompt size to prevent large CLAUDE.md /
+    # soul.md files from blowing the LLM context window and causing memory spikes.
+    # 200 KB is ~50K tokens — well above any legitimate system prompt need.
+    _SYS_MAX_CHARS = 200_000
+    if len(system_instruction) > _SYS_MAX_CHARS:
+        _log("⚠️ SYSTEM-CAP", f"System prompt is very large ({len(system_instruction)} chars > {_SYS_MAX_CHARS}) — truncating to avoid OOM. Check soul.md and CLAUDE.md sizes.")
+        system_instruction = system_instruction[:_SYS_MAX_CHARS]
 
     # Log system prompt for container log visibility
     _log("📋 SYSTEM", f"{len(system_instruction)} chars | {len(lines)} lines")
