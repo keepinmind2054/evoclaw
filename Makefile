@@ -44,5 +44,5 @@ clean: ## Remove generated files (data, ipc, __pycache__)
 		echo "Cancelled"; \
 	fi
 
-db: ## Open SQLite shell on the database
-	sqlite3 data/evoclaw.db
+db: ## Open SQLite shell on the EvoClaw subsystem database (evoclaw.db)
+	@python -c "from host import config; import subprocess; subprocess.run(['sqlite3', str(config.STORE_DIR / 'evoclaw.db')])"

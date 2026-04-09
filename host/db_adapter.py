@@ -12,6 +12,8 @@ import os
 import logging
 from typing import Any
 
+from host import config
+
 log = logging.getLogger(__name__)
 
 _DATABASE_URL = os.environ.get("DATABASE_URL", "")
@@ -24,7 +26,7 @@ class _SqliteAdapter:
 
     def connect(self):
         import sqlite3
-        db_path = os.environ.get("DB_PATH", "data/messages.db")
+        db_path = os.environ.get("DB_PATH") or str(config.STORE_DIR / "messages.db")
         conn = sqlite3.connect(db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         # Mirror the pragmas used by init_database() in db.py so that any
