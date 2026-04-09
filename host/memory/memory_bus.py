@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Dict, Literal, Optional
 
 from .palace_store import PalaceStore
+from .knowledge_graph import EvoKnowledgeGraph
 
 logger = logging.getLogger(__name__)
 
@@ -659,6 +660,7 @@ class MemoryBus:
         self.vector = VectorStore(conn, db_path=_db_path)
         self.cold = ColdMemoryStore()
         self.palace = PalaceStore(self.shared._conn)
+        self.kg = EvoKnowledgeGraph(self.shared._conn)
         logger.info(
             f"MemoryBus initialized | "
             f"shared=ok | "
@@ -999,4 +1001,13 @@ class MemoryBus:
             "vector_available": self.vector.available,
             "groups_dir": str(self._groups_dir),
         }
+
+    def kg_add_fact(self, subject: str, predicate: str, object_: str, jid: str,
+                    confidence: float = 1.0) -> str:
+        """Add a fact triple to the knowledge graph. Returns triple_id."""
+        return self.kg.add_triple(subject, predicate, object_, jid, confidence=confidence)
+
+    def kg_query(self, entity_name: str, jid: str) -> list[dict]:
+        """Return all active triples for an entity in the knowledge graph."""
+        return self.kg.query_entity(entity_name, jid)
 
