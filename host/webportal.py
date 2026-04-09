@@ -258,7 +258,7 @@ class _WebPortalHandler(http.server.BaseHTTPRequestHandler):
             # so this blocks CSRF attacks even when Basic Auth is cached by the browser.
             expected_csrf = session.get("csrf_token", "")
             provided_csrf = self.headers.get("X-CSRF-Token", "")
-            if expected_csrf and not hmac.compare_digest(provided_csrf, expected_csrf):
+            if not expected_csrf or not hmac.compare_digest(provided_csrf, expected_csrf):
                 self._send_json({"error": "CSRF token mismatch"}, 403)
                 return
             jid = session.get("jid", "")
