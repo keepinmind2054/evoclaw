@@ -278,11 +278,11 @@ class VectorStore:
     Extension loads automatically if installed.
     
     Embedding generation:
-    - Primary:  Gemini text-embedding-004 API (requires GOOGLE_API_KEY)
+    - Primary:  Gemini gemini-embedding-001 API (requires GOOGLE_API_KEY)
     - Fallback: Simple TF-IDF approximation (no external deps)
     """
 
-    VECTOR_DIM = 768  # Gemini text-embedding-004 dimension
+    VECTOR_DIM = 3072  # Gemini gemini-embedding-001 dimension
 
     def __init__(self, conn: sqlite3.Connection, db_path: str = ""):
         # MEM-01: each Store owns its own sqlite3.Connection so that
@@ -362,9 +362,9 @@ class VectorStore:
             import urllib.request
             import json as _json
 
-            url = "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent"
+            url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
             payload = _json.dumps({
-                "model": "models/text-embedding-004",
+                "model": "models/gemini-embedding-001",
                 "content": {"parts": [{"text": text[:2000]}]}
             }).encode()
 

@@ -1,7 +1,8 @@
 ## [1.26.1] — 2026-04-09
 
 ### Fixed
-- **`append_warm_log()` TypeError on every warm log write** — GAP-10 added `importance` and `memory_type` keyword args in `host/memory/warm.py` but `host/db.py` function signature and schema were never updated, causing all warm log writes to fail with `got an unexpected keyword argument 'importance'` (#501)
+- **`append_warm_log()` TypeError on every warm log write** — GAP-10 added `importance` and `memory_type` keyword args in `host/memory/warm.py` but `host/db.py` function signature and schema were never updated, causing all warm log writes to fail with `got an unexpected keyword argument 'importance'` (#509)
+- **Embedding API 404 on every vector store write** — `text-embedding-004` model no longer exists in Gemini API; migrated to `gemini-embedding-001` (dim 768→3072) (#511)
 
 ### Technical Details
 - **Modified Files**: `host/db.py`
