@@ -33,6 +33,13 @@ try:
 except ImportError:
     pass  # summarizer.py may not be present in older installs
 
+# ── VectorIngestor: background warm-log vectorization (#496) ─────────────────
+try:
+    from .vector_ingestor import VectorIngestor  # noqa: F401
+except ImportError:
+    pass  # vector_ingestor.py may not be present in older installs
+
+
 __all__ = [
     # ── Original ──────────────────────────────────────────────────────────────
     "get_hot_memory", "update_hot_memory", "MemoryStack",
@@ -43,4 +50,6 @@ __all__ = [
     "MemoryBus", "Memory", "MemoryScope",
     # ── Phase 2 ───────────────────────────────────────────────────────────────
     "MemorySummarizer",
+    # ── VectorIngestor ────────────────────────────────────────────────────────
+    "VectorIngestor",
 ]
