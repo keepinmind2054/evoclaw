@@ -345,7 +345,8 @@ async def start_scheduler_loop(
             # BUG-TS-1 FIX: Only dispatch tasks with status='active' (not
             # 'running') so a task already being executed is not dispatched
             # a second time if the scheduler polls before it finishes.
-            due = db.get_due_tasks(now_ms)
+            # Issue #443: use async wrapper to avoid blocking the event loop
+            due = await db.async_get_due_tasks(now_ms)
             for task in due:
                 if group_queue is not None:
                     # Enqueue through GroupQueue for per-group serialization.
