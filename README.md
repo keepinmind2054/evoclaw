@@ -33,7 +33,7 @@
 
 ## 專案簡介
 
-EvoClaw 是一個輕量、以 Python 打造的多模型 AI 代理框架，專為個人使用設計，強調透明度與安全性。整個程式碼庫約 42 個 Python 檔案，你可以在一個下午內完整閱讀。代理在隔離的 Docker 容器中執行，即使遭到提示詞注入攻擊，主機上的機密（Telegram token、GitHub token）也不會外洩。沒有繁雜的設定檔 — 想改變行為，直接 fork 並修改程式碼。
+EvoClaw 是一個輕量、以 Python 打造的多模型 AI 代理框架，專為個人使用設計，強調透明度與安全性。整個程式碼庫約 160+ 個 Python 檔案，核心邏輯（`host/` + `container/`）可在一個下午內完整閱讀。代理在隔離的 Docker 容器中執行，即使遭到提示詞注入攻擊，主機上的機密（Telegram token、GitHub token）也不會外洩。沒有繁雜的設定檔 — 想改變行為，直接 fork 並修改程式碼。
 
 ---
 
@@ -45,7 +45,7 @@ EvoClaw 是一個輕量、以 Python 打造的多模型 AI 代理框架，專為
 - **進化引擎**：受生物學啟發的自我適應系統，自動調整各群組回應風格，無需手動調整
 - **技能系統（Skills 2.0）**：透過 `skills_engine/` 動態載入新能力，支援熱抽換容器工具，無需重建 Docker image
 - **DevEngine**：7 階段 LLM 驅動開發流水線（Analyze → Design → Implement → Test → Review → Document → Deploy）
-- **多層記憶**：5 層記憶架構（Hot/PalaceStore/Vector/Shared/Cold），跨代理持久保存上下文，支援語義搜尋與跨代理知識共享
+- **多層記憶**：5 層記憶架構（Hot → PalaceStore → Vector → Shared → Cold）+ 知識圖譜（EvoKnowledgeGraph），跨代理持久保存上下文，支援語義搜尋、時序事實推斷與矛盾偵測
 - **代理集群（Agent Swarms）**：組建專業代理團隊，協作處理複雜任務
 - **排程任務**：支援 `cron`、`interval`、`once` 三種執行模式
 - **Web 介面**：監控儀表板（port 8765）及瀏覽器聊天介面（port 8766）
@@ -99,15 +99,17 @@ evoclaw/
 │   ├── dashboard.py              ← Web 儀表板（port 8765）
 │   ├── log_buffer.py             ← 記憶體日誌環形緩衝（SSE 來源）
 │   ├── webportal.py              ← 瀏覽器聊天介面（port 8766）
-│   ├── memory/                   ← 記憶子系統（Phase 1+2）
-│   │   ├── hot.py                ←   L0 Hot memory (MEMORY.md injection)
-│   │   ├── warm.py               ←   Warm logs (30-day daily files)
-│   │   ├── palace_store.py       ←   L1 PalaceStore (namespace/topic hierarchy)
-│   │   ├── memory_bus.py         ←   MemoryBus unified interface + VectorStore + SharedMemoryStore
-│   │   ├── vector_ingestor.py    ←   Background vectorization (every 30s)
-│   │   ├── summarizer.py         ←   MemorySummarizer (Phase 2)
-│   │   ├── dream_task.py         ←   Dream cycle consolidation
-│   │   ├── search.py             ←   L4 Cold memory (FTS5 + time decay)
+│   ├── memory/                   ← 記憶子系統（Phase 1+2+3）
+│   │   ├── hot.py                ←   L0 Hot memory + MemoryStack.wake_up() (token-budget-aware)
+│   │   ├── warm.py               ←   Warm logs (verbatim 500-char, auto-classified, 30-day)
+│   │   ├── palace_store.py       ←   L1 PalaceStore (namespace/topic hierarchy, auto-classify)
+│   │   ├── memory_bus.py         ←   MemoryBus unified interface + VectorStore + SharedMemoryStore + ColdMemoryStore
+│   │   ├── vector_ingestor.py    ←   VectorIngestor background task (vectorize every 30s)
+│   │   ├── knowledge_graph.py    ←   EvoKnowledgeGraph (temporal triples + contradiction detection)
+│   │   ├── summarizer.py         ←   MemorySummarizer + entity extraction → EvoKnowledgeGraph
+│   │   ├── dream_task.py         ←   Dream cycle (reads warm logs verbatim, typed output blocks)
+│   │   ├── search.py             ←   L4 Cold memory search (FTS5 + time-decay)
+│   │   ├── memory_compress.py    ←   Hot memory compression (LLM-based)
 │   │   └── compound.py           ←   Cross-layer compound queries
 │   ├── evolution/                ← 進化引擎
 │   │   ├── fitness.py            ←   適應度追蹤（自然選擇）
@@ -343,14 +345,24 @@ memory_recall   — query: "why did we switch to PostgreSQL?"
 memory_remember — content: "User prefers dark mode in all UIs", importance: 0.9
 ```
 
-#### Knowledge Graph (Phase 3)
+#### Knowledge Graph (Phase 3 — 已實作)
 
-`EvoKnowledgeGraph` stores temporal entity-relationship triples:
+`EvoKnowledgeGraph`（`host/memory/knowledge_graph.py`）存儲時序實體關係三元組：
 
-- **Entities** + **Triples** with `valid_from`/`valid_to` timestamps
-- Auto-invalidation of superseded facts
-- Contradiction detection across predicates
-- Entity extraction from session summaries via LLM
+| 元件 | 說明 |
+|------|------|
+| `kg_entities` | 實體表（id, name, entity_type, jid, created_at） |
+| `kg_triples` | 三元組（subject_id, predicate, object, valid_from, valid_to, confidence） |
+| `add_triple()` | 新增事實，自動失效衝突的舊三元組（hard predicates：`is`, `works_at` 等） |
+| `check_contradiction()` | 查詢同 subject+predicate 但不同 object 的活躍三元組 |
+| `query_entity()` | 按時間點查詢實體所有活躍事實（支援 `as_of` 時間旅行） |
+| `invalidate()` | 標記三元組失效（設定 `valid_to`） |
+
+**寫入觸發點**：
+- `MemorySummarizer.extract_entities_from_summary()` — LLM JSON 提取 + `kg.add_entity()` / `kg.add_triple()`
+- `DreamScheduler._write_typed_blocks()` — 從 `[Key Facts]` / `[Decisions]` 以 regex 快速提取 `is/uses/prefers` 模式（confidence=0.7）
+
+**存取方式**：`MemoryBus.kg`（`EvoKnowledgeGraph` 實例）、`MemoryBus.kg_add_fact()`、`MemoryBus.kg_query()`
 
 ### 記憶目錄結構
 
