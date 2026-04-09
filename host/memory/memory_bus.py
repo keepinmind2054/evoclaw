@@ -357,6 +357,9 @@ class VectorStore:
             import os
             api_key = os.environ.get("GOOGLE_API_KEY", "").split(",")[0].strip()
             if not api_key:
+                from ..env import read_env_file
+                api_key = read_env_file(["GOOGLE_API_KEY"]).get("GOOGLE_API_KEY", "").split(",")[0].strip()
+            if not api_key:
                 return None
 
             import urllib.request

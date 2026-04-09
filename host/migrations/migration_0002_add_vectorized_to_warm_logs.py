@@ -7,6 +7,9 @@ processed by the VectorIngestor background task (#496).
 
 
 def upgrade(conn):
-    conn.execute("ALTER TABLE group_warm_logs ADD COLUMN vectorized INTEGER NOT NULL DEFAULT 0")
+    try:
+        conn.execute("ALTER TABLE group_warm_logs ADD COLUMN vectorized INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass  # Column already exists
     conn.execute("CREATE INDEX IF NOT EXISTS idx_warm_logs_vec ON group_warm_logs(vectorized)")
     conn.commit()
