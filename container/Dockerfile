@@ -126,11 +126,7 @@ COPY agent-runner/requirements.txt ./
 RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 
 # ── Copy agent source ─────────────────────────────────────────────────────────
-COPY agent-runner/agent.py ./
-# p17b: fitness_reporter.py provides Phase 1 WSBridge telemetry; imported by agent.py.
-#       soul.md contains core anti-hallucination rules; read at startup by agent.py.
-#       Both were previously missing from the image, causing silent feature degradation.
-COPY agent-runner/fitness_reporter.py ./
+COPY agent-runner/*.py ./
 COPY agent-runner/soul.md ./
 
 # ── Create workspace directories ──────────────────────────────────────────────
