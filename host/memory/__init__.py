@@ -33,6 +33,12 @@ try:
 except ImportError:
     pass  # summarizer.py may not be present in older installs
 
+# ── Phase 3 (UnifiedClaw): PalaceStore — namespace/topic hierarchical memory ──
+try:
+    from .palace_store import PalaceStore  # noqa: F401
+except ImportError:
+    pass  # palace_store.py may not be present in older installs
+
 __all__ = [
     # ── Original ──────────────────────────────────────────────────────────────
     "get_hot_memory", "update_hot_memory", "MemoryStack",
@@ -43,4 +49,6 @@ __all__ = [
     "MemoryBus", "Memory", "MemoryScope",
     # ── Phase 2 ───────────────────────────────────────────────────────────────
     "MemorySummarizer",
+    # ── Phase 3 ───────────────────────────────────────────────────────────────
+    "PalaceStore",
 ]
