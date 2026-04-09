@@ -160,6 +160,7 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
         if not fn_calls:
             # 沒有 function call：agent 完成推理，收集所有文字輸出
             final_response = "".join(p.text for p in parts if hasattr(p, "text") and p.text)
+            _no_tool_turns += 1
 
             # ── Fake status detection on text-only turn ──────────────────────
             _fake_hits = _FAKE_STATUS_RE_G.findall(final_response)
@@ -170,7 +171,6 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
                     "請立刻使用 Bash tool 或其他工具實際執行所需命令，不要只是描述或假裝完成。"
                 ))]))
                 final_response = ""
-                _no_tool_turns = 0
                 continue
 
             # ── Semantic cross-validation: action claim without any tool call ──
@@ -184,13 +184,7 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
                     "請實際使用對應工具（Read/Write/Edit/Bash）執行並確認，不要只是聲明已完成。"
                 ))]))
                 final_response = ""
-                _no_tool_turns = 0
                 continue
-
-            # BUG-G1 FIX: increment _no_tool_turns AFTER the corrective-injection
-            # `continue` branches above, so that injecting a correction does NOT
-            # consume a no-tool-turn count and prematurely terminate the loop.
-            _no_tool_turns += 1
 
             # ── Hard cap: 3 consecutive no-tool turns → stop ─────────────────
             if _no_tool_turns >= 3:

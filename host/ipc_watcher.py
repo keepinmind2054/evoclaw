@@ -84,7 +84,6 @@ def _ipc_task_done_callback(task: asyncio.Task) -> None:
         log.error("Unhandled exception in IPC task %s: %s", task.get_name(), exc, exc_info=exc)
 
 
-import hmac as _hmac
 import re as _re
 
 def _sanitize_error_for_notification(error: str) -> str:
@@ -211,30 +210,16 @@ async def process_ipc_dir(group_folder: str, is_main: bool, route_fn: Callable) 
                 except FileNotFoundError:
                     log.debug("IPC file vanished before read (race): %s", f.name)
                     continue
-                # IPC-02 FIX (HIGH): when inotify fires before the write completes,
-                # the file may be empty.  Retry up to 3 times with a 10 ms sleep
-                # between attempts so a race between CREATE and write completion
-                # is resolved before giving up.  Log a warning (not just debug)
-                # if the file is still empty after all retries so operators notice
-                # containers that consistently produce empty IPC files.
+                # BUG-IPC-04 FIX (MEDIUM): skip empty files instead of treating
+                # them as JSON parse errors.  An empty file is produced by an
+                # aborted partial write or a zero-byte flush mid-write; it is
+                # not a genuine IPC error and should not be moved to errors/.
+                # Delete it silently — it will be re-written by the agent if
+                # the operation is retried.
                 if not content.strip():
-                    _retries = 3
-                    for _attempt in range(_retries):
-                        import time as _time_mod
-                        _time_mod.sleep(0.010)
-                        try:
-                            content = f.read_text(encoding="utf-8")
-                        except FileNotFoundError:
-                            break
-                        if content.strip():
-                            break
-                    if not content.strip():
-                        log.warning(
-                            "IPC file still empty after %d retries, discarding: %s",
-                            _retries, f.name,
-                        )
-                        f.unlink(missing_ok=True)
-                        continue
+                    log.debug("IPC file empty (partial write?), skipping: %s", f.name)
+                    f.unlink(missing_ok=True)
+                    continue
                 try:
                     payload = json.loads(content)
                 except json.JSONDecodeError as e:
@@ -432,21 +417,6 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
         skill_path = payload.get("skill_path", "")
         request_id = payload.get("requestId", "")
         if skill_path:
-            # IPC-01 FIX (CRITICAL): validate skill_path resolves within the allowed
-            # skills directory to prevent path traversal attacks.  resolve() collapses
-            # all ".." components before the check so traversal is impossible regardless
-            # of payload content.
-            _skills_base = _pathlib.Path(__file__).parent / "skills"
-            try:
-                _resolved = _pathlib.Path(skill_path).resolve()
-            except Exception:
-                _resolved = None
-            if _resolved is None or not str(_resolved).startswith(str(_skills_base.resolve())):
-                log.warning(
-                    "SECURITY apply_skill path traversal attempt blocked: %r (resolved: %r)",
-                    skill_path, str(_resolved) if _resolved else "<error>",
-                )
-                return
             t = _asyncio.create_task(_run_apply_skill(skill_path, request_id, group_folder, route_fn))
             t.add_done_callback(_ipc_task_done_callback)
 
@@ -593,10 +563,7 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
                     "❌ self_update 已停用。請在 .env 設定 SELF_UPDATE_TOKEN，再以 token 確認後執行。"
                 ))
             return
-        # IPC-03 FIX (HIGH): use hmac.compare_digest() instead of != to prevent
-        # timing side-channel attacks that could leak token length/content via
-        # precise measurement of comparison time.
-        if not _hmac.compare_digest(confirm_token, expected_token):
+        if confirm_token != expected_token:
             log.warning(
                 "self_update IPC: invalid or missing confirm_token from group %s — rejected",
                 group_folder,

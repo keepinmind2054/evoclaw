@@ -28,15 +28,6 @@ from . import config
 # instead of running until the client disconnects (Issue #56).
 _dashboard_stopping = threading.Event()
 
-# DASH-01: Basic Auth brute-force rate limiter.
-# Maps IP address -> (failure_count, first_failure_timestamp).
-# After 5 failures within 60 seconds the IP receives 429 Too Many Requests.
-# The dict and lock are module-level so they survive across request handler instances.
-_auth_failures: dict = {}          # ip -> (count, first_failure_time)
-_auth_failures_lock = threading.Lock()
-_AUTH_MAX_FAILURES = 5
-_AUTH_WINDOW_SECS = 60
-
 # ─────────────────────────────────────────────────────────────────────────────
 # SPA Shell HTML
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1621,57 +1612,22 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def _auth(self) -> bool:
         if not config.DASHBOARD_PASSWORD:
             return True
-        ip = self.client_address[0]
-        # DASH-01: Check rate limit before attempting credential verification.
-        with _auth_failures_lock:
-            entry = _auth_failures.get(ip)
-            if entry is not None:
-                count, first_ts = entry
-                if count >= _AUTH_MAX_FAILURES and (time.time() - first_ts) < _AUTH_WINDOW_SECS:
-                    # Rate limit exceeded — signal caller to send 429.
-                    return "rate_limited"  # type: ignore[return-value]
-                if (time.time() - first_ts) >= _AUTH_WINDOW_SECS:
-                    # Window expired — reset counter.
-                    del _auth_failures[ip]
         auth = self.headers.get("Authorization", "")
         if auth.startswith("Basic "):
             try:
                 decoded = base64.b64decode(auth[6:]).decode()
                 user, pw = decoded.split(":", 1)
-                if user == config.DASHBOARD_USER and pw == config.DASHBOARD_PASSWORD:
-                    # Successful auth — clear any recorded failures for this IP.
-                    with _auth_failures_lock:
-                        _auth_failures.pop(ip, None)
-                    return True
+                return user == config.DASHBOARD_USER and pw == config.DASHBOARD_PASSWORD
             except Exception:
                 pass
-        # Failed auth — record failure.
-        with _auth_failures_lock:
-            entry = _auth_failures.get(ip)
-            if entry is None:
-                _auth_failures[ip] = (1, time.time())
-            else:
-                count, first_ts = entry
-                if (time.time() - first_ts) >= _AUTH_WINDOW_SECS:
-                    # Window expired — start fresh.
-                    _auth_failures[ip] = (1, time.time())
-                else:
-                    _auth_failures[ip] = (count + 1, first_ts)
         return False
 
-    def _require_auth(self, rate_limited: bool = False):
-        if rate_limited:
-            self.send_response(429)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header("Retry-After", str(_AUTH_WINDOW_SECS))
-            self.end_headers()
-            self.wfile.write(b"Too Many Requests — rate limit exceeded, try again later")
-        else:
-            self.send_response(401)
-            self.send_header("WWW-Authenticate", 'Basic realm="EvoClaw Dashboard"')
-            self.send_header("Content-Type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"Authentication required")
+    def _require_auth(self):
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="EvoClaw Dashboard"')
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Authentication required")
 
     def _json(self, data, status=200):
         body = json.dumps(data, default=str).encode("utf-8")
@@ -1712,9 +1668,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._handle_metrics()
             return
 
-        auth_result = self._auth()
-        if auth_result != True:  # noqa: E712 — explicit check: False or "rate_limited"
-            self._require_auth(rate_limited=(auth_result == "rate_limited")); return
+        if not self._auth():
+            self._require_auth(); return
 
         path = path_raw
         query = self.path[len(path)+1:] if "?" in self.path else ""
@@ -1956,9 +1911,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(404); self.end_headers()
 
     def do_POST(self):
-        auth_result = self._auth()
-        if auth_result != True:  # noqa: E712 — explicit check: False or "rate_limited"
-            self._require_auth(rate_limited=(auth_result == "rate_limited")); return
+        if not self._auth():
+            self._require_auth(); return
 
         path = self.path.split("?")[0]
 
@@ -2150,26 +2104,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             if not rel_path:
                 self._json({"ok": False, "error": "path required"}); return
             try:
-                # DASH-02: Restrict writes to only CLAUDE.md files at the root
-                # of a direct group subfolder under BASE_DIR.  This prevents
-                # authenticated users from overwriting arbitrary files via path
-                # traversal (e.g. "../../host/config.py").
-                #
-                # Allowed pattern: {BASE_DIR}/{group_name}/CLAUDE.md
-                # where group_name is a single path component (no separators).
                 full = (config.BASE_DIR / rel_path).resolve()
-                base_resolved = config.BASE_DIR.resolve()
-                # Must be exactly two levels deep: BASE_DIR / <group> / CLAUDE.md
-                try:
-                    relative = full.relative_to(base_resolved)
-                except ValueError:
-                    self._json({"ok": False, "error": "path outside BASE_DIR"}); return
-                parts = relative.parts
-                if len(parts) != 2 or parts[1] != "CLAUDE.md":
-                    self._json({
-                        "ok": False,
-                        "error": "writes are only permitted to {BASE_DIR}/{group}/CLAUDE.md",
-                    }); return
+                # Security: must be inside BASE_DIR
+                full.relative_to(config.BASE_DIR.resolve())
                 full.write_text(content, encoding="utf-8")
                 self._json({"ok": True})
             except Exception as e:

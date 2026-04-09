@@ -178,8 +178,8 @@ class DreamScheduler:
         self._dream_cooldown = 3600.0
         # MEM-05 (dream GC): store strong references to running dream tasks so
         # the event loop cannot garbage-collect and silently cancel them before
-        # they finish.  Tasks are removed from the set in _run_dream's finally
-        # block via a done-callback added at creation time.
+        # they finish.  Tasks are removed from the set via a done-callback
+        # added at creation time.
         self._dream_tasks: set[asyncio.Task] = set()
         # MEM-05 (write-write race): per-jid asyncio.Lock held by _run_dream
         # while it reads + writes hot memory.  patch_hot_memory() in MemoryBus

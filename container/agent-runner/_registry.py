@@ -51,20 +51,8 @@ def register_dynamic_tool(name: str, description: str, schema: dict, fn) -> None
     動態注冊工具到所有 provider 宣告列表（Gemini / Claude / OpenAI）。
     由 /app/dynamic_tools/*.py 模組在 import 時呼叫。
     schema 使用 JSON Schema 格式（OpenAI/Claude 相容）。
-
-    BUG-R4 FIX: This function is now idempotent — if the tool name already exists
-    in the declaration lists, only the handler is updated, not the declarations.
-    Calling this twice with the same name will NOT produce duplicate entries.
     """
-    # Always update the handler in case the function implementation changed
-    _already_registered = name in _dynamic_tools
     _dynamic_tools[name] = {"fn": fn, "description": description, "schema": schema}
-
-    if _already_registered:
-        # Update existing declaration descriptions in-place but do not append duplicates
-        _log("🔌 DYNAMIC", f"updated handler for already-registered tool: {name}")
-        return
-
     props = schema.get("properties", {})
     req = schema.get("required", [])
 
@@ -456,19 +444,10 @@ def _execute_tool_inner(name: str, args: dict, chat_jid: str) -> str:
     elif name == "mcp__evoclaw__list_tasks":
         return tool_list_tasks()
     elif name == "mcp__evoclaw__cancel_task":
-        # BUG-R2 FIX: validate task_id before dispatching to prevent silent state corruption
-        if not args.get("task_id"):
-            return "Error: task_id is required and must not be empty"
         return tool_cancel_task(args.get("task_id", ""))
     elif name == "mcp__evoclaw__pause_task":
-        # BUG-R2 FIX: validate task_id before dispatching to prevent silent state corruption
-        if not args.get("task_id"):
-            return "Error: task_id is required and must not be empty"
         return tool_pause_task(args.get("task_id", ""))
     elif name == "mcp__evoclaw__resume_task":
-        # BUG-R2 FIX: validate task_id before dispatching to prevent silent state corruption
-        if not args.get("task_id"):
-            return "Error: task_id is required and must not be empty"
         return tool_resume_task(args.get("task_id", ""))
     elif name == "Glob":
         _glob_pat = args.get("pattern")
