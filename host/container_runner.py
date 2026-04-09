@@ -44,6 +44,12 @@ def _redact_secrets(text: str) -> str:
 def _is_windows() -> bool:
     return sys.platform == "win32"
 
+# Windows: pass CREATE_NO_WINDOW to every spawned subprocess so docker.exe and
+# friends do not flash a console window every time the host pings them.  On
+# non-Windows platforms the value is 0 (no-op), letting the same kwarg be
+# applied unconditionally.
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
 log = logging.getLogger(__name__)
 
 # ── Module-level semaphore for defense-in-depth concurrency limiting ──────────
@@ -410,6 +416,7 @@ async def _poll_container_memory(container_name: str, interval: float = 5.0) -> 
                     container_name,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.DEVNULL,
+                    creationflags=_NO_WINDOW,
                 )
                 out, _ = await asyncio.wait_for(r.communicate(), timeout=5.0)
                 line = out.decode("utf-8", errors="replace").strip()
@@ -685,6 +692,7 @@ async def run_container_agent(
                     input=input_bytes,
                     capture_output=True,
                     timeout=config.CONTAINER_TIMEOUT,
+                    creationflags=_NO_WINDOW,
                 )
                 return r.stdout, r.stderr, r.returncode
 
@@ -712,6 +720,7 @@ async def run_container_agent(
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                creationflags=_NO_WINDOW,
             )
             # ── 串流 stderr（即時顯示 container 活動狀態）─────────────────────
             # 將 stdin 寫入後立即關閉，然後並行收集 stdout 與串流 stderr，
@@ -1153,6 +1162,7 @@ async def _stop_container(name: str) -> None:
             "docker", "stop", "--time", _stop_grace, name,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
+            creationflags=_NO_WINDOW,
         )
         # Wait slightly longer than the grace period so the SIGKILL has time to fire.
         await asyncio.wait_for(proc.wait(), timeout=int(_stop_grace) + 3.0)
@@ -1166,6 +1176,7 @@ async def _stop_container(name: str) -> None:
                 "docker", "rm", "-f", name,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
+                creationflags=_NO_WINDOW,
             )
             await asyncio.wait_for(rm_proc.wait(), timeout=5.0)
         except Exception as _rme:
@@ -1186,6 +1197,7 @@ async def kill_all_containers() -> None:
             "docker", "kill", *names,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
+            creationflags=_NO_WINDOW,
         )
         await asyncio.wait_for(proc.wait(), timeout=10.0)
     except Exception as e:
@@ -1210,6 +1222,7 @@ async def cleanup_orphans() -> None:
         proc = await asyncio.create_subprocess_exec(
             "docker", "ps", "-a", "-q", "--filter", "name=evoclaw-",
             stdout=asyncio.subprocess.PIPE,
+            creationflags=_NO_WINDOW,
         )
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
         ids = [i for i in out.decode().split() if i]
@@ -1218,6 +1231,7 @@ async def cleanup_orphans() -> None:
                 "docker", "rm", "-f", *ids,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
+                creationflags=_NO_WINDOW,
             )
             await asyncio.wait_for(rm_proc.wait(), timeout=15.0)
             log.info("Cleaned up %d orphan container(s) (running + stopped)", len(ids))
