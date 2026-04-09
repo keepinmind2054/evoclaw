@@ -1,13 +1,18 @@
 """Migrate data from SQLite to PostgreSQL.
 
 Usage:
-    DATABASE_URL=postgresql://... SQLITE_PATH=data/messages.db python -m host.migrations.sqlite_to_pg
+    DATABASE_URL=postgresql://... python -m host.migrations.sqlite_to_pg
+
+SQLITE_PATH defaults to ``config.STORE_DIR / "messages.db"`` (the same path the
+live host process uses). Override by setting ``SQLITE_PATH`` explicitly.
 """
 import os
 import re
 import sqlite3
 import sys
 import logging
+
+from host import config
 
 log = logging.getLogger(__name__)
 
@@ -48,7 +53,7 @@ def _safe_identifier(name: str) -> str:
 
 
 def migrate():
-    sqlite_path = os.environ.get("SQLITE_PATH", "data/messages.db")
+    sqlite_path = os.environ.get("SQLITE_PATH") or str(config.STORE_DIR / "messages.db")
     pg_url = os.environ.get("DATABASE_URL", "")
 
     if not pg_url:

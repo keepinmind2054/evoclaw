@@ -1,3 +1,15 @@
+## [1.26.2] — 2026-04-09
+
+### Fixed
+- **Stale `data/` DB path references in three places** — `Makefile:48`, `host/db_adapter.py:27`, and `host/migrations/sqlite_to_pg.py:51` all defaulted to `data/evoclaw.db` / `data/messages.db`, a layout the live host code has not used since `STORE_DIR` was introduced. `make db` was broken for everyone on default paths, and the offline adapter/migrator tools only worked if the caller remembered to set `DB_PATH`/`SQLITE_PATH` by hand. All three now resolve `config.STORE_DIR` so they point at the same DB the running host uses (`%LOCALAPPDATA%\evoclaw\store\` on Windows, `./store/` elsewhere). (#519)
+
+### Technical Details
+- **Modified Files**: `Makefile`, `host/db_adapter.py`, `host/migrations/sqlite_to_pg.py`, `.env.example`
+- **Makefile**: `db` target now shells out through a small Python one-liner so that `STORE_DIR` is resolved identically to the host process (handling the Windows `%LOCALAPPDATA%` default).
+- **db_adapter.py / sqlite_to_pg.py**: Added `from host import config` at module level; both default `DB_PATH` / `SQLITE_PATH` now come from `config.STORE_DIR / "messages.db"`. Explicit env overrides still win.
+- **.env.example**: Stale comment updated to describe the new default resolution.
+- **Breaking Changes**: None. Anyone relying on the old default by pre-seeding a `data/` directory must now either set `DB_PATH` explicitly or move the file into `STORE_DIR`.
+
 ## [1.26.1] — 2026-04-09
 
 ### Fixed
