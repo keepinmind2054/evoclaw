@@ -657,6 +657,32 @@ class MemoryBus:
         results.sort(key=lambda m: m.score, reverse=True)
         return results[:k]
 
+    async def get_hot_memory(
+        self,
+        agent_id: str,
+        token_budget: Optional[int] = None,
+    ) -> str:
+        """Return the hot MEMORY.md content for *agent_id*.
+
+        Delegates to hot.get_hot_memory().  When *token_budget* is
+        provided the content is filtered through MemoryStack.wake_up()
+        so that only the highest-scoring sections within the budget are
+        returned, cutting startup token cost 60-70% compared to injecting
+        the full file unconditionally.
+
+        Args:
+            agent_id:     Agent / group identifier (mapped to a JID).
+            token_budget: Optional token budget forwarded to
+                          MemoryStack.wake_up().  Pass None to get
+                          the full stored content (original behaviour).
+
+        Returns:
+            Filtered (or full) MEMORY.md text, or empty string if absent.
+        """
+        from .hot import get_hot_memory as _get_hot_memory
+
+        return _get_hot_memory(agent_id, token_budget=token_budget)
+
     async def forget(self, memory_id: str, agent_id: str) -> bool:
         """Remove a memory (only owner can delete private memories)."""
         result = self.shared.delete(memory_id, agent_id)

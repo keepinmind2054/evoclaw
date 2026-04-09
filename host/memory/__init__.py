@@ -16,7 +16,7 @@ Phase 1 adds:
 """
 
 # ── Original exports (backward compatible) ────────────────────────────────────
-from .hot import get_hot_memory, update_hot_memory  # noqa: F401
+from .hot import get_hot_memory, update_hot_memory, MemoryStack  # noqa: F401
 from .warm import append_warm_log, run_micro_sync, prune_old_warm_logs  # noqa: F401
 from .search import memory_search  # noqa: F401
 from .compound import run_weekly_compound  # noqa: F401
@@ -35,7 +35,7 @@ except ImportError:
 
 __all__ = [
     # ── Original ──────────────────────────────────────────────────────────────
-    "get_hot_memory", "update_hot_memory",
+    "get_hot_memory", "update_hot_memory", "MemoryStack",
     "append_warm_log", "run_micro_sync", "prune_old_warm_logs",
     "memory_search",
     "run_weekly_compound",
