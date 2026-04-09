@@ -544,6 +544,78 @@ class VectorStore:
         return self._available
 
 
+class ColdMemoryStore:
+    """
+    Read/write interface for the cold memory layer (group_cold_memory table).
+
+    Cold memory stores long-form archives such as dream-pass summaries.
+    It is searched using FTS5 with time-decay scoring so that recent
+    entries rank higher than equally-relevant older entries.
+
+    The underlying write functions live in host/db.py and rely on that
+    module's global DB connection + _db_lock.  This class wraps them so
+    that MemoryBus can treat cold as a first-class source alongside
+    shared and vector.
+    """
+
+    # Half-life for time-decay scoring: entries this many seconds old
+    # receive a 0.5x relevance multiplier.  Default: 7 days.
+    _DECAY_HALF_LIFE = 7 * 24 * 3600.0
+
+    def search(self, query: str, jid: str, k: int = 5) -> list[dict]:
+        """FTS5 search of cold memory with time-decay re-ranking.
+
+        GAP-05: MemoryBus.recall() documented support for 'cold' in
+        include_sources but silently skipped it.  This method provides
+        the implementation so the cold layer is now a live recall source.
+
+        Scoring formula:
+            final_score = fts_score * decay_factor
+        where
+            decay_factor = 0.5 ** (age_seconds / DECAY_HALF_LIFE)
+
+        This ensures a recent but moderately relevant entry can outscore
+        an ancient highly-relevant one, matching the expected behaviour
+        for a conversational assistant.
+        """
+        try:
+            from .. import db as _db_module
+            raw = _db_module.memory_fts_search(jid, query, limit=k * 2)
+            # memory_fts_search returns both warm and cold; keep cold only.
+            cold_rows = [r for r in raw if r.get("source") == "cold"]
+        except Exception as exc:
+            logger.warning("ColdMemoryStore.search error: %s", exc)
+            return []
+
+        now = time.time()
+        results = []
+        for r in cold_rows:
+            age_seconds = max(0.0, now - r.get("created_at", now))
+            decay = 0.5 ** (age_seconds / self._DECAY_HALF_LIFE)
+            fts_score = r.get("fts_score", 0.0)
+            combined = fts_score * decay
+            results.append({
+                "id": "cold:{}:{}".format(r.get("date", ""), r.get("created_at", 0)),
+                "content": r.get("content", ""),
+                "created_at": r.get("created_at", now),
+                "fts_score": fts_score,
+                "decay": decay,
+                "combined_score": combined,
+            })
+
+        results.sort(key=lambda x: x["combined_score"], reverse=True)
+        return results[:k]
+
+    def write(self, jid: str, title: str, content: str, tags: str = "") -> int:
+        """Write a cold memory entry.  Returns the new row id."""
+        try:
+            from .. import db as _db_module
+            return _db_module.append_cold_memory(jid=jid, title=title, content=content, tags=tags)
+        except Exception as exc:
+            logger.error("ColdMemoryStore.write error: %s", exc)
+            return -1
+
+
 class MemoryBus:
     """
     Universal Memory Bus - unified interface for all memory operations.
@@ -577,10 +649,12 @@ class MemoryBus:
         _db_path: str = _db_row[2] if _db_row else ""
         self.shared = SharedMemoryStore(conn, db_path=_db_path)
         self.vector = VectorStore(conn, db_path=_db_path)
+        self.cold = ColdMemoryStore()
         logger.info(
             f"MemoryBus initialized | "
             f"shared=ok | "
-            f"vector={'ok' if self.vector.available else 'unavailable (install sqlite-vec)'}"
+            f"vector={'ok' if self.vector.available else 'unavailable (install sqlite-vec)'} | "
+            f"cold=ok"
         )
 
     async def remember(
@@ -630,16 +704,16 @@ class MemoryBus:
         Search order:
         1. Vector (semantic) - most accurate for meaning
         2. Shared FTS5 - keyword matches in shared store
+        3. Cold FTS5 + time-decay - long-term archived summaries (GAP-05)
 
-        Note: "cold" (FTS5 full conversation history) is not yet integrated into
-        MemoryBus recall.  Pass include_sources=("shared", "vector") explicitly or
-        rely on the default; do NOT pass "cold" — it is silently ignored.
+        Pass include_sources=("shared", "vector", "cold") to enable cold recall.
+        The default omits cold for backwards compatibility.
 
         Results are deduplicated and sorted by combined relevance score.
 
         Args:
             query:    Natural language query
-            agent_id: Requesting agent's ID
+            agent_id: Requesting agent's ID (also used as jid for cold search)
             k:        Maximum number of results
             project:  Project context for scoped memories
 
@@ -726,6 +800,34 @@ class MemoryBus:
                         score=fts_score,
                         created_at=r.get("created_at", time.time()),
                         source="shared",
+                    ))
+
+        # 3. Cold memory FTS5 + time-decay search (GAP-05)
+        # agent_id doubles as the group jid for cold memory queries because
+        # MemoryBus is always called with the group's folder name which
+        # matches the jid used when writing to group_cold_memory.
+        if "cold" in include_sources:
+            import math
+            cold_results = self.cold.search(query, jid=agent_id, k=k)
+            for r in cold_results:
+                cold_id = r["id"]
+                if cold_id not in seen_ids:
+                    seen_ids.add(cold_id)
+                    # fts_score from memory_fts_search is abs(bm25), positive;
+                    # apply sigmoid mapping for comparability with shared search,
+                    # then multiply by the pre-computed time-decay factor.
+                    raw_fts = r.get("fts_score", 0.0)
+                    cold_score_base = 1.0 / (1.0 + math.exp(-raw_fts / 5.0))
+                    decay = r.get("decay", 1.0)
+                    cold_score = min(1.0, max(0.0, cold_score_base * decay))
+                    results.append(Memory(
+                        memory_id=cold_id,
+                        content=r["content"],
+                        agent_id=agent_id,
+                        scope="private",
+                        score=cold_score,
+                        created_at=r.get("created_at", time.time()),
+                        source="cold",
                     ))
 
         # Sort by score descending, return top k

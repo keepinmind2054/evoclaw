@@ -506,6 +506,31 @@ class DreamScheduler:
 
                     # Fix 4: write typed section blocks to SharedMemoryStore
                     await self._write_typed_blocks(jid, consolidated)
+
+                    # GAP-04: also archive the consolidated summary to cold memory
+                    # so the long-term history of dream passes is preserved for
+                    # future FTS recall even after hot memory is overwritten.
+                    try:
+                        from .. import db as _db_module
+                        _title = "dream:{}:{}".format(
+                            jid,
+                            time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+                        )
+                        _db_module.append_cold_memory(
+                            jid=jid,
+                            title=_title,
+                            content=consolidated,
+                            tags="dream,consolidated",
+                        )
+                        logger.debug(
+                            "dream_task: archived dream summary to cold memory for group=%s title=%s",
+                            jid, _title,
+                        )
+                    except Exception as _cold_exc:
+                        logger.warning(
+                            "dream_task: failed to write cold memory for group=%s: %s",
+                            jid, _cold_exc,
+                        )
                 else:
                     logger.debug("dream_task: dream pass for group=%s produced no changes", jid)
 
