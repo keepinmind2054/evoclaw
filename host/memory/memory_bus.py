@@ -673,31 +673,61 @@ class MemoryBus:
         scope: MemoryScope = "private",
         project: str = "",
         importance: float = 0.5,
+        namespace: str = "",
+        topic_tag: str = "",
     ) -> str:
         """
         Store a memory in the appropriate layer(s).
-        
+
         Args:
             content:    Text content to remember
             agent_id:   ID of the agent storing this memory
             scope:      "private" (agent only) | "shared" (all agents) | "project" (same project)
             project:    Project name for "project" scope
             importance: 0.0-1.0 importance weight
-            
+            namespace:  Optional broad domain label (e.g. "technical", "planning").
+                        Auto-classified via PalaceStore.classify() when empty.
+            topic_tag:  Optional fine-grained topic label (e.g. "decisions", "bugs").
+                        Auto-classified via PalaceStore.classify() when empty.
+
         Returns:
             memory_id: Unique ID for this memory
         """
+        # Auto-classify namespace/topic_tag when not explicitly supplied.
+        if not namespace or not topic_tag:
+            auto_ns, auto_topic = self.palace.classify(content)
+            if not namespace:
+                namespace = auto_ns
+            if not topic_tag:
+                topic_tag = auto_topic
+
         memory_id = self.shared.write(
             content=content,
             agent_id=agent_id,
             scope=scope,
             project=project,
             importance=importance,
+            namespace=namespace,
+            topic_tag=topic_tag,
         )
         # Also index in vector store for semantic search.
         # Bug fixed (p14b-8): pass project so vector store can filter by it.
         await self.vector.store(memory_id, content, agent_id, scope, project)
         return memory_id
+
+    def list_topics(self, namespace: str = "") -> list[str]:
+        """Return distinct topic_tag values stored in shared_memories.
+
+        Proxies to PalaceStore.list_topics().  Optionally filter by *namespace*.
+        """
+        return self.palace.list_topics(namespace=namespace)
+
+    def topic_summary(self, topic_tag: str, namespace: str = "", k: int = 10) -> list[dict]:
+        """Return the *k* most important memories for a given topic_tag.
+
+        Proxies to PalaceStore.topic_summary().
+        """
+        return self.palace.topic_summary(topic_tag=topic_tag, namespace=namespace, k=k)
 
     async def recall(
         self,
@@ -706,25 +736,32 @@ class MemoryBus:
         k: int = 5,
         project: str = "",
         include_sources: tuple = ("shared", "vector"),
+        namespace: str = "",
+        topic_tag: str = "",
     ) -> list[Memory]:
         """
         Recall relevant memories from all accessible layers.
 
         Search order:
         1. Vector (semantic) - most accurate for meaning
-        2. Shared FTS5 - keyword matches in shared store
+        2. Shared FTS5 / PalaceStore - keyword matches in shared store
         3. Cold FTS5 + time-decay - long-term archived summaries (GAP-05)
 
         Pass include_sources=("shared", "vector", "cold") to enable cold recall.
         The default omits cold for backwards compatibility.
 
+        When *namespace* or *topic_tag* is set the shared search step also
+        delegates to PalaceStore.search() for hierarchical filtering.
+
         Results are deduplicated and sorted by combined relevance score.
 
         Args:
-            query:    Natural language query
-            agent_id: Requesting agent's ID (also used as jid for cold search)
-            k:        Maximum number of results
-            project:  Project context for scoped memories
+            query:     Natural language query
+            agent_id:  Requesting agent's ID (also used as jid for cold search)
+            k:         Maximum number of results
+            project:   Project context for scoped memories
+            namespace: Optional namespace filter for PalaceStore hierarchical search.
+            topic_tag: Optional topic_tag filter for PalaceStore hierarchical search.
 
         Returns:
             List of Memory objects sorted by relevance (highest first)
@@ -779,8 +816,35 @@ class MemoryBus:
                         source="vector",
                     ))
 
-        # 2. Shared FTS5 search
+        # 2. Shared FTS5 search (with optional PalaceStore hierarchical pre-filter)
         if "shared" in include_sources:
+            # 2a. PalaceStore hierarchical search when namespace or topic_tag is set.
+            if namespace or topic_tag:
+                palace_results = self.palace.search(
+                    query, namespace=namespace, topic_tag=topic_tag, k=k
+                )
+                for r in palace_results:
+                    if r["id"] not in seen_ids:
+                        seen_ids.add(r["id"])
+                        import math as _math
+                        raw_rank = r.get("fts_rank", -1.0) or -1.0
+                        fts_score = 1.0 / (1.0 + _math.exp(raw_rank / 5.0))
+                        fts_score = min(1.0, max(0.0, fts_score))
+                        results.append(Memory(
+                            memory_id=r["id"],
+                            content=r["content"],
+                            agent_id=r["agent_id"],
+                            scope=r["scope"],
+                            score=fts_score,
+                            created_at=r.get("created_at", time.time()),
+                            source="shared",
+                            metadata={
+                                "namespace": r.get("namespace", ""),
+                                "topic_tag": r.get("topic_tag", ""),
+                            },
+                        ))
+
+            # 2b. Standard shared FTS5 search (always runs, deduped by seen_ids).
             shared_results = self.shared.search(query, agent_id, project=project, k=k)
             for r in shared_results:
                 if r["id"] not in seen_ids:

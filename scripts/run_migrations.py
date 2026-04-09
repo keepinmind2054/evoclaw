@@ -217,6 +217,18 @@ MIGRATIONS: list[tuple[int, str, str | None]] = [
         END;
         """,
     ),
+    (
+        4,
+        "Add namespace and topic_tag columns to shared_memories for PalaceStore (#495)",
+        # SQLite requires a separate ALTER TABLE statement per column.
+        # executescript() runs each statement individually so both columns are
+        # added within the outer BEGIN EXCLUSIVE migration transaction.
+        """
+        ALTER TABLE shared_memories ADD COLUMN namespace TEXT NOT NULL DEFAULT '';
+        ALTER TABLE shared_memories ADD COLUMN topic_tag TEXT NOT NULL DEFAULT '';
+        CREATE INDEX IF NOT EXISTS idx_shared_ns_topic ON shared_memories(namespace, topic_tag);
+        """,
+    ),
 ]
 
 
