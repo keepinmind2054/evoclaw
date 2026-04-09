@@ -79,7 +79,9 @@ def is_sender_allowed(sender_id: str, allowlist: set[str]) -> bool:
     """Return True if sender is allowed.
 
     Semantics:
-    - Empty set (set()): allow all (explicit opt-in or empty allowlist file).
+    - Empty set (set()): nobody is allowed (AL-01 FIX: fail-closed).
+      An empty allowlist means no senders have been explicitly permitted, so
+      the safe default is to deny everyone rather than silently open up access.
     - Non-empty set: only allow senders in the set.
     - {""}  sentinel: deny all (allowlist could not be loaded and
       SENDER_ALLOWLIST_ALLOW_ALL_IF_MISSING is false).
@@ -95,7 +97,12 @@ def is_sender_allowed(sender_id: str, allowlist: set[str]) -> bool:
     can never match the sentinel entry and be incorrectly permitted.
     """
     if not allowlist:
-        return True  # empty set = allow-all mode
+        # AL-01 FIX: empty allowlist = nobody is allowed (fail-closed).
+        # Returning True here would be fail-open — if the allowlist is
+        # accidentally empty or never populated, every sender would be
+        # permitted.  The secure default is to deny all until at least one
+        # sender is explicitly added to the allowlist.
+        return False
     # BUG-AL-02 FIX: reject non-string sender_id safely
     if not isinstance(sender_id, str):
         log.warning("is_sender_allowed: non-string sender_id %r — denying", sender_id)
