@@ -37,6 +37,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Literal, Optional
 
+from .palace_store import PalaceStore
+
 logger = logging.getLogger(__name__)
 
 MemoryScope = Literal["private", "shared", "project"]
@@ -153,6 +155,8 @@ class SharedMemoryStore:
         scope: MemoryScope = "private",
         project: str = "",
         importance: float = 0.5,
+        namespace: str = "",
+        topic_tag: str = "",
     ) -> str:
         """Store a memory. Returns memory_id."""
         memory_id = hashlib.sha256(
@@ -164,15 +168,19 @@ class SharedMemoryStore:
                 try:
                     self._conn.execute(
                         """INSERT INTO shared_memories
-                           (id, agent_id, project, scope, content, importance, created_at, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (memory_id, agent_id, project, scope, content, importance, now, now),
+                           (id, agent_id, project, scope, content, importance,
+                            namespace, topic_tag, created_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (memory_id, agent_id, project, scope, content, importance,
+                         namespace, topic_tag, now, now),
                     )
                     self._conn.commit()
                 except sqlite3.Error:
                     self._conn.rollback()
                     raise
-            logger.debug(f"SharedMemory written: {memory_id} scope={scope}")
+            logger.debug(
+                f"SharedMemory written: {memory_id} scope={scope} ns={namespace} topic={topic_tag}"
+            )
         except sqlite3.Error as e:
             logger.error(f"SharedMemory write error: {e}")
         return memory_id
@@ -650,6 +658,7 @@ class MemoryBus:
         self.shared = SharedMemoryStore(conn, db_path=_db_path)
         self.vector = VectorStore(conn, db_path=_db_path)
         self.cold = ColdMemoryStore()
+        self.palace = PalaceStore(self.shared._conn)
         logger.info(
             f"MemoryBus initialized | "
             f"shared=ok | "
