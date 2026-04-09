@@ -14,31 +14,13 @@ from _constants import (
 from _utils import _log, _llm_call_with_retry, _KeyPool
 from _constants import _ACTION_CLAIM_RE
 from _tools import _messages_sent_via_tool
-# execute_tool will be imported lazily to avoid circular imports:
-# from _registry import execute_tool
+# BUG-C5 FIX: import CLAUDE_TOOL_DECLARATIONS from _registry so that dynamic
+# tools registered via _registry.register_dynamic_tool() are visible to Claude.
+# Previously this file defined its own local copy, meaning dynamic tools appended
+# to _registry.CLAUDE_TOOL_DECLARATIONS were never included in API calls.
+from _registry import execute_tool, CLAUDE_TOOL_DECLARATIONS  # noqa: E402
 
 WORKSPACE = "/workspace/group"
-
-CLAUDE_TOOL_DECLARATIONS = [
-    {"name": "Bash", "description": "Execute a bash command in /workspace/group.", "input_schema": {"type": "object", "properties": {"command": {"type": "string", "description": "The bash command to run"}}, "required": ["command"]}},
-    {"name": "Read", "description": "Read a file from the filesystem.", "input_schema": {"type": "object", "properties": {"file_path": {"type": "string", "description": "Absolute path to the file"}}, "required": ["file_path"]}},
-    {"name": "Write", "description": "Write content to a file.", "input_schema": {"type": "object", "properties": {"file_path": {"type": "string"}, "content": {"type": "string"}}, "required": ["file_path", "content"]}},
-    {"name": "Edit", "description": "Find and replace a string in a file.", "input_schema": {"type": "object", "properties": {"file_path": {"type": "string"}, "old_string": {"type": "string"}, "new_string": {"type": "string"}}, "required": ["file_path", "old_string", "new_string"]}},
-    {"name": "mcp__evoclaw__send_message", "description": "Send a message to the user.", "input_schema": {"type": "object", "properties": {"text": {"type": "string"}, "sender": {"type": "string"}}, "required": ["text"]}},
-    {"name": "mcp__evoclaw__schedule_task", "description": "Schedule a task.", "input_schema": {"type": "object", "properties": {"prompt": {"type": "string"}, "schedule_type": {"type": "string"}, "schedule_value": {"type": "string"}, "context_mode": {"type": "string"}}, "required": ["prompt", "schedule_type", "schedule_value"]}},
-    {"name": "mcp__evoclaw__list_tasks", "description": "List all scheduled tasks for this group.", "input_schema": {"type": "object", "properties": {}, "required": []}},
-    {"name": "mcp__evoclaw__cancel_task", "description": "Cancel (delete) a scheduled task by its ID.", "input_schema": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}},
-    {"name": "mcp__evoclaw__pause_task", "description": "Pause a scheduled task (it will not run until resumed).", "input_schema": {"type": "object", "properties": {"task_id": {"type": "string", "description": "The task ID to pause"}}, "required": ["task_id"]}},
-    {"name": "mcp__evoclaw__resume_task", "description": "Resume a previously paused scheduled task.", "input_schema": {"type": "object", "properties": {"task_id": {"type": "string", "description": "The task ID to resume"}}, "required": ["task_id"]}},
-    {"name": "Glob", "description": "Find files matching a glob pattern (supports ** recursive).", "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}}, "required": ["pattern"]}},
-    {"name": "Grep", "description": "Search file contents with regex. Returns filename:line:content.", "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}, "include": {"type": "string"}}, "required": ["pattern"]}},
-    {"name": "WebFetch", "description": "Fetch a URL and return its content as plain text.", "input_schema": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}},
-    {"name": "mcp__evoclaw__run_agent", "description": "Spawn a subagent in an isolated Docker container to handle a subtask. Blocks until complete (up to 300s) and returns its output.", "input_schema": {"type": "object", "properties": {"prompt": {"type": "string", "description": "The task for the subagent"}, "context_mode": {"type": "string", "description": "isolated or group"}}, "required": ["prompt"]}},
-    {"name": "mcp__evoclaw__send_file", "description": "Send a file to the user. Write the file to /workspace/group/output/ first, then call this tool.", "input_schema": {"type": "object", "properties": {"chat_jid": {"type": "string", "description": "The chat JID to send the file to"}, "file_path": {"type": "string", "description": "Absolute container path to the file"}, "caption": {"type": "string", "description": "Optional caption"}}, "required": ["file_path"]}},
-    {"name": "mcp__evoclaw__reset_group", "description": "Clear the failure counter for a group, unfreezing it if it was locked in cooldown. Use when a group is stuck and not responding.", "input_schema": {"type": "object", "properties": {"jid": {"type": "string", "description": "The JID of the group to reset, e.g. tg:8259652816"}}, "required": ["jid"]}},
-    {"name": "mcp__evoclaw__start_remote_control", "description": "Start a Claude Code remote-control session. The host spawns `claude remote-control` and sends the URL back to this chat. Use when the user wants to update code or restart EvoClaw.", "input_schema": {"type": "object", "properties": {"chat_jid": {"type": "string"}, "sender": {"type": "string"}}, "required": []}},
-    {"name": "mcp__evoclaw__self_update", "description": "Pull the latest EvoClaw code from git and restart the host process. Use when the user asks to update, upgrade, or restart EvoClaw.", "input_schema": {"type": "object", "properties": {"chat_jid": {"type": "string"}}, "required": []}},
-]
 
 
 def run_agent_claude(client_holder, model: str, system_instruction: str, user_message: str, chat_jid: str, conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None, max_iter: int = 20, group_folder: str = "") -> str:
@@ -50,7 +32,7 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
     max_iter: maximum number of agentic loop iterations (default 20; caller sets based on task complexity).
     group_folder: path to the group folder (used for MEMORY.md tracking).
     """
-    from _registry import execute_tool  # lazy import to break circular dep
+    # execute_tool and CLAUDE_TOOL_DECLARATIONS are imported at module level from _registry
     import re as _re_claude
     messages = []
     # P15A-FIX-8: inject conversation history preserving structured content.
@@ -68,6 +50,7 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
     messages.append({"role": "user", "content": user_message})
     MAX_ITER = max_iter
     final_response = ""
+    _no_tool_turns = 0        # BUG-C1 FIX: counter for consecutive turns without any tool call
     _memory_written = False  # True once agent writes to MEMORY.md this session
     _memory_path_str = f"{WORKSPACE}/MEMORY.md"  # BUG-FIX #424: group_folder is a name, not a path; use WORKSPACE
     _tool_fail_counter: dict = {}  # (tool_name, args_hash) -> consecutive_fail_count
@@ -152,6 +135,27 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
                     ),
                 })
                 final_response = ""
+                _no_tool_turns = 0
+                continue
+
+            # BUG-C1 FIX: if the model returns plain text on end_turn without any
+            # fake-status keywords or action claims, apply retry pressure before
+            # accepting a final answer.  This prevents the loop from immediately
+            # exiting when the model produces an unexpectedly short text reply.
+            if not _had_tool_calls_this_turn and n < MAX_ITER - 1:
+                _no_tool_turns += 1
+                if _no_tool_turns >= 3:
+                    _log("❌ NO-TOOL", f"Claude made no tool call for {_no_tool_turns} consecutive turns — breaking")
+                    break
+                # Inject reminder to encourage tool use before accepting done
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "【系統提示】你已連續多輪未使用任何工具。如果任務已完成，請確認並總結結果。"
+                        "如果尚未完成，請使用適當的工具（Bash/Read/Write/Edit 等）繼續執行。"
+                    ),
+                })
+                final_response = ""
                 continue
             break
 
@@ -188,6 +192,9 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
             )
             _log("⚠️ UNEXPECTED-STOP", f"Claude stop_reason={response.stop_reason} — exiting loop")
             break
+
+        # Model made tool calls — reset no-tool counter
+        _no_tool_turns = 0
 
         # Execute all tool calls
         tool_results = []
