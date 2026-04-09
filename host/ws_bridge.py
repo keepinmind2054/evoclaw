@@ -38,6 +38,7 @@ Usage (Agent Runtime side):
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -167,7 +168,18 @@ class WSBridge:
         # close() call above did not prevent the `async for` loop from
         # receiving subsequent messages on a slow network.  Track auth state
         # per connection and reject every message until auth succeeds.
-        _authenticated = not bool(WS_BRIDGE_TOKEN)  # True when token not required
+        # FIX: if WS_BRIDGE_TOKEN is empty, deny all connections and warn.
+        if not WS_BRIDGE_TOKEN:
+            logger.warning(
+                "WSBridge: WS_BRIDGE_TOKEN is not set or empty — "
+                "rejecting connection from %s. "
+                "Set WS_BRIDGE_TOKEN env var to allow agent connections.",
+                websocket.remote_address,
+            )
+            await websocket.send(json.dumps({"type": "error", "error": "unauthorized"}))
+            await websocket.close()
+            return
+        _authenticated = False  # Token is required; must authenticate on first message
         try:
             async for raw_message in websocket:
                 try:
@@ -179,7 +191,7 @@ class WSBridge:
                 # Validate token on EVERY message until authenticated.
                 if not _authenticated:
                     token = msg.get("token", "")
-                    if token != WS_BRIDGE_TOKEN:
+                    if not hmac.compare_digest(WS_BRIDGE_TOKEN.encode(), token.encode()):
                         await websocket.send(json.dumps({"type": "error", "error": "unauthorized"}))
                         await websocket.close()
                         return
@@ -204,7 +216,20 @@ class WSBridge:
                         # p17c BUG-FIX: guard _connections mutation with lock to
                         # prevent races with concurrent heartbeats, stop(), and
                         # the finally-block cleanup below.
+                        # FIX: if agent_id already registered, close old connection
+                        # first to avoid silently overwriting and leaking the old ws.
                         async with _lock:
+                            old_ws = self._connections.get(agent_id)
+                            if old_ws is not None and old_ws is not websocket:
+                                logger.warning(
+                                    "WSBridge: duplicate agent_id '%s' — closing old connection "
+                                    "before registering new one",
+                                    agent_id,
+                                )
+                                try:
+                                    await old_ws.close()
+                                except Exception:
+                                    pass
                             self._connections[agent_id] = websocket
                     await self._send(websocket, {"type": "ack", "agent_id": agent_id})
                     logger.debug(f"WSBridge: heartbeat from {agent_id}")
