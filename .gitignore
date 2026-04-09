@@ -46,3 +46,14 @@ __pycache__/
 *.pyo
 *.pyd
 .Python
+
+# Claude Code per-machine state
+.claude/
+
+# pm2 ecosystem with environment-specific absolute paths.
+# Copy ecosystem.config.example.js → ecosystem.config.js and adjust locally.
+ecosystem.config.js
+
+# Stray legacy SQLite at repo root. The real DB lives at $STORE_DIR/evoclaw.db
+# (defaults to %LOCALAPPDATA%\evoclaw\store\ on Windows, ./store/ elsewhere).
+evoclaw.db

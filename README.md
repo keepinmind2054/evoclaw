@@ -186,6 +186,40 @@ python run.py
 - **監控儀表板**：http://localhost:8765
 - **瀏覽器聊天介面**：http://localhost:8766
 
+#### 使用 pm2 守護（選用）
+
+若希望以 pm2 管理 host process（自動重啟、log 輪替、開機自啟動），repo 提供了範本檔
+`ecosystem.config.example.js`：
+
+```bash
+# 1. 複製範本並依環境調整 interpreter 路徑（venv / conda / 系統 python）
+cp ecosystem.config.example.js ecosystem.config.js
+
+# 2. 啟動
+pm2 start ecosystem.config.js
+
+# 3. 將目前進程清單存檔（給開機自啟動用）
+pm2 save
+```
+
+> 本機的 `ecosystem.config.js` 已加入 `.gitignore`，每台機器可獨立保留自己的絕對路徑。
+
+**Windows 開機自啟動**：
+
+```bash
+npm install -g pm2-windows-startup
+pm2-startup install
+```
+
+之後 pm2 save 過的 app 都會在登入時自動 `pm2 resurrect`。
+
+**Linux / macOS 開機自啟動**：
+
+```bash
+pm2 startup
+# 依輸出指示執行 sudo 指令，再 pm2 save
+```
+
 ### 取得 API 金鑰
 
 **Gemini（預設，有免費方案）：**
