@@ -24,6 +24,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import collections
 import hashlib
 import json
 import logging
@@ -285,12 +286,21 @@ class VectorStore:
         else:
             self._conn = conn
         self._lock = threading.Lock()
-        self._available = self._try_load_extension()
+        self._pending_embed: collections.deque = collections.deque()
+        try:
+            self._available = self._try_load_extension()
+        except Exception as exc:  # pragma: no cover
+            logger.warning("WARNING: sqlite-vec unavailable — vector search disabled")
+            logger.debug("sqlite-vec load error: %s", exc)
+            self._available = False
         if self._available:
             self._ensure_schema()
-            logger.info("VectorStore: sqlite-vec available")
+            if not self._available:
+                logger.warning("WARNING: sqlite-vec unavailable — vector search disabled")
+            else:
+                logger.info("VectorStore: sqlite-vec available")
         else:
-            logger.info("VectorStore: sqlite-vec not available, falling back to FTS5")
+            logger.warning("WARNING: sqlite-vec unavailable — vector search disabled")
 
     def _try_load_extension(self) -> bool:
         """Try to load sqlite-vec extension."""
@@ -363,6 +373,45 @@ class VectorStore:
             logger.debug(f"Embedding generation failed: {e}")
             return None
 
+    async def retry_pending(self):
+        """Retry embedding for all memory_ids queued in _pending_embed."""
+        if not self._pending_embed:
+            return
+        retry_queue = list(self._pending_embed)
+        self._pending_embed.clear()
+        for item in retry_queue:
+            memory_id = item["memory_id"]
+            content = item["content"]
+            agent_id = item["agent_id"]
+            scope = item["scope"]
+            project = item["project"]
+            try:
+                embedding = await self.embed(content)
+                if embedding is None:
+                    self._pending_embed.append(item)
+                    continue
+                with self._lock:
+                    try:
+                        self._conn.execute("BEGIN IMMEDIATE")
+                        self._conn.execute(
+                            "INSERT OR REPLACE INTO vec_memories "
+                            "(memory_id, agent_id, scope, project, content, created_at) "
+                            "VALUES (?,?,?,?,?,?)",
+                            (memory_id, agent_id, scope, project, content, time.time())
+                        )
+                        self._conn.execute(
+                            "INSERT OR REPLACE INTO vec_index (memory_id, embedding) VALUES (?,?)",
+                            (memory_id, json.dumps(embedding))
+                        )
+                        self._conn.commit()
+                    except sqlite3.Error as e:
+                        self._conn.rollback()
+                        logger.debug("VectorStore.retry_pending store error for %s: %s", memory_id, e)
+                        self._pending_embed.append(item)
+            except Exception as e:
+                logger.debug("VectorStore.retry_pending embed error for %s: %s", memory_id, e)
+                self._pending_embed.append(item)
+
     async def store(
         self,
         memory_id: str,
@@ -379,8 +428,34 @@ class VectorStore:
         """
         if not self._available:
             return
-        embedding = await self.embed(content)
+        # GAP-06: retry any previously failed embeds before attempting a new one
+        await self.retry_pending()
+        try:
+            embedding = await self.embed(content)
+        except Exception as e:
+            logger.error(
+                "ERROR: embedding failed for memory_id=%s, queued for retry", memory_id
+            )
+            logger.debug("embed exception: %s", e)
+            self._pending_embed.append({
+                "memory_id": memory_id,
+                "content": content,
+                "agent_id": agent_id,
+                "scope": scope,
+                "project": project,
+            })
+            return
         if embedding is None:
+            logger.error(
+                "ERROR: embedding failed for memory_id=%s, queued for retry", memory_id
+            )
+            self._pending_embed.append({
+                "memory_id": memory_id,
+                "content": content,
+                "agent_id": agent_id,
+                "scope": scope,
+                "project": project,
+            })
             return
         with self._lock:
             # MEM-04: wrap both INSERTs in one transaction so that vec_memories
