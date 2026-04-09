@@ -45,7 +45,7 @@ EvoClaw 是一個輕量、以 Python 打造的多模型 AI 代理框架，專為
 - **進化引擎**：受生物學啟發的自我適應系統，自動調整各群組回應風格，無需手動調整
 - **技能系統（Skills 2.0）**：透過 `skills_engine/` 動態載入新能力，支援熱抽換容器工具，無需重建 Docker image
 - **DevEngine**：7 階段 LLM 驅動開發流水線（Analyze → Design → Implement → Test → Review → Document → Deploy）
-- **多層記憶**：Hot/Warm/Cold 三層記憶架構，跨對話持久保存上下文
+- **多層記憶**：5 層記憶架構（Hot/PalaceStore/Vector/Shared/Cold），跨代理持久保存上下文，支援語義搜尋與跨代理知識共享
 - **代理集群（Agent Swarms）**：組建專業代理團隊，協作處理複雜任務
 - **排程任務**：支援 `cron`、`interval`、`once` 三種執行模式
 - **Web 介面**：監控儀表板（port 8765）及瀏覽器聊天介面（port 8766）
@@ -99,6 +99,16 @@ evoclaw/
 │   ├── dashboard.py              ← Web 儀表板（port 8765）
 │   ├── log_buffer.py             ← 記憶體日誌環形緩衝（SSE 來源）
 │   ├── webportal.py              ← 瀏覽器聊天介面（port 8766）
+│   ├── memory/                   ← 記憶子系統（Phase 1+2）
+│   │   ├── hot.py                ←   L0 Hot memory (MEMORY.md injection)
+│   │   ├── warm.py               ←   Warm logs (30-day daily files)
+│   │   ├── palace_store.py       ←   L1 PalaceStore (namespace/topic hierarchy)
+│   │   ├── memory_bus.py         ←   MemoryBus unified interface + VectorStore + SharedMemoryStore
+│   │   ├── vector_ingestor.py    ←   Background vectorization (every 30s)
+│   │   ├── summarizer.py         ←   MemorySummarizer (Phase 2)
+│   │   ├── dream_task.py         ←   Dream cycle consolidation
+│   │   ├── search.py             ←   L4 Cold memory (FTS5 + time decay)
+│   │   └── compound.py           ←   Cross-layer compound queries
 │   ├── evolution/                ← 進化引擎
 │   │   ├── fitness.py            ←   適應度追蹤（自然選擇）
 │   │   ├── adaptive.py           ←   表觀遺傳提示（環境感知）
@@ -297,22 +307,59 @@ register_dynamic_tool(
 
 ## 記憶系統
 
-### 三層記憶架構
+### Memory Architecture
 
-| 層級 | 儲存 | 容量 | 用途 |
-|------|------|------|------|
-| Hot（熱記憶） | 每群組的 `MEMORY.md` | 8KB | 在容器啟動時注入 |
-| Warm（暖記憶） | 每日日誌檔 | 30 天 | 近期對話歷史 |
-| Cold（冷記憶） | SQLite FTS5 | 無限制 | 全文搜尋，附時間衰減 |
+evoclaw uses a 5-layer memory system inspired by [mempalace](https://github.com/milla-jovovich/mempalace). Implemented across Phase 1 and Phase 2 of the UnifiedClaw architecture.
+
+#### Layers (read order on recall)
+
+| Layer | Store | Description |
+|-------|-------|-------------|
+| L0 Hot | `MEMORY.md` | Per-agent file, token-budget-aware injection via `MemoryStack.wake_up()` |
+| L1 Palace | `PalaceStore` | Namespace/topic hierarchical search (like mempalace wing/room) |
+| L2 Vector | `VectorStore` (sqlite-vec) | Semantic similarity search, near-real-time via `VectorIngestor` |
+| L3 Shared | `SharedMemoryStore` (FTS5) | Cross-agent keyword search |
+| L4 Cold | `ColdMemoryStore` (FTS5 + time-decay) | Long-term archived dream summaries |
+
+#### Write paths
+
+- **Conversation** → `warm.py` (verbatim, 500 chars, auto-classified) → `VectorIngestor` (every 30s)
+- **Dream cycle** → reads warm logs verbatim → produces typed blocks → `SharedMemoryStore` + `ColdMemoryStore`
+- **High-importance entries** (score ≥ 0.85) → immediately appended to hot `MEMORY.md`
+
+#### PalaceStore namespaces/topics
+
+Memories are auto-classified into:
+
+- **Namespaces**: `technical`, `planning`, `personal`, `project`, `general`
+- **Topics**: `decisions`, `preferences`, `problems`, `facts`, `milestones`, `tasks`
+
+#### Container agent memory tools
+
+Container agents can query and store memories during sessions:
+
+```
+memory_recall   — query: "why did we switch to PostgreSQL?"
+memory_remember — content: "User prefers dark mode in all UIs", importance: 0.9
+```
+
+#### Knowledge Graph (Phase 3)
+
+`EvoKnowledgeGraph` stores temporal entity-relationship triples:
+
+- **Entities** + **Triples** with `valid_from`/`valid_to` timestamps
+- Auto-invalidation of superseded facts
+- Contradiction detection across predicates
+- Entity extraction from session summaries via LLM
 
 ### 記憶目錄結構
 
 ```
 groups/
 └── {群組名稱}/
-    ├── MEMORY.md        ← Hot 記憶（8KB，容器啟動時注入）
+    ├── MEMORY.md        ← L0 Hot 記憶（token-budget-aware，容器啟動時注入）
     └── logs/
-        └── 2026-03-17.md ← Warm 記憶（每日日誌）
+        └── 2026-03-17.md ← Warm 記憶（每日日誌，30 天保留）
 ```
 
 要更新某個群組的記憶，直接編輯對應的 `MEMORY.md` 即可。下次容器執行時會自動載入變更。
