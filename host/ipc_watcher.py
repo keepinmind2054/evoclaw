@@ -133,6 +133,18 @@ def _notify_main_group_error(filename: str, error: str) -> None:
         log.debug("_notify_main_group_error failed: %s", exc)
 
 
+def _write_ipc_response(path: str, data: dict) -> None:
+    """Atomically write *data* as JSON to *path* (write to .tmp then rename).
+
+    Used by memory_recall and memory_remember handlers to deliver results to
+    the container-side polling loop without risking a partial-read race.
+    """
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh)
+    os.rename(tmp, path)
+
+
 # p28b: IPC backpressure — maximum number of JSON files to process per group per
 # cycle.  Without a cap a runaway agent (e.g. a tight container loop writing IPC
 # files faster than they are processed) can monopolise the event loop and prevent
@@ -516,6 +528,42 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
                 f"⚠️ 檔案無法傳送：找不到 {fname}\n路徑：{host_path}"
             ))
             _t.add_done_callback(_ipc_task_done_callback)
+
+    elif msg_type == "memory_recall":
+        # MemoryBus recall: container agents can query the unified memory store
+        # via IPC and receive results by polling a response file.
+        _mr_query = payload.get("query", "")
+        _mr_k = payload.get("k", 5)
+        _mr_namespace = payload.get("namespace", "")
+        _mr_topic_tag = payload.get("topic_tag", "")
+        _mr_response_file = payload.get("response_file", "")
+        if _mr_query and _mr_response_file:
+            _mr_groups = db.get_all_registered_groups()
+            _mr_match = next((g for g in _mr_groups if g.get("folder") == group_folder), None)
+            _mr_agent_id = _mr_match["jid"] if _mr_match else group_folder
+            t = _asyncio.create_task(_run_memory_recall(
+                _mr_query, _mr_k, _mr_namespace, _mr_topic_tag,
+                _mr_agent_id, _mr_response_file, group_folder,
+            ))
+            t.add_done_callback(_ipc_task_done_callback)
+
+    elif msg_type == "memory_remember":
+        # MemoryBus remember: container agents can store a memory via IPC
+        # and receive an ack by polling a response file.
+        _mm_content = payload.get("content", "")
+        _mm_importance = payload.get("importance", 0.7)
+        _mm_namespace = payload.get("namespace", "")
+        _mm_topic_tag = payload.get("topic_tag", "")
+        _mm_response_file = payload.get("response_file", "")
+        if _mm_content and _mm_response_file:
+            _mm_groups = db.get_all_registered_groups()
+            _mm_match = next((g for g in _mm_groups if g.get("folder") == group_folder), None)
+            _mm_agent_id = _mm_match["jid"] if _mm_match else group_folder
+            t = _asyncio.create_task(_run_memory_remember(
+                _mm_content, _mm_importance, _mm_namespace, _mm_topic_tag,
+                _mm_agent_id, _mm_response_file, group_folder,
+            ))
+            t.add_done_callback(_ipc_task_done_callback)
 
     elif msg_type == "memory_search":
         # 三層記憶系統：冷/暖記憶混合搜尋 — container 可透過 IPC 查詢歷史記憶
@@ -1050,6 +1098,89 @@ async def _run_self_update(jid: str, route_fn: Callable) -> None:
         log.error("self_update: unexpected error: %s", exc)
         if jid:
             await route_fn(jid, f"❌ 更新失敗：{exc}")
+
+
+async def _run_memory_recall(
+    query: str,
+    k: int,
+    namespace: str,
+    topic_tag: str,
+    agent_id: str,
+    response_file: str,
+    group_folder: str,
+) -> None:
+    """Call MemoryBus.recall() and write JSON results to *response_file* atomically.
+
+    The container-side tool polls *response_file* with a 50 ms x 200 loop
+    (10 s total timeout).  An atomic write (tmp + rename) ensures the container
+    never reads a partial JSON.
+    """
+    try:
+        from .memory.memory_bus import MemoryBus
+        _db_conn = db.get_db()
+        bus = MemoryBus(_db_conn, config.GROUPS_DIR)
+        memories = await bus.recall(
+            query=query,
+            agent_id=agent_id,
+            k=k,
+            project=namespace or "",
+        )
+        result_list = [
+            {
+                "memory_id": m.memory_id,
+                "content": m.content,
+                "score": m.score,
+                "source": m.source,
+                "scope": m.scope,
+                "created_at": m.created_at,
+            }
+            for m in memories
+        ]
+        _write_ipc_response(response_file, {"ok": True, "memories": result_list})
+        log.info(
+            "memory_recall IPC: query=%r found %d memories for agent=%s",
+            query, len(result_list), agent_id,
+        )
+    except Exception as exc:
+        log.error("memory_recall IPC error: %s", exc)
+        try:
+            _write_ipc_response(response_file, {"ok": False, "error": str(exc)})
+        except Exception:
+            pass
+
+
+async def _run_memory_remember(
+    content: str,
+    importance: float,
+    namespace: str,
+    topic_tag: str,
+    agent_id: str,
+    response_file: str,
+    group_folder: str,
+) -> None:
+    """Call MemoryBus.remember() and write an ack JSON to *response_file* atomically."""
+    try:
+        from .memory.memory_bus import MemoryBus
+        _db_conn = db.get_db()
+        bus = MemoryBus(_db_conn, config.GROUPS_DIR)
+        memory_id = await bus.remember(
+            content=content,
+            agent_id=agent_id,
+            scope="shared",
+            project=namespace or "",
+            importance=float(importance),
+        )
+        _write_ipc_response(response_file, {"ok": True, "memory_id": memory_id})
+        log.info(
+            "memory_remember IPC: stored memory_id=%s for agent=%s importance=%.2f",
+            memory_id, agent_id, importance,
+        )
+    except Exception as exc:
+        log.error("memory_remember IPC error: %s", exc)
+        try:
+            _write_ipc_response(response_file, {"ok": False, "error": str(exc)})
+        except Exception:
+            pass
 
 
 async def _run_memory_search(

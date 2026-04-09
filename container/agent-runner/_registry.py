@@ -21,6 +21,7 @@ from _tools import (
     tool_cancel_task, tool_pause_task, tool_resume_task,
     tool_run_agent, tool_send_file, tool_start_remote_control,
     tool_self_update, tool_glob, tool_grep, tool_web_fetch,
+    tool_memory_recall, tool_memory_remember,
     _messages_sent_via_tool,
 )
 
@@ -324,6 +325,34 @@ TOOL_DECLARATIONS = [] if not _GOOGLE_AVAILABLE or types is None else [
             required=[],
         ),
     ),
+    types.FunctionDeclaration(
+        name="mcp__evoclaw__memory_recall",
+        description="Query the agent memory store for relevant memories matching a natural-language query.",
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "query": types.Schema(type=types.Type.STRING, description="Natural-language query to search memories"),
+                "k": types.Schema(type=types.Type.INTEGER, description="Maximum number of memories to return (default 5)"),
+                "namespace": types.Schema(type=types.Type.STRING, description="Optional project namespace / scope filter"),
+                "topic_tag": types.Schema(type=types.Type.STRING, description="Optional topic tag for future filtering"),
+            },
+            required=["query"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="mcp__evoclaw__memory_remember",
+        description="Store a new memory in the agent memory store so it can be recalled in future sessions.",
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "content": types.Schema(type=types.Type.STRING, description="Text content to remember"),
+                "importance": types.Schema(type=types.Type.NUMBER, description="Importance weight 0.0-1.0 (default 0.7)"),
+                "namespace": types.Schema(type=types.Type.STRING, description="Optional project namespace / scope"),
+                "topic_tag": types.Schema(type=types.Type.STRING, description="Optional topic tag"),
+            },
+            required=["content"],
+        ),
+    ),
 ]
 
 
@@ -349,6 +378,8 @@ OPENAI_TOOL_DECLARATIONS = [
     {"type": "function", "function": {"name": "mcp__evoclaw__reset_group", "description": "Clear the failure counter for a group, unfreezing it if it was locked in cooldown. Use when a group is stuck and not responding.", "parameters": {"type": "object", "properties": {"jid": {"type": "string", "description": "The JID of the group to reset, e.g. tg:8259652816"}}, "required": ["jid"]}}},
     {"type": "function", "function": {"name": "mcp__evoclaw__start_remote_control", "description": "Start a Claude Code remote-control session. The host spawns `claude remote-control` and sends the URL back to this chat. Use when the user wants to update code or restart EvoClaw.", "parameters": {"type": "object", "properties": {"chat_jid": {"type": "string"}, "sender": {"type": "string"}}, "required": []}}},
     {"type": "function", "function": {"name": "mcp__evoclaw__self_update", "description": "Pull the latest EvoClaw code from git and restart the host process. Use when the user asks to update, upgrade, or restart EvoClaw.", "parameters": {"type": "object", "properties": {"chat_jid": {"type": "string"}}, "required": []}}},
+    {"type": "function", "function": {"name": "mcp__evoclaw__memory_recall", "description": "Query the agent memory store for relevant memories matching a natural-language query.", "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Natural-language query to search memories"}, "k": {"type": "integer", "description": "Maximum number of memories to return (default 5)"}, "namespace": {"type": "string", "description": "Optional project namespace / scope filter"}, "topic_tag": {"type": "string", "description": "Optional topic tag for future filtering"}}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "mcp__evoclaw__memory_remember", "description": "Store a new memory in the agent memory store so it can be recalled in future sessions.", "parameters": {"type": "object", "properties": {"content": {"type": "string", "description": "Text content to remember"}, "importance": {"type": "number", "description": "Importance weight 0.0-1.0 (default 0.7)"}, "namespace": {"type": "string", "description": "Optional project namespace / scope"}, "topic_tag": {"type": "string", "description": "Optional topic tag"}}, "required": ["content"]}}},
 ]
 
 
@@ -372,6 +403,8 @@ CLAUDE_TOOL_DECLARATIONS = [
     {"name": "mcp__evoclaw__reset_group", "description": "Clear the failure counter for a group, unfreezing it if it was locked in cooldown. Use when a group is stuck and not responding.", "input_schema": {"type": "object", "properties": {"jid": {"type": "string", "description": "The JID of the group to reset, e.g. tg:8259652816"}}, "required": ["jid"]}},
     {"name": "mcp__evoclaw__start_remote_control", "description": "Start a Claude Code remote-control session. The host spawns `claude remote-control` and sends the URL back to this chat. Use when the user wants to update code or restart EvoClaw.", "input_schema": {"type": "object", "properties": {"chat_jid": {"type": "string"}, "sender": {"type": "string"}}, "required": []}},
     {"name": "mcp__evoclaw__self_update", "description": "Pull the latest EvoClaw code from git and restart the host process. Use when the user asks to update, upgrade, or restart EvoClaw.", "input_schema": {"type": "object", "properties": {"chat_jid": {"type": "string"}}, "required": []}},
+    {"name": "mcp__evoclaw__memory_recall", "description": "Query the agent memory store for relevant memories matching a natural-language query.", "input_schema": {"type": "object", "properties": {"query": {"type": "string", "description": "Natural-language query to search memories"}, "k": {"type": "integer", "description": "Maximum number of memories to return (default 5)"}, "namespace": {"type": "string", "description": "Optional project namespace / scope filter"}, "topic_tag": {"type": "string", "description": "Optional topic tag for future filtering"}}, "required": ["query"]}},
+    {"name": "mcp__evoclaw__memory_remember", "description": "Store a new memory in the agent memory store so it can be recalled in future sessions.", "input_schema": {"type": "object", "properties": {"content": {"type": "string", "description": "Text content to remember"}, "importance": {"type": "number", "description": "Importance weight 0.0-1.0 (default 0.7)"}, "namespace": {"type": "string", "description": "Optional project namespace / scope"}, "topic_tag": {"type": "string", "description": "Optional topic tag"}}, "required": ["content"]}},
 ]
 
 
@@ -491,6 +524,26 @@ def _execute_tool_inner(name: str, args: dict, chat_jid: str) -> str:
         return tool_start_remote_control(args.get("chat_jid", chat_jid), args.get("sender", ""))
     elif name == "mcp__evoclaw__self_update":
         return tool_self_update(args.get("chat_jid", chat_jid))
+    elif name == "mcp__evoclaw__memory_recall":
+        _mr_query = args.get("query")
+        if not isinstance(_mr_query, str):
+            return "Error: memory_recall requires a 'query' string argument"
+        return tool_memory_recall({
+            "query": _mr_query,
+            "k": args.get("k", 5),
+            "namespace": args.get("namespace", ""),
+            "topic_tag": args.get("topic_tag", ""),
+        })
+    elif name == "mcp__evoclaw__memory_remember":
+        _mm_content = args.get("content")
+        if not isinstance(_mm_content, str):
+            return "Error: memory_remember requires a 'content' string argument"
+        return tool_memory_remember({
+            "content": _mm_content,
+            "importance": args.get("importance", 0.7),
+            "namespace": args.get("namespace", ""),
+            "topic_tag": args.get("topic_tag", ""),
+        })
     # ── Dynamic tools (installed via Skills container_tools:) ─────────────────
     if name in _dynamic_tools:
         try:
