@@ -18,6 +18,11 @@ import sqlite3
 import subprocess
 import threading
 import time
+
+# Windows: CREATE_NO_WINDOW prevents flashing console windows when invoking
+# docker.exe via subprocess.run().  Resolves to 0 on non-Windows platforms
+# (getattr returns the default since the constant only exists on Windows).
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 from datetime import datetime
 from pathlib import Path
 
@@ -1466,7 +1471,8 @@ def _get_containers() -> list:
         result = subprocess.run(
             ["docker", "ps", "--filter", "name=evoclaw-",
              "--format", '{"name":"{{.Names}}","status":"{{.Status}}","image":"{{.Image}}","created_at":"{{.CreatedAt}}"}'],
-            capture_output=True, text=True, timeout=5
+            capture_output=True, text=True, timeout=5,
+            creationflags=_NO_WINDOW,
         )
         containers = []
         for line in result.stdout.strip().splitlines():
@@ -1519,7 +1525,7 @@ def _get_health() -> dict:
         status = "degraded"
     # Docker
     try:
-        r = subprocess.run(["docker", "info"], capture_output=True, timeout=3)
+        r = subprocess.run(["docker", "info"], capture_output=True, timeout=3, creationflags=_NO_WINDOW)
         checks["docker"] = "ok" if r.returncode == 0 else "error"
         if r.returncode != 0:
             status = "degraded"
@@ -1955,7 +1961,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 self._json({"ok": False, "error": "Invalid container name"}, 400)
                 return
             try:
-                subprocess.run(["docker", "stop", name], timeout=10, capture_output=True)
+                subprocess.run(["docker", "stop", name], timeout=10, capture_output=True, creationflags=_NO_WINDOW)
                 self._json({"ok": True})
             except Exception as e:
                 self._json({"ok": False, "error": str(e)})
