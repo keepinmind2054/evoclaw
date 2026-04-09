@@ -1310,6 +1310,26 @@ def get_warm_logs_for_date(jid: str, log_date: str) -> list[dict]:
     return [{"id": r[0], "log_date": r[1], "content": r[2], "created_at": r[3]} for r in rows]
 
 
+def get_unvectorized_warm_logs(limit: int = 10) -> list[dict]:
+    """Return warm log entries not yet vectorized, oldest first."""
+    with _db_lock:
+        db = get_db()
+        rows = db.execute(
+            "SELECT id, jid, content, created_at FROM group_warm_logs "
+            "WHERE vectorized=0 ORDER BY created_at ASC LIMIT ?",
+            (limit,)
+        ).fetchall()
+    return [{"id": r[0], "jid": r[1], "content": r[2], "created_at": r[3]} for r in rows]
+
+
+def mark_warm_log_vectorized(log_id: str) -> None:
+    """Mark a warm log entry as vectorized."""
+    with _db_lock:
+        db = get_db()
+        db.execute("UPDATE group_warm_logs SET vectorized=1 WHERE id=?", (log_id,))
+        db.commit()
+
+
 def delete_warm_logs_before(jid: str, cutoff_ts: float) -> int:
     with _db_lock:
         db = get_db()
