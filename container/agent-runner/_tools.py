@@ -670,6 +670,124 @@ def tool_self_update(chat_jid: str = "") -> str:
         return f"Error: {exc}"
 
 
+def tool_memory_recall(args: dict) -> str:
+    """Query the host MemoryBus via IPC and return relevant memories.
+
+    Writes a memory_recall IPC request then polls a per-request response file
+    until the host writes the result (50 ms x 200 = 10 s timeout).
+
+    Required args:
+        query (str): Natural-language query for semantic / keyword recall.
+    Optional args:
+        k (int):          Maximum number of memories to return (default 5).
+        namespace (str):  Project namespace / scope filter.
+        topic_tag (str):  Forwarded to host for future filtering.
+    """
+    query = args.get("query", "")
+    if not query or not isinstance(query, str):
+        return "Error: memory_recall requires a 'query' string argument"
+
+    k = args.get("k", 5)
+    namespace = args.get("namespace", "")
+    topic_tag = args.get("topic_tag", "")
+
+    try:
+        response_dir = Path(IPC_RESULTS_DIR) / "memory_response"
+        response_dir.mkdir(parents=True, exist_ok=True)
+        response_file = str(response_dir / f"{uuid.uuid4()}.json")
+
+        payload = {
+            "type": "memory_recall",
+            "query": query,
+            "k": k,
+            "namespace": namespace,
+            "topic_tag": topic_tag,
+            "response_file": response_file,
+        }
+        fname = _write_ipc_file(IPC_TASKS_DIR, payload, suffix="memory_recall")
+        _log("IPC", f"type=memory_recall -> {fname.name}")
+
+        response_path = Path(response_file)
+        for _ in range(200):
+            if response_path.exists():
+                try:
+                    data = json.loads(response_path.read_text(encoding="utf-8"))
+                    response_path.unlink(missing_ok=True)
+                    if not data.get("ok"):
+                        return f"Error from memory_recall: {data.get('error', 'unknown error')}"
+                    memories = data.get("memories", [])
+                    if not memories:
+                        return "No memories found."
+                    lines = []
+                    for i, m in enumerate(memories, 1):
+                        score = m.get("score", 0)
+                        source = m.get("source", "?")
+                        lines.append(f"[{i}] (score={score:.2f} source={source}) {m.get('content', '')}")
+                    return "\n".join(lines)
+                except Exception as exc:
+                    return f"Error reading memory_recall response: {exc}"
+            time.sleep(0.05)
+
+        return "Error: memory_recall timed out after 10s waiting for host response"
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
+def tool_memory_remember(args: dict) -> str:
+    """Store a memory in the host MemoryBus via IPC.
+
+    Writes a memory_remember IPC request then polls a per-request response file
+    until the host writes the ack (50 ms x 200 = 10 s timeout).
+
+    Required args:
+        content (str): Text content to remember.
+    Optional args:
+        importance (float): Relevance weight 0.0-1.0 (default 0.7).
+        namespace (str):    Project namespace / scope for the memory.
+        topic_tag (str):    Forwarded to host for future use.
+    """
+    content = args.get("content", "")
+    if not content or not isinstance(content, str):
+        return "Error: memory_remember requires a 'content' string argument"
+
+    importance = args.get("importance", 0.7)
+    namespace = args.get("namespace", "")
+    topic_tag = args.get("topic_tag", "")
+
+    try:
+        response_dir = Path(IPC_RESULTS_DIR) / "memory_response"
+        response_dir.mkdir(parents=True, exist_ok=True)
+        response_file = str(response_dir / f"{uuid.uuid4()}.json")
+
+        payload = {
+            "type": "memory_remember",
+            "content": content,
+            "importance": importance,
+            "namespace": namespace,
+            "topic_tag": topic_tag,
+            "response_file": response_file,
+        }
+        fname = _write_ipc_file(IPC_TASKS_DIR, payload, suffix="memory_remember")
+        _log("IPC", f"type=memory_remember -> {fname.name}")
+
+        response_path = Path(response_file)
+        for _ in range(200):
+            if response_path.exists():
+                try:
+                    data = json.loads(response_path.read_text(encoding="utf-8"))
+                    response_path.unlink(missing_ok=True)
+                    if not data.get("ok"):
+                        return f"Error from memory_remember: {data.get('error', 'unknown error')}"
+                    return "Memory stored."
+                except Exception as exc:
+                    return f"Error reading memory_remember response: {exc}"
+            time.sleep(0.05)
+
+        return "Error: memory_remember timed out after 10s waiting for host response"
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
 def tool_glob(pattern: str, path: str = WORKSPACE) -> str:
     """
     在指定目錄下尋找符合 glob 模式的檔案（支援 ** 遞迴搜尋）。
