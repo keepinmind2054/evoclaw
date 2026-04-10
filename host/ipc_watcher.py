@@ -1048,6 +1048,89 @@ async def _run_self_update(jid: str, route_fn: Callable) -> None:
                 await route_fn(jid, msg)
             return
 
+        # ── Test gate (Issue #530) ────────────────────────────────────────────
+        # Between `git pull` and writing self_update.flag we run a short test
+        # suite.  If it fails we `git reset --hard` back to the pre-pull SHA so
+        # the next restart does NOT pick up broken code.  Without this gate a
+        # bad commit on main would roll straight into a crash-loop that only
+        # pm2's autorestart can (eventually) give up on.
+        #
+        # Skip the gate when:
+        #   * Already up-to-date (nothing to test).
+        #   * AUTO_UPDATE_TEST_CMD is set to empty string (explicit opt-out).
+        _already_up_to_date = "Already up to date." in git_output
+        _test_cmd_raw = os.environ.get(
+            "AUTO_UPDATE_TEST_CMD",
+            "pytest -x --timeout=60 -q tests/",
+        )
+        if (not _already_up_to_date) and _test_cmd_raw.strip():
+            # Capture the pre-pull SHA so we can roll back on test failure.
+            _rev_proc = await asyncio.create_subprocess_exec(
+                "git", "rev-parse", "HEAD@{1}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+            )
+            _rev_stdout, _ = await _rev_proc.communicate()
+            _pre_pull_sha = _rev_stdout.decode("utf-8", errors="replace").strip()
+
+            if jid:
+                await route_fn(jid, "🧪 執行測試閘門...")
+            log.info("self_update: running test gate: %s", _test_cmd_raw)
+
+            import shlex as _shlex
+            _test_argv = _shlex.split(_test_cmd_raw)
+            test_proc = await asyncio.create_subprocess_exec(
+                *_test_argv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=cwd,
+            )
+            try:
+                # Hard cap: 10 minutes for the gate suite.
+                test_stdout, _ = await asyncio.wait_for(
+                    test_proc.communicate(), timeout=600.0
+                )
+                test_rc = test_proc.returncode
+            except asyncio.TimeoutError:
+                try:
+                    test_proc.kill()
+                except Exception:
+                    pass
+                test_stdout = b"(test gate timed out after 600s)"
+                test_rc = -1
+
+            test_output = test_stdout.decode("utf-8", errors="replace")
+            if test_rc != 0:
+                log.error(
+                    "self_update: test gate FAILED (rc=%s) — rolling back to %s",
+                    test_rc, _pre_pull_sha or "HEAD@{1}",
+                )
+                # Roll back the working tree to the pre-pull state.
+                _rollback_target = _pre_pull_sha or "HEAD@{1}"
+                rb_proc = await asyncio.create_subprocess_exec(
+                    "git", "reset", "--hard", _rollback_target,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    cwd=cwd,
+                )
+                try:
+                    await asyncio.wait_for(rb_proc.communicate(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    try:
+                        rb_proc.kill()
+                    except Exception:
+                        pass
+                    log.error("self_update: rollback git reset --hard timed out")
+                if jid:
+                    _tail = test_output[-800:] if len(test_output) > 800 else test_output
+                    await route_fn(jid, (
+                        f"❌ 測試閘門失敗 (exit {test_rc})，已 rollback 到 {_rollback_target[:12]}，"
+                        f"放棄此次更新。\n```\n{_tail}\n```"
+                    ))
+                return
+            log.info("self_update: test gate passed (rc=0)")
+
         # ── pip install -e . (optional, only if project has setup files) ──────
         _pip_marker = _pathlib.Path(cwd) / "pyproject.toml"
         _setup_marker = _pathlib.Path(cwd) / "setup.py"
