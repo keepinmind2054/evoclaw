@@ -902,22 +902,81 @@ def tool_grep(pattern: str, path: str = WORKSPACE, include: str = "*") -> str:
     # Validate include is a plain glob pattern (no path separators)
     if "/" in include or "\\" in include or ".." in include:
         return "Error: include parameter must be a plain filename glob (e.g. '*.py'), not a path"
+    # Issue #526 (L1 OOM fix): stream grep stdout in small chunks and kill the
+    # grep process the moment we have 8 KB of output.  The previous version used
+    # subprocess.run(capture_output=True), which reads the *entire* stdout into
+    # a Python str before truncating — a wide pattern on a repo-mounted
+    # workspace could produce hundreds of MB of matches and OOM the container
+    # (exit 137) before the truncation line was ever executed.  With Popen +
+    # bounded read() + proc.kill() the hard cap is enforced at the kernel pipe
+    # level, so the caller never allocates more than ~8 KB for grep output.
+    import threading as _threading
+    _GREP_MAX_BYTES = 8192
+    _GREP_TIMEOUT = 30.0
+    proc = None
+    watchdog = None
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             ["grep", "-r", "-n", "--include", include, pattern, path],
-            capture_output=True, text=True, timeout=30,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
         )
-        output = result.stdout
-        if result.stderr and not output:
-            output = result.stderr
-        if len(output) > 8000:
-            output = output[:8000] + "\n... (truncated, too many matches)"
+        # Hard timeout watchdog: Popen has no built-in timeout= for chunked reads.
+        watchdog = _threading.Timer(_GREP_TIMEOUT, proc.kill)
+        watchdog.daemon = True
+        watchdog.start()
+
+        buf = bytearray()
+        truncated = False
+        while True:
+            chunk = proc.stdout.read(4096)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            if len(buf) >= _GREP_MAX_BYTES:
+                truncated = True
+                proc.kill()  # stop grep scanning the filesystem immediately
+                break
+
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+
+        # Only drain stderr if stdout was empty (diagnostic / no-match path).
+        if not buf:
+            try:
+                err = proc.stderr.read(2048) or b""
+            except Exception:
+                err = b""
+            if err:
+                buf.extend(err)
+
+        # Detect timeout: watchdog fired and killed the process before EOF.
+        # grep exit status: 0=matches found, 1=no matches, 2+=error, -9/SIGKILL=killed.
+        _killed_by_watchdog = (proc.returncode is not None and proc.returncode < 0 and not truncated and not buf)
+        if _killed_by_watchdog:
+            return f"Error: grep timed out after {int(_GREP_TIMEOUT)}s"
+
+        output = bytes(buf[:_GREP_MAX_BYTES]).decode("utf-8", errors="replace")
+        if truncated:
+            output += "\n... (truncated at 8 KB — refine pattern or narrow include)"
         return output or "(no matches found)"
-    except subprocess.TimeoutExpired:
-        return "Error: grep timed out after 30s"
     except Exception as e:
         return f"Error: {e}"
+    finally:
+        if watchdog is not None:
+            watchdog.cancel()
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+                proc.wait(timeout=2)
+            except Exception:
+                pass
 
 
 def tool_web_fetch(url: str) -> str:

@@ -1,3 +1,13 @@
+## [1.27.1] — 2026-04-10
+
+### Fixed
+- **`tool_grep` OOM via unbounded stdout read.** `container/agent-runner/_tools.py` previously used `subprocess.run(capture_output=True)` and only truncated the grep output **after** the full stdout had been read into a Python string. A wide pattern against a repo-mounted workspace could produce hundreds of MB of matches and OOM the container (exit 137) before the 8 KB truncation line was ever reached — the 8 KB cap was an illusion. Rewrote `tool_grep` using `Popen` + chunked `read(4096)` that kills the grep process the moment the 8 KB byte budget is hit, so the hard cap is enforced at the kernel pipe level. A `threading.Timer` watchdog replaces the previous `run(timeout=30)` behavior. (#526)
+
+### Technical Details
+- **Modified Files**: `container/agent-runner/_tools.py`
+- **New Files**: `tests/test_tool_grep_streaming.py` — regression test seeding ~200 KB of matching lines and asserting `tool_grep` returns < 9 KB, plus a Popen spy verifying `proc.kill()` is invoked when the budget is reached.
+- **Breaking Changes**: None. Callers of `tool_grep` still see at most 8 KB plus a truncation marker; the marker text changed from `... (truncated, too many matches)` to `... (truncated at 8 KB — refine pattern or narrow include)` to hint at the actual constraint.
+
 ## [1.27.0] — 2026-04-10
 
 ### Added
