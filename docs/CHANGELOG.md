@@ -1,3 +1,19 @@
+## [1.27.3] — 2026-04-10
+
+### Added
+- **Test gate + scheduled auto-update trigger for `self_update`.** `_run_self_update` in `host/ipc_watcher.py` now runs a short pytest suite between `git pull` and writing `self_update.flag`; on non-zero exit it `git reset --hard`s back to the pre-pull SHA and aborts the update, so a broken commit on `main` can no longer roll straight into an `os.execv` restart. A new `host/auto_update.py` module adds an optional scheduled loop (gated on `AUTO_UPDATE_ENABLED=true`, default off) that `git fetch`es every `AUTO_UPDATE_INTERVAL_SECS` (default 3600) and invokes `_run_self_update` whenever local HEAD is behind `origin/<branch>`. Also documents — in an inline comment in `host/main.py` — why the restart continues to use `os.execv` rather than shelling out to `pm2 restart` (keeps supervisor PID stable, no dependency on pm2 being on PATH / daemon alive, pm2 `autorestart: true` remains the crash safety net). (#530)
+
+### Technical Details
+- **New Files**: `host/auto_update.py`, `tests/test_self_update_test_gate.py`
+- **Modified Files**: `host/ipc_watcher.py` (test gate block after git pull), `host/config.py` (`AUTO_UPDATE_ENABLED`, `AUTO_UPDATE_INTERVAL_SECS`, `AUTO_UPDATE_BRANCH`, `AUTO_UPDATE_TEST_CMD`), `host/main.py` (wires `auto_update_loop` into the main gather, adds os.execv rationale comment)
+- **New Env Vars**:
+  - `AUTO_UPDATE_ENABLED` (default `false`) — enable the scheduled auto-update loop.
+  - `AUTO_UPDATE_INTERVAL_SECS` (default `3600`, min `60`) — seconds between fetch checks.
+  - `AUTO_UPDATE_BRANCH` (default `main`) — remote branch to track.
+  - `AUTO_UPDATE_TEST_CMD` (default `pytest -x --timeout=60 -q tests/`) — test command run inside `_run_self_update` after `git pull`. Set to empty string to skip the gate (not recommended).
+- **Breaking Changes**: None. Default behaviour (no env vars set) is unchanged except that manual IPC-triggered `self_update` calls now run the test gate too — updates that fail tests will be rolled back instead of restarting. This is the intended safety improvement.
+- **Security**: The scheduled loop bypasses the `SELF_UPDATE_TOKEN` IPC gate intentionally. That token exists to block prompt-injection attacks flowing from an LLM agent into the IPC handler; the scheduled loop runs in trusted host code with no attacker-controlled input.
+
 ## [1.27.2] — 2026-04-10
 
 ### Changed

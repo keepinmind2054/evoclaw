@@ -1789,6 +1789,13 @@ async def main() -> None:
             health_monitor_loop(_stop_event),
             _orphan_cleanup_loop(_stop_event),
         ]
+        # Issue #530: scheduled auto-update (git fetch → pull → test → restart)
+        # Gated by AUTO_UPDATE_ENABLED; no-op otherwise.
+        try:
+            from .auto_update import auto_update_loop
+            _gather_tasks.append(auto_update_loop(_stop_event))
+        except Exception as _au_exc:  # pragma: no cover - defensive
+            log.warning("auto_update loop not started: %s", _au_exc)
         # Phase 1 (UnifiedClaw): WebSocket bridge — coexists with file IPC
         if _ws_bridge is not None:
             _gather_tasks.append(_ws_bridge.start())
@@ -1851,7 +1858,21 @@ async def main() -> None:
     log.info("EvoClaw shut down cleanly.")
 
     # Self-update: replace current process with a fresh one so updated code is loaded.
-    # os.execv() replaces the running process in-place (Unix) or spawns a replacement (Windows).
+    #
+    # Design note (Issue #530): we intentionally use `os.execv` here rather than
+    # shelling out to `pm2 restart evoclaw`.  Rationale:
+    #   * os.execv keeps the pm2 supervisor PID stable — pm2 sees a single
+    #     long-lived worker, not a parent that exited.  Restart counters and
+    #     uptime stats stay sensible.
+    #   * `pm2 restart` would require pm2 to be on PATH and the pm2 daemon to
+    #     be running inside this environment; in edge cases (e.g. pm2 daemon
+    #     crashed, or EvoClaw launched directly for debugging) that call
+    #     would hang or fail and the update would get stuck.
+    #   * pm2's `autorestart: true` is still our crash safety net: if os.execv
+    #     itself fails or the replacement process crashes at startup, pm2
+    #     will respawn us.
+    # If you are tempted to "fix" this by switching to pm2 restart, read the
+    # issue #530 discussion first.
     if _self_update_requested:
         import sys as _sys_restart
         log.info("Restarting EvoClaw for self-update via os.execv()...")

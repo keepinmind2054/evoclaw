@@ -243,6 +243,25 @@ EDITABLE_ENV_KEYS: frozenset = frozenset({
 # Database (optional — defaults to SQLite)
 DATABASE_URL: str = os.environ.get("DATABASE_URL", "")  # e.g. postgresql://user:pass@host:5432/dbname
 
+# Auto-update (Issue #530)
+# Enable the scheduled loop that periodically runs `git fetch` against the
+# project repo and, when HEAD is behind origin/<branch>, calls the existing
+# _run_self_update path (test-gated `git pull` + `self_update.flag` + os.execv
+# restart).  Defaults OFF so existing deployments see zero behaviour change.
+AUTO_UPDATE_ENABLED: bool = os.environ.get("AUTO_UPDATE_ENABLED", "false").lower() == "true"
+# Interval between checks.  Minimum 60s enforced inside the loop.
+AUTO_UPDATE_INTERVAL_SECS: int = _env_int("AUTO_UPDATE_INTERVAL_SECS", 3600, minimum=60)
+# Branch to track.  Typically "main".
+AUTO_UPDATE_BRANCH: str = os.environ.get("AUTO_UPDATE_BRANCH", "main")
+# Test command run by _run_self_update between `git pull` and writing the
+# restart flag.  A non-zero exit causes `git reset --hard` rollback to the
+# pre-pull SHA, and the flag is not written.  Set to empty string to skip the
+# gate entirely (not recommended — a broken commit on main would crash-loop
+# the host until pm2 autorestart gives up).
+AUTO_UPDATE_TEST_CMD: str = os.environ.get(
+    "AUTO_UPDATE_TEST_CMD", "pytest -x --timeout=60 -q tests/"
+)
+
 # Multi-instance Leader Election
 LEADER_ELECTION_ENABLED: bool = os.environ.get("LEADER_ELECTION_ENABLED", "false").lower() == "true"
 LEADER_HEARTBEAT_INTERVAL: int = _env_int("LEADER_HEARTBEAT_INTERVAL", 10)  # p12b fix: use _env_int for safe coercion
