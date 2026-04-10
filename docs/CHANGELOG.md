@@ -1,3 +1,13 @@
+## [1.27.2] — 2026-04-10
+
+### Changed
+- **Lowered `CONTAINER_MEMORY` default from `2g` to `512m`.** Post-#527 analysis showed steady-state agent-process RSS is 80-150 MB (Python + one lazy-loaded LLM SDK + stdlib; no eager pandas/numpy/matplotlib imports). The 2 GB default was masking a single `tool_grep` bug (fixed in #527) and was never calibrated to real footprint. 512 MB leaves ~3× headroom over steady state while cutting the worst-case aggregate (with `MAX_CONCURRENT_CONTAINERS=5`) from 10 GB to 2.5 GB — comfortable on hosts with ≤16 GB RAM. (#528)
+
+### Technical Details
+- **Modified Files**: `host/config.py`
+- **Breaking Changes**: Users running very long-context openai/claude sessions may want to override `CONTAINER_MEMORY=768m` in `.env`. Do NOT revert to `2g` — the comment in `config.py` now documents the full history.
+- **Depends on**: #527 (tool_grep streaming fix). Without it, 512 MB is unsafe under wide-grep workloads.
+
 ## [1.27.1] — 2026-04-10
 
 ### Fixed
