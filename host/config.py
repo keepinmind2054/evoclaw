@@ -99,15 +99,29 @@ IDLE_TIMEOUT = _env_int("IDLE_TIMEOUT", 30 * 60 * 1000) / 1000
 MAX_CONCURRENT_CONTAINERS = _env_int("MAX_CONCURRENT_CONTAINERS", 5, minimum=1)
 # Per-container resource limits (Issue #61): prevent runaway agents from OOM-killing the host.
 # Set to empty string "" to disable the limit (e.g. CONTAINER_MEMORY="" CONTAINER_CPUS="").
-# Default raised to 2g (from 1g): loading a single LLM SDK (google-genai/openai/anthropic)
-# uses 50-200 MB; with Python overhead + conversation history + response buffers,
-# 1g was insufficient for complex multi-turn sessions → OOM exit 137.
-# The lazy-import fix (agent.py) also reduces footprint, but 2g provides a safe margin.
+#
+# CONTAINER_MEMORY history:
+#   1g  (initial)   — too tight; complex multi-turn sessions OOM'd on SDK load
+#   2g  (bump)      — raised to mask memory bloat; never actually needed at steady state
+#   512m (current)  — Issue #528 / PR after #527 (tool_grep streaming fix).
+#     Post-bug analysis showed steady-state agent-process RSS is 80-150 MB:
+#     Python + stdlib ~15 MB, local modules ~5 MB, one lazy-loaded LLM SDK
+#     (google-genai / openai / anthropic) 40-90 MB. `_tools.py` has ZERO
+#     eager imports of pandas/numpy/matplotlib/lxml — data-science packages
+#     are only pulled in when the agent shells out via `tool_bash`, and those
+#     subprocesses release memory on exit. The 2g default was masking a single
+#     bug in `tool_grep` (subprocess.run capture_output=True reading full
+#     stdout before truncating) that has now been fixed in #527. 512 MB gives
+#     ~3× headroom over the real working set.
+#   Override: if you run extremely long openai/claude contexts, set
+#     CONTAINER_MEMORY=768m (or higher) in .env. Do NOT revert to 2g — 2g was
+#     never calibrated, it was a band-aid.
+#
 # BUG-FIX: os.environ.get() alone misses values written in the .env file because
 # read_env_file() does NOT inject into os.environ.  Use the same two-level fallback
 # pattern as ENABLED_CHANNELS: env-var takes priority, then .env file, then default.
 _env_file_resources = read_env_file(["CONTAINER_MEMORY", "CONTAINER_CPUS"])
-CONTAINER_MEMORY = os.environ.get("CONTAINER_MEMORY") or _env_file_resources.get("CONTAINER_MEMORY", "2g")
+CONTAINER_MEMORY = os.environ.get("CONTAINER_MEMORY") or _env_file_resources.get("CONTAINER_MEMORY", "512m")
 CONTAINER_CPUS = os.environ.get("CONTAINER_CPUS") or _env_file_resources.get("CONTAINER_CPUS", "1.0")
 # CONTAINER_PIDS_LIMIT: maximum number of processes the container may spawn.
 # Prevents fork bombs inside an untrusted agent container.
