@@ -1,3 +1,12 @@
+## [1.27.4] — 2026-04-11
+
+### Fixed
+- **`AUTO_UPDATE_*` keys in `.env` silently ignored.** `host/config.py` read the new #530 auto-update keys via plain `os.environ.get(...)`, but EvoClaw's `.env` loader (`host/env.py:read_env_file`) is deliberately non-polluting — it returns a dict, it does not set `os.environ[k]`. Result: putting `AUTO_UPDATE_ENABLED=true` in `.env` had no effect; the loop stayed disabled until operators also set a shell env var. Fixed by applying the same two-level fallback pattern already used by `CONTAINER_MEMORY` / `ENABLED_CHANNELS` (env var → `.env` file → default) to all four `AUTO_UPDATE_*` keys. `_run_self_update` in `host/ipc_watcher.py` now reads `AUTO_UPDATE_TEST_CMD` via the config module (with env-var override still winning) instead of hitting `os.environ` twice. (#532)
+
+### Technical Details
+- **Modified Files**: `host/config.py`, `host/ipc_watcher.py`
+- **Breaking Changes**: None. Shell env-var override still wins over `.env`; the only behaviour change is that operators who put `AUTO_UPDATE_*` in `.env` (as the #530 README said to) now actually get what they asked for.
+
 ## [1.27.3] — 2026-04-10
 
 ### Added
