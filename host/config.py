@@ -248,18 +248,43 @@ DATABASE_URL: str = os.environ.get("DATABASE_URL", "")  # e.g. postgresql://user
 # project repo and, when HEAD is behind origin/<branch>, calls the existing
 # _run_self_update path (test-gated `git pull` + `self_update.flag` + os.execv
 # restart).  Defaults OFF so existing deployments see zero behaviour change.
-AUTO_UPDATE_ENABLED: bool = os.environ.get("AUTO_UPDATE_ENABLED", "false").lower() == "true"
+#
+# BUG-FIX (#530 follow-up): `read_env_file()` does NOT populate os.environ,
+# so a plain `os.environ.get("AUTO_UPDATE_ENABLED")` would silently ignore
+# the value written in `.env`.  Use the same two-level fallback pattern as
+# CONTAINER_MEMORY / ENABLED_CHANNELS: env-var wins, then .env file, then default.
+_env_file_autoupdate = read_env_file([
+    "AUTO_UPDATE_ENABLED",
+    "AUTO_UPDATE_INTERVAL_SECS",
+    "AUTO_UPDATE_BRANCH",
+    "AUTO_UPDATE_TEST_CMD",
+])
+AUTO_UPDATE_ENABLED: bool = (
+    os.environ.get("AUTO_UPDATE_ENABLED")
+    or _env_file_autoupdate.get("AUTO_UPDATE_ENABLED", "false")
+).lower() == "true"
 # Interval between checks.  Minimum 60s enforced inside the loop.
-AUTO_UPDATE_INTERVAL_SECS: int = _env_int("AUTO_UPDATE_INTERVAL_SECS", 3600, minimum=60)
+try:
+    _auto_upd_interval_raw = (
+        os.environ.get("AUTO_UPDATE_INTERVAL_SECS")
+        or _env_file_autoupdate.get("AUTO_UPDATE_INTERVAL_SECS", "3600")
+    )
+    AUTO_UPDATE_INTERVAL_SECS: int = max(60, int(_auto_upd_interval_raw))
+except (ValueError, TypeError):
+    AUTO_UPDATE_INTERVAL_SECS = 3600
 # Branch to track.  Typically "main".
-AUTO_UPDATE_BRANCH: str = os.environ.get("AUTO_UPDATE_BRANCH", "main")
+AUTO_UPDATE_BRANCH: str = (
+    os.environ.get("AUTO_UPDATE_BRANCH")
+    or _env_file_autoupdate.get("AUTO_UPDATE_BRANCH", "main")
+)
 # Test command run by _run_self_update between `git pull` and writing the
 # restart flag.  A non-zero exit causes `git reset --hard` rollback to the
 # pre-pull SHA, and the flag is not written.  Set to empty string to skip the
 # gate entirely (not recommended — a broken commit on main would crash-loop
 # the host until pm2 autorestart gives up).
-AUTO_UPDATE_TEST_CMD: str = os.environ.get(
-    "AUTO_UPDATE_TEST_CMD", "pytest -x --timeout=60 -q tests/"
+AUTO_UPDATE_TEST_CMD: str = (
+    os.environ.get("AUTO_UPDATE_TEST_CMD")
+    or _env_file_autoupdate.get("AUTO_UPDATE_TEST_CMD", "pytest -x --timeout=60 -q tests/")
 )
 
 # Multi-instance Leader Election

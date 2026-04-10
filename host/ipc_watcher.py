@@ -1059,9 +1059,12 @@ async def _run_self_update(jid: str, route_fn: Callable) -> None:
         #   * Already up-to-date (nothing to test).
         #   * AUTO_UPDATE_TEST_CMD is set to empty string (explicit opt-out).
         _already_up_to_date = "Already up to date." in git_output
+        # Honour env-var override, then fall back to config (which itself
+        # reads .env).  Matches the two-level pattern used elsewhere so
+        # operators editing .env see their changes take effect after restart.
         _test_cmd_raw = os.environ.get(
             "AUTO_UPDATE_TEST_CMD",
-            "pytest -x --timeout=60 -q tests/",
+            getattr(config, "AUTO_UPDATE_TEST_CMD", "pytest -x --timeout=60 -q tests/"),
         )
         if (not _already_up_to_date) and _test_cmd_raw.strip():
             # Capture the pre-pull SHA so we can roll back on test failure.
