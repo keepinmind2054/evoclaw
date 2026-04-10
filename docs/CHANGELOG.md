@@ -1,3 +1,14 @@
+## [1.27.0] — 2026-04-10
+
+### Added
+- **Formal contribution workflow + CI enforcement.** `CONTRIBUTING.md` now documents the `issue → PR → merge → CHANGELOG → README` flow end-to-end, the PR template gains a **Linked Issue** slot plus checklist items, and a new `.github/workflows/pr-checks.yml` gates PRs on two rules: (1) PR body must contain `Closes/Fixes/Resolves/Refs #N` (escape hatch: `no-issue` label); (2) if the PR touches `host/`, `container/`, `scripts/`, `Makefile`, or `.env.example`, then `docs/CHANGELOG.md` must also be modified (escape hatch: `skip-changelog` label). The workflow is pure bash + `gh` CLI — no third-party actions. (#522)
+
+### Technical Details
+- **New Files**: `.github/workflows/pr-checks.yml`
+- **Modified Files**: `.github/PULL_REQUEST_TEMPLATE.md`, `CONTRIBUTING.md`
+- **New Labels (must be created manually in the repo settings or first use)**: `no-issue`, `skip-changelog`
+- **Breaking Changes**: Open PRs that don't link an issue in the body will start failing CI after this merges. Fix by editing the PR body to include `Closes #N` (or add the `no-issue` label).
+
 ## [1.26.2] — 2026-04-09
 
 ### Fixed

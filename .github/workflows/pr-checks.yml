@@ -1,0 +1,64 @@
+name: PR checks
+
+# Lightweight PR metadata gate that enforces the issue → PR → merge → CHANGELOG
+# workflow documented in CONTRIBUTING.md. Intentionally plain bash + gh CLI so
+# no third-party actions need to be audited.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, reopened, synchronize, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  linked-issue:
+    name: PR body links an issue
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require issue link in PR body
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          if printf '%s' "$PR_LABELS" | grep -q '"no-issue"'; then
+            echo "PR has 'no-issue' label — skipping issue link check."
+            exit 0
+          fi
+          if ! printf '%s' "$PR_BODY" | grep -Eqi '(closes|fixes|resolves|refs)[[:space:]]+#[0-9]+'; then
+            echo "::error::PR body must reference an issue with 'Closes #N', 'Fixes #N', 'Resolves #N', or 'Refs #N'. Add the 'no-issue' label if this PR genuinely has no tracking issue."
+            exit 1
+          fi
+          echo "PR body links to an issue."
+
+  changelog:
+    name: CHANGELOG updated for runtime changes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require CHANGELOG update when runtime source changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          if printf '%s' "$PR_LABELS" | grep -q '"skip-changelog"'; then
+            echo "PR has 'skip-changelog' label — skipping CHANGELOG check."
+            exit 0
+          fi
+          CHANGED=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json files --jq '.files[].path')
+          echo "Files changed in this PR:"
+          printf '%s\n' "$CHANGED"
+          if ! printf '%s\n' "$CHANGED" | grep -Eq '^(host/|container/|scripts/|Makefile|\.env\.example)'; then
+            echo "No runtime source paths touched — CHANGELOG update not required."
+            exit 0
+          fi
+          if ! printf '%s\n' "$CHANGED" | grep -q '^docs/CHANGELOG\.md$'; then
+            echo "::error::This PR modifies runtime source (host/, container/, scripts/, Makefile, or .env.example) but does not update docs/CHANGELOG.md. Add an entry to docs/CHANGELOG.md, or add the 'skip-changelog' label if this change legitimately does not warrant one."
+            exit 1
+          fi
+          echo "docs/CHANGELOG.md is updated."
