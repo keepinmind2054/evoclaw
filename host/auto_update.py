@@ -23,11 +23,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess
+import sys
 from typing import Callable
 
 from . import config
 
 log = logging.getLogger(__name__)
+
+# Issue #534: Windows — suppress the transient cmd.exe flash when we spawn
+# `git fetch` and `git rev-list` from the scheduled loop.  No-op on Linux.
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 async def _noop_route(_jid: str, _text: str) -> None:  # pragma: no cover - trivial
@@ -47,6 +53,7 @@ async def _git_is_behind(cwd: str, branch: str) -> bool:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         cwd=cwd,
+        creationflags=_NO_WINDOW,
     )
     try:
         await asyncio.wait_for(fetch_proc.communicate(), timeout=60.0)
@@ -67,6 +74,7 @@ async def _git_is_behind(cwd: str, branch: str) -> bool:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
+        creationflags=_NO_WINDOW,
     )
     try:
         rl_out, _ = await asyncio.wait_for(rl_proc.communicate(), timeout=30.0)

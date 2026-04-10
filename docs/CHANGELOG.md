@@ -1,3 +1,12 @@
+## [1.27.5] — 2026-04-11
+
+### Fixed
+- **Transient console windows flashing on Windows during self-update and auto-update.** `host/ipc_watcher.py` (6 subprocess call sites: claude remote-control, git pull, git rev-parse, pytest gate, git reset --hard, pip install) and the new `host/auto_update.py` (git fetch, git rev-list) did not pass `creationflags=CREATE_NO_WINDOW` when spawning child processes. On Windows this caused a brief `cmd.exe` / `console` window to pop up for every spawn — now visible every hour once `AUTO_UPDATE_ENABLED=true` was rolled out in production. `host/container_runner.py` and `host/dashboard.py` already had this handled via a `_NO_WINDOW` constant; applied the same pattern to the two remaining modules. Linux behaviour unchanged (`_NO_WINDOW = 0` is a no-op). (#534)
+
+### Technical Details
+- **Modified Files**: `host/ipc_watcher.py` (added `_NO_WINDOW` constant + `creationflags` on all 6 `create_subprocess_exec` calls), `host/auto_update.py` (same, 2 calls).
+- **Breaking Changes**: None.
+
 ## [1.27.4] — 2026-04-11
 
 ### Fixed

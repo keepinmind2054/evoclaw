@@ -4,12 +4,19 @@ import importlib
 import json
 import logging
 import os
+import subprocess as _subprocess
 import sys as _sys
 import pathlib as _pathlib
 import time
 import uuid
 from pathlib import Path
 from typing import Callable, Awaitable
+
+# Issue #534: Windows — pass CREATE_NO_WINDOW to every spawned subprocess so
+# git.exe, python.exe (pytest), pip.exe, claude.exe etc. do NOT flash a
+# transient console window onto the user's desktop.  On non-Windows this is 0,
+# which is a no-op when OR'd into creationflags.
+_NO_WINDOW = _subprocess.CREATE_NO_WINDOW if _sys.platform == "win32" else 0
 
 from . import config, db
 from .group_folder import is_valid_group_folder
@@ -950,6 +957,7 @@ async def _run_start_remote_control(jid: str, sender: str, route_fn: Callable) -
             stderr=_stderr_fh,
             cwd=cwd,
             start_new_session=True,
+            creationflags=_NO_WINDOW,
         )
     except Exception as exc:
         log.error("remote_control: spawn failed: %s", exc)
@@ -1026,6 +1034,7 @@ async def _run_self_update(jid: str, route_fn: Callable) -> None:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             cwd=cwd,
+            creationflags=_NO_WINDOW,
         )
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60.0)
@@ -1073,6 +1082,7 @@ async def _run_self_update(jid: str, route_fn: Callable) -> None:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
+                creationflags=_NO_WINDOW,
             )
             _rev_stdout, _ = await _rev_proc.communicate()
             _pre_pull_sha = _rev_stdout.decode("utf-8", errors="replace").strip()
@@ -1088,6 +1098,7 @@ async def _run_self_update(jid: str, route_fn: Callable) -> None:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
+                creationflags=_NO_WINDOW,
             )
             try:
                 # Hard cap: 10 minutes for the gate suite.
@@ -1116,6 +1127,7 @@ async def _run_self_update(jid: str, route_fn: Callable) -> None:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
                     cwd=cwd,
+                    creationflags=_NO_WINDOW,
                 )
                 try:
                     await asyncio.wait_for(rb_proc.communicate(), timeout=30.0)
@@ -1143,6 +1155,7 @@ async def _run_self_update(jid: str, route_fn: Callable) -> None:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
+                creationflags=_NO_WINDOW,
             )
             try:
                 pip_out, _ = await asyncio.wait_for(pip_proc.communicate(), timeout=120.0)
