@@ -251,6 +251,12 @@ class TelegramChannel:
         delivering updates.  In a healthy group, messages arrive regularly; in
         quiet groups the watchdog is a safety net that only fires after 5 full
         minutes of silence.
+
+        Issue #536 fix: when connect() fails (e.g. network is down), the
+        watchdog must NOT exit permanently.  Instead it retries with
+        exponential backoff (60s → 120s → ... cap at 900s) until connect()
+        succeeds or the app is shut down.  Only Conflict and auth-failure
+        exceptions are fatal — those cannot be recovered by waiting.
         """
         log.debug("Telegram poll watchdog started (threshold=%ds)", _POLL_SILENCE_THRESHOLD_S)
         while self._app is not None and self._app.running:
@@ -268,12 +274,46 @@ class TelegramChannel:
                     await self.disconnect()
                 except Exception as _disc_exc:
                     log.warning("Telegram watchdog: disconnect failed: %s", _disc_exc)
-                try:
-                    await self.connect()
-                except Exception as _conn_exc:
-                    log.error("Telegram watchdog: reconnect failed: %s", _conn_exc)
-                # connect() starts a new watchdog task; this one exits.
-                return
+
+                # Retry connect() with exponential backoff until it succeeds.
+                # Only bail on Conflict or auth failures (unrecoverable).
+                _wd_backoff = 60
+                _WD_BACKOFF_CAP = 900  # 15 minutes
+                while True:
+                    if self._app is None:
+                        log.debug("Telegram watchdog: app is None, exiting")
+                        return
+                    try:
+                        await self.connect()
+                        # connect() succeeded and started a new watchdog → this
+                        # one can exit cleanly.
+                        log.info("Telegram watchdog: reconnect succeeded after backoff")
+                        return
+                    except Exception as _conn_exc:
+                        _exc_str = str(_conn_exc).lower()
+                        # Conflict / auth failures are unrecoverable — don't
+                        # burn CPU retrying a revoked token or a duplicate bot.
+                        if any(kw in _exc_str for kw in (
+                            "conflict", "unauthorized", "invalid token",
+                            "forbidden", "bot was kicked",
+                        )):
+                            log.critical(
+                                "Telegram watchdog: unrecoverable error — %s: %s. "
+                                "Watchdog exiting. Fix the issue and restart.",
+                                type(_conn_exc).__name__, _conn_exc,
+                            )
+                            return
+                        log.warning(
+                            "Telegram watchdog: reconnect failed (%s: %s) — "
+                            "retrying in %ds",
+                            type(_conn_exc).__name__, _conn_exc, _wd_backoff,
+                        )
+                        # Wait with backoff; bail early if app is shut down.
+                        try:
+                            await asyncio.sleep(_wd_backoff)
+                        except asyncio.CancelledError:
+                            return
+                        _wd_backoff = min(_wd_backoff * 2, _WD_BACKOFF_CAP)
         log.debug("Telegram poll watchdog exiting (app stopped)")
 
     # Telegram hard limit is 4096 UTF-16 code units; use 4000 for a safety margin.

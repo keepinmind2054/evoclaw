@@ -1,3 +1,12 @@
+## [1.27.6] — 2026-04-14
+
+### Fixed
+- **Telegram watchdog permanently dies after 5 failed reconnect attempts.** When the staleness watchdog in `host/channels/telegram_channel.py:_poll_watchdog` detected stale polling and attempted to reconnect, a transient network outage (e.g. DNS failure) would cause `connect()` to exhaust its 5-attempt retry limit and raise. The watchdog caught the exception, logged it, then **returned** — permanently killing the watchdog task. No new reconnect would ever be attempted, leaving the bot unreachable until a manual `pm2 restart`. Fixed by replacing the single-shot `connect()` call with an indefinite retry loop using exponential backoff (60s → 120s → ... cap at 900s). Conflict and auth-failure exceptions still exit immediately (unrecoverable). (#536)
+
+### Technical Details
+- **Modified Files**: `host/channels/telegram_channel.py` (`_poll_watchdog` method)
+- **Breaking Changes**: None. The watchdog now survives network outages instead of permanently dying. Existing behaviour for Conflict/auth errors is unchanged (immediate exit with CRITICAL log).
+
 ## [1.27.5] — 2026-04-11
 
 ### Fixed
