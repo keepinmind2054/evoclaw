@@ -1,3 +1,13 @@
+## [1.27.7] — 2026-04-16
+
+### Fixed
+- **Container OOM (exit 137) caused by HEALTHCHECK spawning a second Python process.** The Dockerfile HEALTHCHECK ran `python3 -c "import anthropic, openai; import google.genai"` every 30 seconds inside the same cgroup as the agent. Each healthcheck process loaded all three LLM SDKs (~80-100 MB), and when it coincided with the agent's LLM API call, combined memory exceeded the cgroup limit. Measured: agent steady-state 66 MiB → 147 MiB when healthcheck fires. Replaced with `HEALTHCHECK NONE` — agent containers are run-to-completion (seconds to minutes), not long-lived services. (#539)
+
+### Technical Details
+- **Modified Files**: `container/Dockerfile`
+- **Breaking Changes**: None. Requires `docker build -t evoclaw-agent:latest container/` to rebuild the image.
+- **Root cause evidence**: 4 historical OOM events all correlated with LLM API calls (the timing window where healthcheck + API call overlap). Retries succeeded because healthcheck happened to not be running during the retry.
+
 ## [1.27.6] — 2026-04-14
 
 ### Fixed
