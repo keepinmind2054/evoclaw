@@ -3,6 +3,88 @@ import gc
 import json, os, time, random, uuid, traceback
 from pathlib import Path
 
+
+# ── Issue #541: RSS instrumentation ───────────────────────────────────────────
+# Read /proc/self/status to capture VmRSS / VmPeak at LLM call boundaries.
+# Lets us pinpoint which step spikes when a container OOMs (exit 137).
+def _rss_snapshot() -> dict:
+    """Return {'rss_mb': N, 'peak_mb': N} or {} if unreadable (non-Linux)."""
+    try:
+        with open("/proc/self/status", "r") as f:
+            data = {}
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    data["rss_mb"] = int(line.split()[1]) // 1024
+                elif line.startswith("VmPeak:"):
+                    data["peak_mb"] = int(line.split()[1]) // 1024
+                if "rss_mb" in data and "peak_mb" in data:
+                    break
+            return data
+    except Exception:
+        return {}
+
+
+def _log_rss(prefix: str, **extra) -> None:
+    """Log VmRSS/VmPeak at a checkpoint. extra={} for arbitrary kv pairs."""
+    snap = _rss_snapshot()
+    if not snap:
+        return
+    parts = [f"rss={snap.get('rss_mb', '?')}MB", f"peak={snap.get('peak_mb', '?')}MB"]
+    for k, v in extra.items():
+        parts.append(f"{k}={v}")
+    _log("📊 MEM", f"{prefix} " + " ".join(parts))
+
+
+# ── Issue #541: byte-based history cap ────────────────────────────────────────
+# Existing cap at line 470 is message-COUNT based (40 messages). That's not
+# enough — a single tool_result can be 8 KB, so 40 messages = 320 KB best case
+# but easily 1+ MB if tool outputs are at cap. Add a byte cap that runs BEFORE
+# each LLM call.
+_HISTORY_BYTE_BUDGET = 256 * 1024  # 256 KB of serialized history
+
+
+def _trim_history_to_byte_budget(history: list, budget: int = _HISTORY_BYTE_BUDGET) -> tuple:
+    """Trim history (in place) so its JSON serialization fits within budget.
+
+    Always preserves history[0] (system message). Drops oldest non-system
+    messages first. Respects assistant→tool message coupling: never strips a
+    tool message whose corresponding tool_call was kept.
+
+    Returns (trimmed_history, original_bytes, trimmed_bytes) for logging.
+    """
+    if not history:
+        return history, 0, 0
+    original = history[:]
+    original_bytes = len(json.dumps(original, ensure_ascii=False).encode("utf-8"))
+    if original_bytes <= budget:
+        return history, original_bytes, original_bytes
+
+    # Always keep system message (history[0]).
+    sys_msg = history[0:1]
+    tail = history[1:]
+
+    # Walk from end backwards, keep messages until we hit the budget.
+    # Build kept set in original order.
+    sys_bytes = len(json.dumps(sys_msg, ensure_ascii=False).encode("utf-8"))
+    remaining = budget - sys_bytes
+    kept_reversed = []
+    for msg in reversed(tail):
+        msg_bytes = len(json.dumps(msg, ensure_ascii=False).encode("utf-8")) + 1  # +1 comma
+        if msg_bytes > remaining:
+            break
+        kept_reversed.append(msg)
+        remaining -= msg_bytes
+    kept_tail = list(reversed(kept_reversed))
+
+    # Repair coupling: a tool message at the start of kept_tail without its
+    # preceding assistant.tool_call would confuse the model. Drop leading tools.
+    while kept_tail and kept_tail[0].get("role") == "tool":
+        kept_tail.pop(0)
+
+    new_history = sys_msg + kept_tail
+    new_bytes = len(json.dumps(new_history, ensure_ascii=False).encode("utf-8"))
+    return new_history, original_bytes, new_bytes
+
 try:
     from openai import OpenAI as OpenAIClient
     import httpx
@@ -42,6 +124,93 @@ _FAKE_STATUS_RE = _re_openai.compile(
 _EXTENDED_FAKE_RE = _re_openai.compile(
     r'(?:已|正在|即將).{0,8}(?:完成|處理|執行|分析)',  # 已完成、正在處理
 )
+
+
+# ── Issue #541: streaming chat completions (memory-bounded response handling) ──
+# The non-streaming path buffers the entire response in memory and then runs
+# pydantic v2 model construction over it — for large tool_call arguments this
+# can spike RSS by hundreds of MB transiently. Streaming consumes one chunk at
+# a time (~few KB), keeping peak memory bounded.
+#
+# We accumulate streamed deltas into a dict that mirrors the non-streaming
+# response shape (`response.choices[0].message.content`, `.tool_calls`,
+# `.finish_reason`) so the rest of the loop is unchanged.
+class _StreamedMessage:
+    __slots__ = ("content", "tool_calls")
+    def __init__(self, content, tool_calls):
+        self.content = content
+        self.tool_calls = tool_calls
+
+class _StreamedToolCall:
+    __slots__ = ("id", "type", "function")
+    def __init__(self, id_, type_, function):
+        self.id = id_; self.type = type_; self.function = function
+
+class _StreamedFunction:
+    __slots__ = ("name", "arguments")
+    def __init__(self, name, arguments):
+        self.name = name; self.arguments = arguments
+
+class _StreamedChoice:
+    __slots__ = ("message", "finish_reason")
+    def __init__(self, message, finish_reason):
+        self.message = message; self.finish_reason = finish_reason
+
+class _StreamedResponse:
+    __slots__ = ("choices",)
+    def __init__(self, choices):
+        self.choices = choices
+
+
+def _consume_stream(stream) -> _StreamedResponse:
+    """Drain a streaming chat.completions response into a non-streaming-shaped object.
+
+    Memory profile: holds only the accumulated text + tool-call args, never the
+    full response payload + pydantic models simultaneously.
+    """
+    content_parts = []
+    # idx -> {id, type, name, arguments}
+    tool_calls_acc: dict = {}
+    finish_reason = None
+    for chunk in stream:
+        if not chunk.choices:
+            continue
+        choice = chunk.choices[0]
+        delta = choice.delta
+        if delta is not None:
+            if delta.content:
+                content_parts.append(delta.content)
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    slot = tool_calls_acc.setdefault(idx, {"id": "", "type": "function", "name": "", "arguments": ""})
+                    if tc.id:
+                        slot["id"] = tc.id
+                    if tc.type:
+                        slot["type"] = tc.type
+                    if tc.function is not None:
+                        if tc.function.name:
+                            slot["name"] = tc.function.name
+                        if tc.function.arguments:
+                            slot["arguments"] += tc.function.arguments
+        if choice.finish_reason:
+            finish_reason = choice.finish_reason
+
+    content = "".join(content_parts) if content_parts else None
+    if tool_calls_acc:
+        tcs = []
+        for idx in sorted(tool_calls_acc.keys()):
+            slot = tool_calls_acc[idx]
+            tcs.append(_StreamedToolCall(
+                id_=slot["id"],
+                type_=slot["type"],
+                function=_StreamedFunction(name=slot["name"], arguments=slot["arguments"]),
+            ))
+    else:
+        tcs = None
+    msg = _StreamedMessage(content=content, tool_calls=tcs)
+    choice_obj = _StreamedChoice(message=msg, finish_reason=finish_reason or "stop")
+    return _StreamedResponse(choices=[choice_obj])
 
 
 def run_agent_openai(client_holder, system_instruction: str, user_message: str, chat_jid: str, model: str, conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None, group_folder: str = "", max_iter: int = 20) -> str:
@@ -128,30 +297,54 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
             _tool_choice = "auto"
         if _no_tool_turns > 0:
             _log("⚠️ FORCE-TOOL", f"no_tool_turns={_no_tool_turns} — escalating tool_choice to 'required'")
+
+        # Issue #541 — byte-cap history before sending to bound request size.
+        history, _hist_orig_b, _hist_kept_b = _trim_history_to_byte_budget(history)
+        if _hist_orig_b != _hist_kept_b:
+            _log("✂️ HISTORY-TRIM", f"orig={_hist_orig_b}B kept={_hist_kept_b}B msgs={len(history)}")
+
         _log("🧠 LLM →", f"turn={n} provider=openai-compat tool_choice={_tool_choice}")
+        _log_rss(f"pre-LLM turn={n}", hist_bytes=_hist_kept_b, hist_msgs=len(history))
         _oai_history = history  # capture current snapshot for lambda
-        try:
-            response = _llm_call_with_retry(lambda: client_holder[0].chat.completions.create(
+
+        # Issue #541: prefer streaming to bound peak memory. Fall back to
+        # non-streaming if the provider rejects stream=True.
+        def _do_call(stream: bool, tool_choice: str):
+            kwargs = dict(
                 model=model,
                 messages=_oai_history,
                 tools=OPENAI_TOOL_DECLARATIONS,
-                tool_choice=_tool_choice,
+                tool_choice=tool_choice,
                 temperature=0.2 if _is_qwen else 0.3,
                 max_tokens=4096,
-            ), pool=pool, apply_key_fn=apply_key_fn)
+            )
+            if stream:
+                kwargs["stream"] = True
+            raw = client_holder[0].chat.completions.create(**kwargs)
+            return _consume_stream(raw) if stream else raw
+
+        try:
+            try:
+                response = _llm_call_with_retry(
+                    lambda: _do_call(stream=True, tool_choice=_tool_choice),
+                    pool=pool, apply_key_fn=apply_key_fn,
+                )
+            except Exception as _stream_err:
+                # Provider may not support stream=True — retry non-streaming once.
+                _log("⚠️ STREAM-FALLBACK", f"stream=True failed ({type(_stream_err).__name__}: {_stream_err}) — retrying non-streaming")
+                response = _llm_call_with_retry(
+                    lambda: _do_call(stream=False, tool_choice=_tool_choice),
+                    pool=pool, apply_key_fn=apply_key_fn,
+                )
         except Exception as _tc_err:
             if _tool_choice == "required":
                 # Some providers don't support tool_choice="required" — fall back to "auto"
                 _log("⚠️ FORCE-TOOL", f"tool_choice='required' rejected ({_tc_err}) — retrying with 'auto'")
                 try:
-                    response = _llm_call_with_retry(lambda: client_holder[0].chat.completions.create(
-                        model=model,
-                        messages=_oai_history,
-                        tools=OPENAI_TOOL_DECLARATIONS,
-                        tool_choice="auto",
-                        temperature=0.2 if _is_qwen else 0.3,
-                        max_tokens=4096,
-                    ), pool=pool, apply_key_fn=apply_key_fn)
+                    response = _llm_call_with_retry(
+                        lambda: _do_call(stream=True, tool_choice="auto"),
+                        pool=pool, apply_key_fn=apply_key_fn,
+                    )
                 except Exception as _fallback_err:
                     # Fallback also failed (e.g. Qwen timeout) — report cleanly and break
                     _log("❌ LLM-FALLBACK", f"Fallback API call also failed: {_fallback_err}")
@@ -159,6 +352,8 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                     break
             else:
                 raise
+
+        _log_rss(f"post-LLM turn={n}")
         msg = response.choices[0].message
         stop_reason = response.choices[0].finish_reason
         _log("🧠 LLM ←", f"stop={stop_reason}")

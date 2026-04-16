@@ -1,3 +1,17 @@
+## [1.27.8] — 2026-04-16
+
+### Fixed
+- **OOM (exit 137) at openai-compat LLM call still triggers after #539.** Removing the HEALTHCHECK reduced cgroup pressure but the underlying issue remains: `chat.completions.create()` without `stream=True` buffers the entire response and constructs full pydantic v2 models, transiently spiking RSS by hundreds of MB. This made the openai-compat path the dominant OOM trigger after the healthcheck was removed (reproduced 2026-04-16 12:08:12, exit 137 within 4 seconds, zero MEMDEBUG samples). Three changes:
+  1. **Streaming mode** in `_loop_openai.py:run_agent_openai()` — wraps `chat.completions.create(stream=True)` and accumulates chunks into a non-streaming-shaped object (`response.choices[0].message.content/tool_calls/finish_reason`) so downstream code is unchanged. Falls back to non-streaming if the provider rejects `stream=True`.
+  2. **Byte-based history cap** (`_HISTORY_BYTE_BUDGET = 256 KB`) enforced BEFORE each LLM call, in addition to the existing 40-message count cap. Preserves system message + most recent fitting messages; drops orphan tool messages.
+  3. **RSS instrumentation** at every LLM call boundary (`_log_rss(prefix)` reads `/proc/self/status` for VmRSS+VmPeak). If OOMs persist, logs will pinpoint exactly which step spiked. (#541)
+
+### Technical Details
+- **Modified Files**: `container/agent-runner/_loop_openai.py` (added `_rss_snapshot`, `_log_rss`, `_trim_history_to_byte_budget`, `_consume_stream` + `_StreamedMessage/Choice/Response/ToolCall/Function` shape-mirror classes; rewrote the LLM call site to use `_do_call(stream=...)` with stream-first + non-streaming fallback)
+- **Image rebuild required**: `docker build -t evoclaw-agent:latest container/`
+- **Breaking Changes**: None. `tool_choice="required"` retry path preserved. Existing message-count cap at line ~470 preserved.
+- **Known limitation**: Some OpenAI-compatible endpoints may not stream tool_calls reliably. The non-streaming fallback covers this.
+
 ## [1.27.7] — 2026-04-16
 
 ### Fixed
