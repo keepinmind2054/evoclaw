@@ -149,13 +149,15 @@ ENV PYTHONUNBUFFERED=1
 ENV LANG=C.UTF-8
 ENV NODE_ENV=production
 
-# ── Health check (p17b) ───────────────────────────────────────────────────────
-# Verify that the agent module and its critical dependencies are importable.
-# Previously this only checked python3 exits 0, which passes even with a
-# broken install.  Now it imports the key third-party packages so a broken
-# layer is caught before a real run is attempted.
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python3 -c "import json, pathlib, anthropic, openai; import google.genai; print('ok')"
+# ── Health check REMOVED (Issue #539) ────────────────────────────────────────
+# The previous HEALTHCHECK spawned a second Python process every 30s that
+# imported all three LLM SDKs (anthropic + openai + google.genai), adding
+# ~80-100 MB to the cgroup.  When this coincided with the agent's LLM API
+# call, the combined memory exceeded the cgroup limit → OOM (exit 137).
+# Measured: agent steady-state 66 MiB → 147 MiB when healthcheck fires.
+# Agent containers are run-to-completion (seconds to minutes), not long-lived
+# services — a periodic healthcheck is meaningless for this lifecycle.
+HEALTHCHECK NONE
 
 # BUG-19B-08 FIX: declare SIGTERM as the stop signal so that `docker stop`
 # delivers SIGTERM to PID 1 (the bash entrypoint).  Without this instruction
