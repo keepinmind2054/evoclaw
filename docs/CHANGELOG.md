@@ -1,3 +1,12 @@
+## [1.27.9] — 2026-04-20
+
+### Fixed
+- **Telegram watchdog false-positive kills polling every 5 minutes in quiet groups.** `_last_poll_activity` was only updated on text message receipt, not on successful `getUpdates` calls. In quiet groups with no messages, the 300-second threshold was always hit, triggering a reconnect that often failed — leaving the bot permanently unreachable. Raised threshold to 1800s (30 min) and added a `TypeHandler(Update, ...)` at group=-1 that updates activity on ANY update type. (#541)
+
+### Technical Details
+- **Modified Files**: `host/channels/telegram_channel.py`
+- **Breaking Changes**: None.
+
 ## [1.27.8] — 2026-04-16
 
 ### Fixed
