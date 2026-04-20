@@ -24,7 +24,7 @@ _input_chat_jid: str = ""
 
 # History / tool-result size limits (P9A)
 _MAX_TOOL_RESULT_CHARS = 4000  # ~4KB per tool result
-_MAX_HISTORY_MESSAGES = 40     # max messages in history
+_MAX_HISTORY_MESSAGES = 20     # max messages in history (was 40; #541 OOM at turn=7 with 40 msgs/59KB)
 
 # BUG-P21-1 / BUG-P21-4: Module-level action-claim regex with stricter structure.
 # The old pattern matched single Chinese characters like 已/完成/成功 as standalone
