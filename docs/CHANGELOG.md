@@ -2,10 +2,12 @@
 
 ### Fixed
 - **Telegram watchdog false-positive kills polling every 5 minutes in quiet groups.** `_last_poll_activity` was only updated on text message receipt, not on successful `getUpdates` calls. In quiet groups with no messages, the 300-second threshold was always hit, triggering a reconnect that often failed — leaving the bot permanently unreachable. Raised threshold to 1800s (30 min) and added a `TypeHandler(Update, ...)` at group=-1 that updates activity on ANY update type. (#541)
+- **Container OOM at turn=7 despite streaming fix.** Instrumentation captured: `pre-LLM turn=7 rss=106MB peak=312MB hist=59KB/40msgs` → OOM at 768MB limit. Root cause: Python memory fragmentation from 7 turns of subprocess fork/exec — pymalloc arenas fragment, VmPeak grows to 312MB, next large allocation triggers new `mmap()` that pushes cgroup past limit. Three fixes: (1) `_reclaim_memory()` (gc.collect + glibc malloc_trim) before every LLM call and after every tool call — returns freed pages to OS, reduces cgroup counter; (2) `_MAX_HISTORY_MESSAGES` reduced from 40 to 20; (3) `_HISTORY_BYTE_BUDGET` reduced from 256KB to 64KB. Also increased container_runner stderr capture from 5 to 50 lines to preserve RSS instrumentation data on OOM. (#541)
 
 ### Technical Details
-- **Modified Files**: `host/channels/telegram_channel.py`
-- **Breaking Changes**: None.
+- **Modified Files**: `host/channels/telegram_channel.py`, `container/agent-runner/_loop_openai.py`, `container/agent-runner/_constants.py`, `host/container_runner.py`
+- **Image rebuild required**: `docker build -t evoclaw-agent:latest container/`
+- **Breaking Changes**: `_MAX_HISTORY_MESSAGES` reduced from 40 to 20 — agents will have less context from prior turns. This trades context depth for stability.
 
 ## [1.27.8] — 2026-04-16
 

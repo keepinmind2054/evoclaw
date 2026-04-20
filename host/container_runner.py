@@ -861,9 +861,9 @@ async def run_container_agent(
             _stderr_split_lines = stderr.splitlines() if stderr else []
             if _stderr_split_lines:
                 log.warning(
-                    "Container %s stderr (last 5 lines):\n%s",
+                    "Container %s stderr (last 50 lines):\n%s",
                     container_name,
-                    "\n".join(_redact_secrets(l) for l in _stderr_split_lines[-5:])
+                    "\n".join(_redact_secrets(l) for l in _stderr_split_lines[-50:])
                 )
             log.warning("No valid output markers in container stdout")
             response_ms = int((time.time() - t0) * 1000)

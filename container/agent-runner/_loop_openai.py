@@ -40,7 +40,27 @@ def _log_rss(prefix: str, **extra) -> None:
 # enough — a single tool_result can be 8 KB, so 40 messages = 320 KB best case
 # but easily 1+ MB if tool outputs are at cap. Add a byte cap that runs BEFORE
 # each LLM call.
-_HISTORY_BYTE_BUDGET = 256 * 1024  # 256 KB of serialized history
+_HISTORY_BYTE_BUDGET = 64 * 1024  # 64 KB — tightened from 256 KB after OOM at 59KB/40msgs
+
+
+# ── Issue #541: reclaim fragmented memory before LLM calls ────────────────────
+# After multiple turns of subprocess fork+exec + JSON alloc/dealloc, Python's
+# pymalloc arenas fragment.  VmPeak grows to 300+ MB even though RSS is ~100 MB.
+# The next large allocation (httpx TLS buffer, streaming response) can't reuse
+# freed arenas and triggers a new mmap() that pushes the cgroup past its limit.
+#
+# gc.collect() reclaims Python objects; malloc_trim() (glibc) returns freed pages
+# to the OS so the cgroup memory counter drops.  Together they close the gap
+# between VmPeak and RSS.
+def _reclaim_memory() -> None:
+    """Force GC + return freed pages to OS to reduce cgroup memory pressure."""
+    gc.collect()
+    try:
+        import ctypes
+        _libc = ctypes.CDLL("libc.so.6")
+        _libc.malloc_trim(0)
+    except Exception:
+        pass  # Non-glibc or non-Linux — skip silently
 
 
 def _trim_history_to_byte_budget(history: list, budget: int = _HISTORY_BYTE_BUDGET) -> tuple:
@@ -269,9 +289,7 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
     ])
 
     for n in range(MAX_ITER):
-        # MEMORY-OOM-FIX: force GC every 5 turns to reclaim accumulated objects.
-        if n > 0 and n % 5 == 0:
-            gc.collect()
+        # (gc+malloc_trim moved to _reclaim_memory() call before each LLM call)
         # Escalate to "required" when model has been avoiding tools (Fix #169).
         # tool_choice="required" is enforced at the API level — the model CANNOT
         # return a text-only response, it MUST make a tool call.
@@ -297,6 +315,9 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
             _tool_choice = "auto"
         if _no_tool_turns > 0:
             _log("⚠️ FORCE-TOOL", f"no_tool_turns={_no_tool_turns} — escalating tool_choice to 'required'")
+
+        # Issue #541 — reclaim fragmented memory before building the request.
+        _reclaim_memory()
 
         # Issue #541 — byte-cap history before sending to bound request size.
         history, _hist_orig_b, _hist_kept_b = _trim_history_to_byte_budget(history)
@@ -616,6 +637,9 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
             except Exception as _tool_exc:
                 result = f"[Tool error: {_tool_exc}]"
                 _log("❌ TOOL-EXC", f"Tool {tc.function.name} raised exception: {_tool_exc}")
+            # Issue #541: reclaim subprocess memory immediately after tool call
+            _reclaim_memory()
+            _log_rss(f"post-tool {tc.function.name}")
             # Truncate large tool results before adding to history
             result_str = str(result)
             if len(result_str) > _MAX_TOOL_RESULT_CHARS:
