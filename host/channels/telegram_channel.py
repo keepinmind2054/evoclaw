@@ -16,7 +16,14 @@ log = logging.getLogger(__name__)
 # warning and attempt to reconnect.  Distinct from the startup retry logic —
 # this catches cases where polling is running but Telegram stops delivering
 # updates (e.g. a silent TCP connection hang).
-_POLL_SILENCE_THRESHOLD_S = 300  # 5 minutes
+# Issue #541 follow-up: 300s (5 min) was far too aggressive — in quiet groups
+# with no messages, the watchdog triggered a false-positive reconnect every
+# 5 minutes, which then killed polling entirely.  Raised to 1800s (30 min).
+# The real staleness signal is "getUpdates returns errors", not "no messages
+# received".  The catch-all TypeHandler(Update, ...) added below updates
+# _last_poll_activity on ANY update type (not just text), which further
+# reduces false positives.
+_POLL_SILENCE_THRESHOLD_S = 1800  # 30 minutes
 
 
 class TelegramChannel:
@@ -180,6 +187,16 @@ class TelegramChannel:
                         handle_non_text,
                     )
                 )
+                # Issue #541: catch-all handler to update _last_poll_activity
+                # on ANY update type (callback queries, reactions, edits, etc.)
+                # so the staleness watchdog doesn't false-positive in quiet groups.
+                from telegram.ext import TypeHandler as _TypeHandler
+
+                async def _activity_tracker(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+                    self._last_poll_activity = time.time()
+
+                self._app.add_handler(_TypeHandler(Update, _activity_tracker), group=-1)
+
                 await self._app.initialize()
                 await self._app.start()
                 # drop_pending_updates=True: flush all messages that accumulated
