@@ -1,3 +1,18 @@
+## [1.27.10] — 2026-04-20
+
+### Fixed
+- **Post-#541 OOM still triggers during streaming LLM call (turn=4).** Instrumentation (#541) captured the exact sequence: `turn=2/3 rss=104-105MB peak=312MB` succeeded, but `turn=4 pre-LLM rss=105MB peak=312MB` → OOM during the streaming call itself. RSS/history/VmPeak all bounded; the spike is INSIDE `_consume_stream()`. Three root causes:
+  1. **`slot["arguments"] += chunk` is O(N²)** — large tool_call.arguments (e.g., model echoing a fetched URL content) triggers quadratic string allocation that pushes cgroup past limit.
+  2. **No hard cap on streamed total bytes** — a runaway model (stuck in a WebFetch loop, as observed) can stream unboundedly.
+  3. **`max_tokens=4096` too permissive** for 120B models via NIM.
+
+  Fixes: rewrote `_consume_stream()` to use `list` + `"".join()` (O(N)); added `_STREAM_MAX_TOTAL_BYTES=1MB` and `_STREAM_MAX_ARGS_BYTES_PER_TOOL=32KB` hard caps with graceful truncation; reduced `max_tokens` from 4096 to 2048. (#541)
+
+### Technical Details
+- **Modified Files**: `container/agent-runner/_loop_openai.py`
+- **Image rebuild required**: `docker build -t evoclaw-agent:latest container/`
+- **Breaking Changes**: None at API level. Truncated streams log `⚠️ STREAM-CAP` or `⚠️ TOOL-ARGS-CAP` for visibility.
+
 ## [1.27.9] — 2026-04-20
 
 ### Fixed
