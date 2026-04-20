@@ -182,16 +182,29 @@ class _StreamedResponse:
         self.choices = choices
 
 
+# Hard caps for stream consumption (Issue #541: OOM at turn=4 during streaming)
+_STREAM_MAX_TOTAL_BYTES = 1 * 1024 * 1024   # 1 MB hard cap across all chunks
+_STREAM_MAX_ARGS_BYTES_PER_TOOL = 32 * 1024 # 32 KB per tool_call.arguments
+
+
 def _consume_stream(stream) -> _StreamedResponse:
     """Drain a streaming chat.completions response into a non-streaming-shaped object.
 
-    Memory profile: holds only the accumulated text + tool-call args, never the
-    full response payload + pydantic models simultaneously.
+    Memory profile:
+    - content accumulates into a list (O(N) via "".join at the end)
+    - tool_call.arguments accumulates into per-slot lists (O(N) via "".join)
+    - Hard cap on total bytes (1 MB) — fail-fast if model runs amok
+    - Hard cap per tool_call arguments (32 KB) — truncate absurd payloads
+
+    Previously used `slot["arguments"] += chunk` which is O(N²) for large
+    args and can trigger mmap()-driven cgroup OOM on models that stream
+    huge tool_call.arguments payloads.
     """
-    content_parts = []
-    # idx -> {id, type, name, arguments}
+    content_parts: list = []
+    # idx -> {id, type, name, args_parts: list[str], args_bytes: int, truncated: bool}
     tool_calls_acc: dict = {}
     finish_reason = None
+    total_bytes = 0
     for chunk in stream:
         if not chunk.choices:
             continue
@@ -199,11 +212,16 @@ def _consume_stream(stream) -> _StreamedResponse:
         delta = choice.delta
         if delta is not None:
             if delta.content:
-                content_parts.append(delta.content)
+                c = delta.content
+                content_parts.append(c)
+                total_bytes += len(c)
             if delta.tool_calls:
                 for tc in delta.tool_calls:
                     idx = tc.index
-                    slot = tool_calls_acc.setdefault(idx, {"id": "", "type": "function", "name": "", "arguments": ""})
+                    slot = tool_calls_acc.setdefault(idx, {
+                        "id": "", "type": "function", "name": "",
+                        "args_parts": [], "args_bytes": 0, "truncated": False,
+                    })
                     if tc.id:
                         slot["id"] = tc.id
                     if tc.type:
@@ -212,20 +230,44 @@ def _consume_stream(stream) -> _StreamedResponse:
                         if tc.function.name:
                             slot["name"] = tc.function.name
                         if tc.function.arguments:
-                            slot["arguments"] += tc.function.arguments
+                            a = tc.function.arguments
+                            if slot["args_bytes"] + len(a) <= _STREAM_MAX_ARGS_BYTES_PER_TOOL:
+                                slot["args_parts"].append(a)
+                                slot["args_bytes"] += len(a)
+                                total_bytes += len(a)
+                            elif not slot["truncated"]:
+                                slot["truncated"] = True
+                                # Fill remaining budget then stop appending for this tool
+                                remaining = _STREAM_MAX_ARGS_BYTES_PER_TOOL - slot["args_bytes"]
+                                if remaining > 0:
+                                    slot["args_parts"].append(a[:remaining])
+                                    slot["args_bytes"] += remaining
+                                    total_bytes += remaining
         if choice.finish_reason:
             finish_reason = choice.finish_reason
 
+        # Total stream cap — if the server is streaming a runaway response,
+        # stop here before we OOM.
+        if total_bytes > _STREAM_MAX_TOTAL_BYTES:
+            _log("⚠️ STREAM-CAP", f"total_bytes={total_bytes} exceeded cap — truncating stream")
+            finish_reason = finish_reason or "length"
+            break
+
     content = "".join(content_parts) if content_parts else None
+    del content_parts  # release the list immediately
     if tool_calls_acc:
         tcs = []
         for idx in sorted(tool_calls_acc.keys()):
             slot = tool_calls_acc[idx]
+            args_joined = "".join(slot["args_parts"])
+            if slot["truncated"]:
+                _log("⚠️ TOOL-ARGS-CAP", f"tool={slot['name']} args truncated at {slot['args_bytes']}B")
             tcs.append(_StreamedToolCall(
                 id_=slot["id"],
                 type_=slot["type"],
-                function=_StreamedFunction(name=slot["name"], arguments=slot["arguments"]),
+                function=_StreamedFunction(name=slot["name"], arguments=args_joined),
             ))
+        del tool_calls_acc  # release the dict
     else:
         tcs = None
     msg = _StreamedMessage(content=content, tool_calls=tcs)
@@ -337,7 +379,7 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
                 tools=OPENAI_TOOL_DECLARATIONS,
                 tool_choice=tool_choice,
                 temperature=0.2 if _is_qwen else 0.3,
-                max_tokens=4096,
+                max_tokens=2048,  # #541: 4096 allowed runaway responses that OOM'd the container
             )
             if stream:
                 kwargs["stream"] = True
