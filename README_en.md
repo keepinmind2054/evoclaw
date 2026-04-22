@@ -51,6 +51,17 @@ cp .env.example .env
 
 Key env vars: `TELEGRAM_BOT_TOKEN`, `DISCORD_BOT_TOKEN`, `SLACK_BOT_TOKEN`, `DASHBOARD_PASSWORD`.
 
+**Optional: summarizer model** (Issue #548) — have WebFetch apply a prompt over the full page content via a cheap secondary model instead of returning raw text:
+
+```env
+SUMMARIZER_PROVIDER=openai-compat   # or gemini | claude
+SUMMARIZER_MODEL=meta/llama-3.1-8b-instruct
+SUMMARIZER_API_KEY_REUSE=NIM_API_KEY   # share key with main backend
+SUMMARIZER_BASE_URL=https://integrate.api.nvidia.com/v1
+```
+
+When set, `WebFetch(url, prompt="Translate to Chinese")` runs the full content through the summarizer and returns only the result — avoids history bloat and middle-truncation on long pages. Unset = unchanged behaviour.
+
 > See [README.md](README.md) for the full configuration reference and all documentation.
 
 ## License

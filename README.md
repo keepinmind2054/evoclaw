@@ -520,8 +520,31 @@ cp .env.example .env
 | `MAX_CONCURRENT_CONTAINERS` | 全局最大並發容器數 | 選填 |
 | `GEMINI_MODEL` | Gemini 模型名稱（例：`gemini-2.0-flash-exp`） | 選填 |
 | `ENABLED_CHANNELS` | 啟用的頻道（例：`telegram,discord,slack`） | 選填 |
+| `SUMMARIZER_PROVIDER` | 副模型 provider（`openai-compat`/`gemini`/`claude`，空白=停用） | 選填 |
+| `SUMMARIZER_MODEL` | 副模型名稱（例：`meta/llama-3.1-8b-instruct`） | 選填 |
+| `SUMMARIZER_API_KEY_REUSE` | 重用主 backend 的金鑰（例：`NIM_API_KEY`） | 選填 |
+| `SUMMARIZER_BASE_URL` | 副模型 API endpoint | 選填 |
 
 > **安全提醒**：使用 WhatsApp 時務必設定 `WHATSAPP_APP_SECRET`。未設定時，webhook 端點將接受來自任何來源的 payload。
+
+### 副模型 (Summarizer) — Issue #548 / #549
+
+靈感來自 Claude Code 官方 WebFetchTool 設計。啟用後，`WebFetch(url, prompt="...")` 會將**完整頁面內容**丟給一個便宜的小模型處理，只把結果（不是原始網頁）回給主模型。
+
+**解決的問題**：
+- 長 URL 內容被 `_MAX_TOOL_RESULT_CHARS=4000` 截掉中間（頭+尾保留、中間挖掉）
+- 主模型 history 膨脹 → pydantic spike → OOM
+
+**設定範例**（NIM 主 backend 共用金鑰）：
+
+```env
+SUMMARIZER_PROVIDER=openai-compat
+SUMMARIZER_MODEL=meta/llama-3.1-8b-instruct
+SUMMARIZER_API_KEY_REUSE=NIM_API_KEY
+SUMMARIZER_BASE_URL=https://integrate.api.nvidia.com/v1
+```
+
+未設定時（預設）：退回 chunked raw-text 行為（#547），完全不影響現有部署。
 
 ### 支援頻道
 
