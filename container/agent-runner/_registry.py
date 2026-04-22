@@ -257,11 +257,13 @@ TOOL_DECLARATIONS = [] if not _GOOGLE_AVAILABLE or types is None else [
     ),
     types.FunctionDeclaration(
         name="WebFetch",
-        description="Fetch content from a URL and return it as plain text. Useful for reading docs, news, GitHub READMEs.",
+        description="Fetch content from a URL and return it as plain text (chunked). Each call returns up to ~3500 chars starting at `offset`. If the response footer says `[chunk: chars X-Y of total Z]` and Y < Z, call again with offset=Y to get the next chunk.",
         parameters=types.Schema(
             type=types.Type.OBJECT,
             properties={
                 "url": types.Schema(type=types.Type.STRING, description="The URL to fetch"),
+                "offset": types.Schema(type=types.Type.INTEGER, description="Starting character offset (default 0). Use the value from the previous response's footer to get the next chunk."),
+                "max_chars": types.Schema(type=types.Type.INTEGER, description="Max characters per chunk (default 3500, max 8000)."),
             },
             required=["url"],
         ),
@@ -372,7 +374,7 @@ OPENAI_TOOL_DECLARATIONS = [
     {"type": "function", "function": {"name": "mcp__evoclaw__resume_task", "description": "Resume a previously paused scheduled task.", "parameters": {"type": "object", "properties": {"task_id": {"type": "string", "description": "The task ID to resume"}}, "required": ["task_id"]}}},
     {"type": "function", "function": {"name": "Glob", "description": "Find files matching a glob pattern (supports ** recursive).", "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}}, "required": ["pattern"]}}},
     {"type": "function", "function": {"name": "Grep", "description": "Search file contents with regex. Returns filename:line:content.", "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}, "include": {"type": "string"}}, "required": ["pattern"]}}},
-    {"type": "function", "function": {"name": "WebFetch", "description": "Fetch a URL and return its content as plain text.", "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}}},
+    {"type": "function", "function": {"name": "WebFetch", "description": "Fetch a URL and return its content as plain text (chunked). Returns up to ~3500 chars starting at `offset`. If the footer reports more chars remaining, call again with offset=<end of previous chunk>.", "parameters": {"type": "object", "properties": {"url": {"type": "string"}, "offset": {"type": "integer", "description": "starting char offset, default 0"}, "max_chars": {"type": "integer", "description": "max chars per chunk, default 3500, max 8000"}}, "required": ["url"]}}},
     {"type": "function", "function": {"name": "mcp__evoclaw__run_agent", "description": "Spawn a subagent in an isolated Docker container to handle a subtask. Blocks until complete (up to 300s) and returns its output.", "parameters": {"type": "object", "properties": {"prompt": {"type": "string", "description": "The task for the subagent"}, "context_mode": {"type": "string", "description": "isolated or group"}}, "required": ["prompt"]}}},
     {"type": "function", "function": {"name": "mcp__evoclaw__send_file", "description": "Send a file to the user. Write the file to /workspace/group/output/ first, then call this tool.", "parameters": {"type": "object", "properties": {"chat_jid": {"type": "string", "description": "The chat JID to send the file to"}, "file_path": {"type": "string", "description": "Absolute container path to the file"}, "caption": {"type": "string", "description": "Optional caption"}}, "required": ["file_path"]}}},
     {"type": "function", "function": {"name": "mcp__evoclaw__reset_group", "description": "Clear the failure counter for a group, unfreezing it if it was locked in cooldown. Use when a group is stuck and not responding.", "parameters": {"type": "object", "properties": {"jid": {"type": "string", "description": "The JID of the group to reset, e.g. tg:8259652816"}}, "required": ["jid"]}}},
@@ -397,7 +399,7 @@ CLAUDE_TOOL_DECLARATIONS = [
     {"name": "mcp__evoclaw__resume_task", "description": "Resume a previously paused scheduled task.", "input_schema": {"type": "object", "properties": {"task_id": {"type": "string", "description": "The task ID to resume"}}, "required": ["task_id"]}},
     {"name": "Glob", "description": "Find files matching a glob pattern (supports ** recursive).", "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}}, "required": ["pattern"]}},
     {"name": "Grep", "description": "Search file contents with regex. Returns filename:line:content.", "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}, "include": {"type": "string"}}, "required": ["pattern"]}},
-    {"name": "WebFetch", "description": "Fetch a URL and return its content as plain text.", "input_schema": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}},
+    {"name": "WebFetch", "description": "Fetch a URL and return its content as plain text (chunked). Returns up to ~3500 chars starting at `offset`. If the footer reports more chars remaining, call again with offset=<end of previous chunk>.", "input_schema": {"type": "object", "properties": {"url": {"type": "string"}, "offset": {"type": "integer", "description": "starting char offset, default 0"}, "max_chars": {"type": "integer", "description": "max chars per chunk, default 3500, max 8000"}}, "required": ["url"]}},
     {"name": "mcp__evoclaw__run_agent", "description": "Spawn a subagent in an isolated Docker container to handle a subtask. Blocks until complete (up to 300s) and returns its output.", "input_schema": {"type": "object", "properties": {"prompt": {"type": "string", "description": "The task for the subagent"}, "context_mode": {"type": "string", "description": "isolated or group"}}, "required": ["prompt"]}},
     {"name": "mcp__evoclaw__send_file", "description": "Send a file to the user. Write the file to /workspace/group/output/ first, then call this tool.", "input_schema": {"type": "object", "properties": {"chat_jid": {"type": "string", "description": "The chat JID to send the file to"}, "file_path": {"type": "string", "description": "Absolute container path to the file"}, "caption": {"type": "string", "description": "Optional caption"}}, "required": ["file_path"]}},
     {"name": "mcp__evoclaw__reset_group", "description": "Clear the failure counter for a group, unfreezing it if it was locked in cooldown. Use when a group is stuck and not responding.", "input_schema": {"type": "object", "properties": {"jid": {"type": "string", "description": "The JID of the group to reset, e.g. tg:8259652816"}}, "required": ["jid"]}},
@@ -496,7 +498,9 @@ def _execute_tool_inner(name: str, args: dict, chat_jid: str) -> str:
         _url = args.get("url")
         if not isinstance(_url, str):
             return "Error: WebFetch requires a 'url' string argument"
-        return tool_web_fetch(_url)
+        _offset = args.get("offset", 0)
+        _max_chars = args.get("max_chars", 3500)
+        return tool_web_fetch(_url, offset=_offset, max_chars=_max_chars)
     elif name == "mcp__evoclaw__run_agent":
         _ra_prompt = args.get("prompt")
         if not isinstance(_ra_prompt, str):
