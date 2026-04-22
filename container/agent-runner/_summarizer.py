@@ -101,71 +101,6 @@ def is_enabled() -> bool:
     return _get_config().get("enabled", False)
 
 
-# ── Provider-specific call paths (lazy imports) ────────────────────────────────
-def _call_openai_compat(cfg: dict, system: str, user: str) -> str:
-    from openai import OpenAI
-    import httpx
-    timeout = httpx.Timeout(connect=15.0, read=cfg["timeout_s"], write=15.0, pool=10.0)
-    base_url = cfg["base_url"] or "https://api.openai.com/v1"
-    client = OpenAI(base_url=base_url, api_key=cfg["api_key"], timeout=timeout)
-    resp = client.chat.completions.create(
-        model=cfg["model"],
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        temperature=0.2,
-        max_tokens=cfg["max_tokens"],
-    )
-    return (resp.choices[0].message.content or "").strip()
-
-
-def _call_gemini(cfg: dict, system: str, user: str) -> str:
-    from google import genai
-    from google.genai import types
-    client = genai.Client(api_key=cfg["api_key"])
-    cfg_obj = types.GenerateContentConfig(
-        system_instruction=system,
-        temperature=0.2,
-        max_output_tokens=cfg["max_tokens"],
-    )
-    resp = client.models.generate_content(
-        model=cfg["model"],
-        contents=user,
-        config=cfg_obj,
-    )
-    return (resp.text or "").strip()
-
-
-def _call_claude(cfg: dict, system: str, user: str) -> str:
-    import anthropic
-    client = anthropic.Anthropic(api_key=cfg["api_key"], timeout=cfg["timeout_s"])
-    resp = client.messages.create(
-        model=cfg["model"],
-        system=system,
-        messages=[{"role": "user", "content": user}],
-        max_tokens=cfg["max_tokens"],
-        temperature=0.2,
-    )
-    parts = []
-    for block in resp.content:
-        text = getattr(block, "text", "")
-        if text:
-            parts.append(text)
-    return "".join(parts).strip()
-
-
-_DISPATCH = {
-    "openai-compat": _call_openai_compat,
-    "openai": _call_openai_compat,
-    "nim": _call_openai_compat,
-    "gemini": _call_gemini,
-    "google": _call_gemini,
-    "claude": _call_claude,
-    "anthropic": _call_claude,
-}
-
-
 # ── Public entry ───────────────────────────────────────────────────────────────
 _DEFAULT_SYSTEM = (
     "You are a precise content processor.  Apply the user's prompt to the "
@@ -196,15 +131,24 @@ def summarize(content: str, prompt: str, *, cache_key: Optional[tuple] = None) -
             _log("📋 SUM-CACHE", f"hit key={cache_key[0][:60]!r}")
             return cached
 
-    fn = _DISPATCH.get(cfg["provider"])
-    if fn is None:
-        _log("⚠️ SUM-CFG", f"unknown SUMMARIZER_PROVIDER={cfg['provider']!r}")
+    # Issue #549: dispatch via the unified LLMClient interface.
+    from _llm_client import make_client
+    try:
+        client = make_client(
+            provider=cfg["provider"],
+            model=cfg["model"],
+            api_key=cfg["api_key"],
+            base_url=cfg.get("base_url", ""),
+            timeout_s=cfg["timeout_s"],
+        )
+    except ValueError as cfg_err:
+        _log("⚠️ SUM-CFG", str(cfg_err))
         return None
 
     user = f"<content>\n{content}\n</content>\n\n<task>\n{prompt}\n</task>"
     t0 = time.time()
     try:
-        result = fn(cfg, _DEFAULT_SYSTEM, user)
+        result = client.complete(_DEFAULT_SYSTEM, user, max_tokens=cfg["max_tokens"]).text
     except Exception as exc:
         _log("⚠️ SUM-FAIL", f"provider={cfg['provider']} model={cfg['model']} err={type(exc).__name__}: {exc}")
         return None

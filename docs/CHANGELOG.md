@@ -1,3 +1,14 @@
+## [1.27.13] — 2026-04-22
+
+### Changed
+- **Extracted `_llm_client.py` unified interface (PR 2 of summarizer arc).** Eliminates the duplicated per-provider dispatch in `_summarizer.py`. Adds `LLMClient` Protocol + `_OpenAICompatClient`, `_GeminiClient`, `_ClaudeClient` adapters + `make_client(provider, model, api_key, base_url, timeout_s)` factory. `_summarizer.summarize()` now delegates to `make_client().complete()`. Adapters keep lazy SDK imports — loading the openai-compat adapter does not pull google-genai. **Scope**: simple completion (system + user → text) only; streaming + tool-calls (needed by `_loop_*.py` agentic loops) is a follow-up. (#549)
+
+### Technical Details
+- **New Files**: `container/agent-runner/_llm_client.py`
+- **Modified Files**: `container/agent-runner/_summarizer.py` (now uses `make_client`); per-provider call functions removed
+- **Image rebuild required**: `docker build -t evoclaw-agent:latest container/`
+- **Breaking Changes**: None. The summarizer's external behavior (env vars, output format, fallback path, cache) is unchanged.
+
 ## [1.27.12] — 2026-04-22
 
 ### Added
