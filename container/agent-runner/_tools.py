@@ -979,11 +979,27 @@ def tool_grep(pattern: str, path: str = WORKSPACE, include: str = "*") -> str:
                 pass
 
 
-def tool_web_fetch(url: str) -> str:
+def tool_web_fetch(url: str, offset: int = 0, max_chars: int = 3500) -> str:
     """
     從指定 URL 抓取網頁內容，自動將 HTML 轉換為純文字。
     適合查閱文件、新聞、GitHub README 等網頁資料。
-    結果最多回傳 50KB（文字），超過部分截斷。
+
+    Issue #541 follow-up: chunked fetch.  Each call returns at most
+    `max_chars` characters starting at `offset`.  When the document is
+    longer than the chunk, the result is suffixed with a metadata footer:
+
+        [chunk: chars 0-3500 of total 12345.
+         To get the next chunk, call: WebFetch(url, offset=3500)]
+
+    so the model can iteratively fetch the rest without hitting the
+    _MAX_TOOL_RESULT_CHARS=4000 truncation in the LLM loop.
+
+    Args:
+        url: target URL (http/https only)
+        offset: starting character offset (default 0 = beginning)
+        max_chars: max characters to return in this chunk (default 3500,
+            chosen to leave headroom under _MAX_TOOL_RESULT_CHARS=4000
+            so the chunk + footer is not further truncated)
 
     安全限制：
     - SSRF 防護：封鎖私有/迴環/雲端 metadata IP 範圍
@@ -998,6 +1014,19 @@ def tool_web_fetch(url: str) -> str:
 
     _WEB_FETCH_TEXT_LIMIT = 50 * 1024    # 50 KB returned to LLM
     _WEB_FETCH_RAW_LIMIT  = 2 * 1024 * 1024  # 2 MB raw download cap
+
+    # Validate chunk parameters defensively (LLM may pass garbage).
+    try:
+        offset = max(0, int(offset))
+    except (ValueError, TypeError):
+        offset = 0
+    try:
+        max_chars = int(max_chars)
+    except (ValueError, TypeError):
+        max_chars = 3500
+    # Hard caps: minimum 500 (so it's actually useful), maximum 8000 (so the
+    # chunk + footer fits under 8 KB, leaving room above the LLM truncation).
+    max_chars = max(500, min(8000, max_chars))
 
     # BUG-P18D-08: validate url type before passing to urlparse to prevent
     # AttributeError / TypeError when the LLM passes a non-string.
@@ -1197,9 +1226,42 @@ def tool_web_fetch(url: str) -> str:
         else:
             text = raw
 
+        # Hard upper bound on what we'll EVER serve (still 50 KB),
+        # independent of the per-chunk cap.
         if len(text) > _WEB_FETCH_TEXT_LIMIT:
-            text = text[:_WEB_FETCH_TEXT_LIMIT] + "\n\n... (content truncated at 50KB)"
-        return text or "(empty response)"
+            text = text[:_WEB_FETCH_TEXT_LIMIT]
+            _truncated_at_50k = True
+        else:
+            _truncated_at_50k = False
+
+        total_chars = len(text)
+        if total_chars == 0:
+            return "(empty response)"
+
+        # Issue #541 follow-up: chunked return.
+        if offset >= total_chars:
+            return (
+                f"(offset {offset} is past end of document; total {total_chars} chars"
+                + (" — note: hit 50KB cap" if _truncated_at_50k else "")
+                + ")"
+            )
+
+        end = min(offset + max_chars, total_chars)
+        chunk = text[offset:end]
+
+        # Footer with chunk metadata so the model knows how to continue.
+        if end < total_chars:
+            cap_note = " — note: source was 50KB-capped" if _truncated_at_50k else ""
+            footer = (
+                f"\n\n[chunk: chars {offset}-{end} of total {total_chars}{cap_note}. "
+                f"To get the next chunk, call: WebFetch(url={url!r}, offset={end})]"
+            )
+        elif offset > 0 or _truncated_at_50k:
+            cap_note = " (source was 50KB-capped)" if _truncated_at_50k else ""
+            footer = f"\n\n[chunk: chars {offset}-{end} of total {total_chars}{cap_note} — END]"
+        else:
+            footer = ""  # entire document fit in one chunk; no metadata needed
+        return chunk + footer
     except urllib.error.HTTPError as e:
         return f"HTTP {e.code} error fetching {url}: {e.reason}"
     except urllib.error.URLError as e:

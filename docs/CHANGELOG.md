@@ -1,3 +1,13 @@
+## [1.27.11] — 2026-04-21
+
+### Changed
+- **WebFetch is now chunked.** A long URL (e.g., a multi-KB GitHub raw file) was fetched up to 50 KB and then truncated to 4 KB by the LLM-loop tool-result cap (head 2 KB + tail 2 KB, middle dropped) — leaving the model unable to translate or analyse the middle. Added `offset` and `max_chars` parameters (default 3500 chars per chunk, max 8000) plus a footer telling the model exactly how to fetch the next chunk: `[chunk: chars X-Y of total Z. To get the next chunk, call: WebFetch(url=..., offset=Y)]`. Default behaviour for short pages (<3500 chars) is unchanged. (#541 follow-up)
+
+### Technical Details
+- **Modified Files**: `container/agent-runner/_tools.py` (chunked logic), `container/agent-runner/_registry.py` (declarations for Gemini/OpenAI/Claude + dispatcher)
+- **Image rebuild required**: `docker build -t evoclaw-agent:latest container/`
+- **Breaking Changes**: None at the API level. Models that don't read the footer will see an extra suffix on long pages, which is correctly interpreted as "this is a partial response."
+
 ## [1.27.10] — 2026-04-20
 
 ### Fixed
