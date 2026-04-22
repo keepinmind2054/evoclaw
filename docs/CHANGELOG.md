@@ -1,3 +1,16 @@
+## [1.27.12] — 2026-04-22
+
+### Added
+- **Summarizer model — WebFetch returns prompt-applied result, not raw content.** Inspired by Claude Code's WebFetchTool design (extracted via `claude-code-reference`). Operators set `SUMMARIZER_PROVIDER` (openai-compat / gemini / claude) + `SUMMARIZER_MODEL`. When set, `WebFetch(url, prompt="...")` runs the full fetched content through the cheap secondary model with the user's prompt and returns only the result — no raw page in the main model's history. Eliminates the chunked-fetch loop, the `_MAX_TOOL_RESULT_CHARS=4000` middle-truncation, and the history bloat OOM chain in one move. Includes 5-min in-memory `(url, prompt)` cache to handle the runaway-loop case observed 2026-04-20. Backward-compatible: when summarizer is unconfigured or call fails, falls back to the chunked raw-text behaviour from #547. (#548)
+
+### Technical Details
+- **New Files**: `container/agent-runner/_summarizer.py` (provider-agnostic dispatcher with lazy SDK imports)
+- **Modified Files**: `container/agent-runner/_tools.py` (`tool_web_fetch` accepts `prompt`), `container/agent-runner/_registry.py` (declarations + dispatcher updated for Gemini/OpenAI/Claude), `.env.example` (documents new env vars)
+- **New Env Vars**: `SUMMARIZER_PROVIDER`, `SUMMARIZER_MODEL`, `SUMMARIZER_API_KEY` / `SUMMARIZER_API_KEY_REUSE`, `SUMMARIZER_BASE_URL`, `SUMMARIZER_MAX_TOKENS`, `SUMMARIZER_TIMEOUT_S`
+- **Image rebuild required**: `docker build -t evoclaw-agent:latest container/`
+- **Breaking Changes**: None.
+- **Follow-up**: #549 will refactor the per-provider dispatch in `_summarizer.py` (and the `_loop_*.py`) into a unified `LLMClient` interface.
+
 ## [1.27.11] — 2026-04-21
 
 ### Changed

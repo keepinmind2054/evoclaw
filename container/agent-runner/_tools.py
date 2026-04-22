@@ -979,7 +979,7 @@ def tool_grep(pattern: str, path: str = WORKSPACE, include: str = "*") -> str:
                 pass
 
 
-def tool_web_fetch(url: str, offset: int = 0, max_chars: int = 3500) -> str:
+def tool_web_fetch(url: str, prompt: str = "", offset: int = 0, max_chars: int = 3500) -> str:
     """
     從指定 URL 抓取網頁內容，自動將 HTML 轉換為純文字。
     適合查閱文件、新聞、GitHub README 等網頁資料。
@@ -1237,6 +1237,26 @@ def tool_web_fetch(url: str, offset: int = 0, max_chars: int = 3500) -> str:
         total_chars = len(text)
         if total_chars == 0:
             return "(empty response)"
+
+        # Issue #548: if a prompt is given AND a summarizer is configured,
+        # apply the prompt over the FULL fetched content via a cheap secondary
+        # model and return only the result.  This mirrors Claude Code's
+        # WebFetchTool design and avoids the main-model history bloat caused
+        # by stuffing raw page content back into the conversation.
+        if prompt:
+            try:
+                from _summarizer import summarize as _summarize, is_enabled as _sum_enabled
+                if _sum_enabled():
+                    cache_key = (url, prompt.strip()[:200])
+                    summary = _summarize(text, prompt, cache_key=cache_key)
+                    if summary:
+                        cap_note = " (source 50KB-capped)" if _truncated_at_50k else ""
+                        return f"{summary}\n\n[summarized: source {total_chars}chars{cap_note} → {len(summary)}chars via summarizer model]"
+                    # Summarizer failed → fall through to chunked
+                    _log("⚠️ SUM-FALLBACK", "summarizer returned None, using chunked WebFetch")
+            except Exception as _sum_err:
+                _log("⚠️ SUM-IMPORT", f"summarizer module error: {_sum_err}")
+                # Fall through to chunked
 
         # Issue #541 follow-up: chunked return.
         if offset >= total_chars:
