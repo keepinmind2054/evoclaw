@@ -208,7 +208,18 @@ def _read_secrets() -> dict:
         "OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL",
         "CLAUDE_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_MODEL",
         "ASSISTANT_NAME",
+        # Issue #555: summarizer config must reach the container.  agent.py:159
+        # promotes every secret to os.environ inside the container, so adding
+        # these keys here is sufficient — _summarizer.py reads them via
+        # os.environ.get().
+        "SUMMARIZER_PROVIDER", "SUMMARIZER_MODEL",
+        "SUMMARIZER_API_KEY", "SUMMARIZER_API_KEY_REUSE",
+        "SUMMARIZER_BASE_URL", "SUMMARIZER_MAX_TOKENS", "SUMMARIZER_TIMEOUT_S",
     ])
+    # If SUMMARIZER_API_KEY_REUSE points to another key (e.g. NIM_API_KEY),
+    # resolve it now — the container's `os.environ.get(reuse_name)` will only
+    # work if that source key is also in `secrets`.  Source keys are already
+    # in the list above, so the lookup will succeed inside the container.
     # p21c: ANTHROPIC_API_KEY alias — users who follow the README_en.md example
     # (which referenced ANTHROPIC_API_KEY) silently fell back to Gemini.
     # If CLAUDE_API_KEY is absent but ANTHROPIC_API_KEY is set, promote the alias.
