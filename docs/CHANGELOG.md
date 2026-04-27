@@ -1,3 +1,12 @@
+## [1.27.14] — 2026-04-24
+
+### Fixed
+- **Telegram watchdog still false-fired in quiet groups despite #543.** Raising the threshold to 1800s and adding `TypeHandler(Update)` was insufficient — `_last_poll_activity` only advances when an `Update` arrives, and a 30-minute window with zero messages is normal in many chats. After 1800s of legitimate quiet, the watchdog reconnected anyway, the reconnect silently failed, and polling stayed dead until manual restart. Replaced the silence-based check with a **liveness check**: every 60s, verify both `_app.running` and `_app.updater.running`. Reconnect only if either is false. Healthy polling in a quiet chat → `getUpdates 200 OK` every 10s → `updater.running == True` → no false-positive. (#553)
+
+### Technical Details
+- **Modified Files**: `host/channels/telegram_channel.py` (`_poll_watchdog` rewritten; replaced `_POLL_SILENCE_THRESHOLD_S` constant with `_POLL_LIVENESS_CHECK_INTERVAL_S=60`)
+- **Breaking Changes**: None.
+
 ## [1.27.13] — 2026-04-22
 
 ### Changed

@@ -11,19 +11,17 @@ from ..env import read_env_file
 
 log = logging.getLogger(__name__)
 
-# p22c: Silence watchdog threshold.  If no update (message, command, or
-# non-text event) is received for this many seconds, the watchdog will log a
-# warning and attempt to reconnect.  Distinct from the startup retry logic —
-# this catches cases where polling is running but Telegram stops delivering
-# updates (e.g. a silent TCP connection hang).
-# Issue #541 follow-up: 300s (5 min) was far too aggressive — in quiet groups
-# with no messages, the watchdog triggered a false-positive reconnect every
-# 5 minutes, which then killed polling entirely.  Raised to 1800s (30 min).
-# The real staleness signal is "getUpdates returns errors", not "no messages
-# received".  The catch-all TypeHandler(Update, ...) added below updates
-# _last_poll_activity on ANY update type (not just text), which further
-# reduces false positives.
-_POLL_SILENCE_THRESHOLD_S = 1800  # 30 minutes
+# Issue #553: the silence-based watchdog was wrong.  In quiet groups (no
+# messages for 30 min) `_last_poll_activity` never advances even though
+# `getUpdates` keeps returning 200 OK every 10 seconds — polling is alive,
+# the chat is just quiet.  The watchdog kept false-firing, disconnecting,
+# and the reconnect would silently fail, killing polling entirely.
+#
+# The correct staleness signal is "the python-telegram-bot updater task
+# is no longer running", not "we haven't received an update lately".
+# The watchdog now polls `_app.updater.running` and only reconnects if
+# the updater task has died.
+_POLL_LIVENESS_CHECK_INTERVAL_S = 60
 
 
 class TelegramChannel:
@@ -256,41 +254,55 @@ class TelegramChannel:
                     raise
 
     async def _poll_watchdog(self) -> None:
-        """p22c: Staleness watchdog for the Telegram long-poll connection.
+        """Liveness watchdog (Issue #553 — replaces silence-based watchdog).
 
-        Runs as a background task alongside the python-telegram-bot updater.
-        Every 60 seconds it checks whether any update has been received within
-        the last _POLL_SILENCE_THRESHOLD_S seconds.  If not, it logs a warning
-        and attempts to reconnect by calling disconnect() then connect().
+        The old design checked "did we receive an update within the last N
+        seconds" and reconnected if not.  In quiet groups (no messages for
+        30 min) this false-fired and disconnected healthy polling, leaving
+        the bot unreachable until manual restart.
 
-        This is separate from the startup retry logic — it catches silent TCP
-        hangs where the updater loop is running but Telegram has stopped
-        delivering updates.  In a healthy group, messages arrive regularly; in
-        quiet groups the watchdog is a safety net that only fires after 5 full
-        minutes of silence.
+        New design: every 60 seconds, check whether the python-telegram-bot
+        Updater task is still running.  If `_app.updater.running` is False
+        OR the underlying `_app.running` is False (and we didn't shut down
+        intentionally), reconnect with exponential backoff.
 
-        Issue #536 fix: when connect() fails (e.g. network is down), the
-        watchdog must NOT exit permanently.  Instead it retries with
-        exponential backoff (60s → 120s → ... cap at 900s) until connect()
-        succeeds or the app is shut down.  Only Conflict and auth-failure
-        exceptions are fatal — those cannot be recovered by waiting.
+        This catches REAL failures (updater task crashed, app stopped) and
+        ignores quiet periods (no updates is normal, not a problem).
+
+        Issue #536 fix: reconnect retries indefinitely with exponential
+        backoff (60s → 120s → ... cap at 900s).  Only Conflict / auth
+        failures are unrecoverable.
         """
-        log.debug("Telegram poll watchdog started (threshold=%ds)", _POLL_SILENCE_THRESHOLD_S)
-        while self._app is not None and self._app.running:
-            await asyncio.sleep(60)
-            if self._app is None or not self._app.running:
+        log.debug("Telegram liveness watchdog started (interval=%ds)", _POLL_LIVENESS_CHECK_INTERVAL_S)
+        while self._app is not None:
+            await asyncio.sleep(_POLL_LIVENESS_CHECK_INTERVAL_S)
+            if self._app is None:
                 break
-            silence = time.time() - self._last_poll_activity
-            if silence > _POLL_SILENCE_THRESHOLD_S:
-                log.warning(
-                    "Telegram: no poll activity for %.0fs (threshold=%ds) — "
-                    "attempting reconnect to recover from silent stale connection",
-                    silence, _POLL_SILENCE_THRESHOLD_S,
-                )
-                try:
-                    await self.disconnect()
-                except Exception as _disc_exc:
-                    log.warning("Telegram watchdog: disconnect failed: %s", _disc_exc)
+
+            # Check both the application and the updater task.  An updater
+            # task can die while application.running is still True (the
+            # polling coroutine raised an exception that wasn't propagated).
+            _app_running = bool(self._app.running)
+            _updater_running = False
+            try:
+                _updater = getattr(self._app, "updater", None)
+                if _updater is not None:
+                    _updater_running = bool(getattr(_updater, "running", False))
+            except Exception:
+                _updater_running = False
+
+            if _app_running and _updater_running:
+                continue  # All healthy — no action needed.
+
+            log.warning(
+                "Telegram liveness check failed (app.running=%s updater.running=%s) — "
+                "attempting reconnect",
+                _app_running, _updater_running,
+            )
+            try:
+                await self.disconnect()
+            except Exception as _disc_exc:
+                log.warning("Telegram watchdog: disconnect failed: %s", _disc_exc)
 
                 # Retry connect() with exponential backoff until it succeeds.
                 # Only bail on Conflict or auth failures (unrecoverable).
