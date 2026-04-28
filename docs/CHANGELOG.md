@@ -1,3 +1,13 @@
+## [1.27.15] — 2026-04-27
+
+### Fixed
+- **Summarizer (#548) was never actually invoked because `SUMMARIZER_*` env vars never reached the container.** `host/container_runner.py:_get_secrets()` reads only an explicit allowlist from `.env` and ships that allowlist via stdin JSON; the `SUMMARIZER_*` keys were missing. Inside the container, `_summarizer.is_enabled()` saw empty env vars → returned False → WebFetch fell back to chunked raw text → main model received raw page → OOM at turn=2 (observed 2026-04-27 16:43:53 with raw Instagram embed text echoed back). Added the seven `SUMMARIZER_*` keys to the secrets allowlist so the existing `agent.py` `os.environ[k] = v` injection picks them up. (#555)
+
+### Technical Details
+- **Modified Files**: `host/container_runner.py`
+- **Image rebuild required**: No (host-side change only)
+- **Breaking Changes**: None.
+
 ## [1.27.14] — 2026-04-24
 
 ### Fixed
