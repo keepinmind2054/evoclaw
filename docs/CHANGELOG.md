@@ -1,3 +1,13 @@
+## [1.27.17] — 2026-04-29
+
+### Changed
+- **`memory_recall` ships summary instead of full content.** Previously the host shipped each memory's full `content` over IPC; container tool then formatted it into the agent's history. With `k=5` and ~1KB memories this added ~5KB per recall to history, contributing to main-model OOM (#541 series). Host now returns `summary` (≤200 chars) + `length` + `memory_id`. Container tool prints `[N] id=... score=... source=... len=... \n  <summary>`. For full content the agent re-queries with a more specific phrasing. Reduces tool_result size 5-10× per recall. (#559)
+
+### Technical Details
+- **Modified Files**: `host/ipc_watcher.py:_run_memory_recall`, `container/agent-runner/_tools.py:tool_memory_recall`, `container/agent-runner/_registry.py` (Gemini/OpenAI/Claude declarations updated to mention summary semantics)
+- **Image rebuild required**: Yes (container code changed)
+- **Breaking Changes**: None at API level. Container falls back to `m.get("content")` if host hasn't been updated yet, preserving compatibility during rolling upgrade.
+
 ## [1.27.16] — 2026-04-28
 
 ### Fixed

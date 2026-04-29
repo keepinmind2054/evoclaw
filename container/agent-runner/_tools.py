@@ -718,11 +718,18 @@ def tool_memory_recall(args: dict) -> str:
                     memories = data.get("memories", [])
                     if not memories:
                         return "No memories found."
+                    # Issue #559: host now ships `summary` (≤200 chars) +
+                    # `length` instead of full content.  Falls back to
+                    # `content` for backward compat with old host.
                     lines = []
                     for i, m in enumerate(memories, 1):
                         score = m.get("score", 0)
                         source = m.get("source", "?")
-                        lines.append(f"[{i}] (score={score:.2f} source={source}) {m.get('content', '')}")
+                        mid = m.get("memory_id", "?")
+                        body = m.get("summary") or m.get("content", "")
+                        length = m.get("length")
+                        len_note = f" len={length}" if length is not None and length > len(body) else ""
+                        lines.append(f"[{i}] id={mid} score={score:.2f} source={source}{len_note}\n  {body}")
                     return "\n".join(lines)
                 except Exception as exc:
                     return f"Error reading memory_recall response: {exc}"
