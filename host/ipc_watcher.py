@@ -1224,10 +1224,21 @@ async def _run_memory_recall(
             k=k,
             project=namespace or "",
         )
+        # Issue #559: ship summary (≤200 chars) instead of full content to
+        # bound the per-recall tool_result payload that was bloating main
+        # model history. Agent calls `memory_get(memory_id)` for full content
+        # on demand.
+        _SUMMARY_CHARS = 200
+        def _summarize(text: str) -> str:
+            text = (text or "").strip()
+            if len(text) <= _SUMMARY_CHARS:
+                return text
+            return text[:_SUMMARY_CHARS] + "…"
         result_list = [
             {
                 "memory_id": m.memory_id,
-                "content": m.content,
+                "summary": _summarize(m.content),
+                "length": len(m.content or ""),
                 "score": m.score,
                 "source": m.source,
                 "scope": m.scope,
