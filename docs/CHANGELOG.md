@@ -1,3 +1,13 @@
+## [1.27.16] — 2026-04-28
+
+### Fixed
+- **Discord channel leaked aiohttp ClientSession on every reconnect failure.** When `discord.com` was network-blocked (SNI filtering observed in this deployment), `connect()` retried 4 times per minute, each call instantiating a new `discord.Client` (which owns an `aiohttp.ClientSession`) without closing the previous one. Accumulated 1790+ "Unclosed client session" errors over multiple days. Fix: close the prior client at the start of `connect()` if one exists. (#557)
+
+### Technical Details
+- **Modified Files**: `host/channels/discord_channel.py`
+- **Image rebuild required**: No (host-side change only)
+- **Breaking Changes**: None.
+
 ## [1.27.15] — 2026-04-27
 
 ### Fixed

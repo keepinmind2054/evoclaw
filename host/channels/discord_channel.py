@@ -118,6 +118,19 @@ class DiscordChannel:
             log.warning("DISCORD_BOT_TOKEN not set — Discord disabled")
             return
 
+        # Issue #557: close any pre-existing client before allocating a new one.
+        # Each discord.Client owns an aiohttp.ClientSession; failed-reconnect
+        # loops were leaking dozens of these sessions per minute on networks
+        # that block discord.com (observed 1790 "Unclosed client session"
+        # errors over multiple days).
+        _old = getattr(self, "_client", None)
+        if _old is not None:
+            try:
+                if not _old.is_closed():
+                    await _old.close()
+            except Exception as _close_exc:
+                log.debug("Discord: error closing prior client: %s", _close_exc)
+
         intents = discord.Intents.default()
         intents.message_content = True
         intents.messages = True
