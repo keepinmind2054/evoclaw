@@ -762,7 +762,14 @@ async def _process_group_messages(group: dict, messages: list[dict],
     # 取得最近 50 條對話歷史，轉為原生 multi-turn 格式（原為 20 ≈ 10 輪，提升至 50 ≈ 25 輪）
     new_ts_set = {m["timestamp"] for m in messages}
     try:
-        raw_history = [m for m in db.get_conversation_history(jid, limit=50) if m["timestamp"] not in new_ts_set]
+        # Issue #561: was limit=50.  Persistent main-model OOM (#541 series)
+        # traced to history bloat: every new turn shipped ~40KB of prior
+        # messages to the LLM API, and the API call internals would spike
+        # cgroup memory past 768m.  Lowering to last 10 messages (~5 turn
+        # pairs) drops the request payload by 5×.  If quality degrades for
+        # long-running conversations, raise this back up *and* fix the real
+        # streaming spike — don't just bump CONTAINER_MEMORY.
+        raw_history = [m for m in db.get_conversation_history(jid, limit=10) if m["timestamp"] not in new_ts_set]
     except Exception as _hist_exc:
         log.warning("Failed to fetch conversation history for %s — proceeding without context: %s", jid, _hist_exc)
         raw_history = []

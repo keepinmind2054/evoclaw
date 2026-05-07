@@ -1,3 +1,13 @@
+## [1.27.18] — 2026-05-07
+
+### Fixed
+- **Persistent main-model OOM (#541 series) — DB conversation history limit was 50.** Every new turn shipped up to 50 prior messages (~40KB) to the LLM API. With error responses from prior failed retries accumulating in the DB, payload bloat was permanent — no fix to streaming/memory_recall/healthcheck/SDK choice could shrink it. Container would sit idle at 86MiB for minutes during the API call, then OOM as the request payload + response stream pushed cgroup past 768m. Lowered `db.get_conversation_history` call in `host/main.py:765` from `limit=50` to `limit=10` (last ~5 turn pairs). Drops request payload 5× immediately. (#561)
+
+### Technical Details
+- **Modified Files**: `host/main.py:765`
+- **Image rebuild required**: No (host-side change only)
+- **Breaking Changes**: Long-running conversations lose deeper context window. Memory subsystem (`memory_recall`) compensates for cross-session continuity.
+
 ## [1.27.17] — 2026-04-29
 
 ### Changed
