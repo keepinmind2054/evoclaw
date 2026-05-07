@@ -1,3 +1,16 @@
+## [1.27.19] — 2026-05-07
+
+### Added
+- **Diagnose: query Docker `State.OOMKilled` after exit 137 to distinguish true cgroup OOM from other SIGKILL sources.** 11 PRs of Python-side memory fixes failed to stop OOM. Hypothesis: exit 137 is being misattributed — could be Docker Desktop WSL2 stalled-container kill, host kernel OOM-killer, or HTTP/2 hang detection. `container_runner.py` now drops `--rm` flag, runs `docker inspect <name> --format 'OOMKilled={{.State.OOMKilled}}...'` post-mortem, and logs the actual diagnosis. (#563)
+  - `OOMKilled=true` → real cgroup OOM, raise CONTAINER_MEMORY makes sense
+  - `OOMKilled=false` → SIGKILL from elsewhere; no Python-side fix will help
+- Explicit `docker rm -f` cleanup added to function-level `finally` block since `--rm` was removed.
+
+### Technical Details
+- **Modified Files**: `host/container_runner.py`
+- **Image rebuild required**: No (host-side change only)
+- **Breaking Changes**: None.
+
 ## [1.27.18] — 2026-05-07
 
 ### Fixed

@@ -622,7 +622,9 @@ async def run_container_agent(
     cmd = [
         "docker", "run",
         "-i",      # 需要 interactive 模式才能讀取 stdin
-        "--rm",    # container 結束後自動刪除，避免殘留
+        # Issue #563: --rm removed so we can `docker inspect` State.OOMKilled
+        # after exit to distinguish true cgroup OOM from other SIGKILL sources.
+        # Manual `docker rm` happens in the post-exit handler below.
         "--name", container_name,
         "-e", f"TZ={config.TIMEZONE}",  # 時區設定，確保 agent 顯示正確時間
         "-e", "PYTHONUNBUFFERED=1",  # 強制 Python stdout 立即 flush，讓 Docker Desktop 日誌即時顯示
@@ -902,14 +904,44 @@ async def run_container_agent(
             # We now emit a specific OOM message for exit 137 and keep the generic
             # message for all other non-zero exits.
             _exit_code = proc.returncode if proc is not None else _win_exit_code
+
+            # Issue #563: distinguish true cgroup OOM from other SIGKILL sources.
+            # Exit 137 alone is ambiguous — Docker Desktop on WSL2, host OOM-killer,
+            # or stalled-container watchdog can all send SIGKILL.  Query Docker's
+            # authoritative State.OOMKilled boolean before claiming OOM in logs.
+            # Note: --rm flag removed for this reason; we explicitly `docker rm`
+            # below after the inspect.
+            _true_oom_killed = None  # None = unknown; True/False = inspected
+            _docker_state_blob = ""
+            if _exit_code == 137:
+                try:
+                    _ins = _subprocess.run(
+                        ["docker", "inspect", container_name,
+                         "--format", "OOMKilled={{.State.OOMKilled}} ExitCode={{.State.ExitCode}} Error={{.State.Error}}"],
+                        capture_output=True, timeout=5, text=True,
+                        creationflags=_NO_WINDOW,
+                    )
+                    _docker_state_blob = (_ins.stdout or "").strip()
+                    if "OOMKilled=true" in _docker_state_blob:
+                        _true_oom_killed = True
+                    elif "OOMKilled=false" in _docker_state_blob:
+                        _true_oom_killed = False
+                except Exception as _ins_exc:
+                    _docker_state_blob = f"<inspect failed: {_ins_exc}>"
+
             if _container_ran:
                 # Log OOM explicitly so operators can act (raise --memory limit)
                 if _exit_code == 137:
+                    if _true_oom_killed is True:
+                        _oom_label = "true cgroup OOM (Docker State.OOMKilled=true)"
+                    elif _true_oom_killed is False:
+                        _oom_label = "exit 137 but NOT cgroup OOM — likely Docker/host SIGKILL"
+                    else:
+                        _oom_label = "exit 137 (OOMKilled status unknown)"
                     log.error(
-                        "Container %s was OOM-killed (exit 137). "
-                        "Consider raising CONTAINER_MEMORY in config (currently %r). "
-                        "Circuit breaker NOT tripped — Docker daemon is healthy.",
-                        container_name, config.CONTAINER_MEMORY,
+                        "Container %s killed with exit 137. Diagnosis: %s. "
+                        "docker_inspect: %s. CONTAINER_MEMORY=%r.",
+                        container_name, _oom_label, _docker_state_blob, config.CONTAINER_MEMORY,
                     )
                     # p16d: inform the user that the task was killed due to memory limits
                     # so they can simplify their request rather than wondering about silence.
@@ -1137,6 +1169,18 @@ async def run_container_agent(
     finally:
         async with _get_active_lock():
             _active_containers.pop(container_name, None)
+        # Issue #563: --rm flag removed so we can `docker inspect` State.OOMKilled
+        # post-mortem.  Must explicitly remove the container here on every exit
+        # path so retries with the same container_name don't fail.  Best-effort,
+        # swallow errors (orphan_cleanup_loop is the safety net).
+        try:
+            _subprocess.run(
+                ["docker", "rm", "-f", container_name],
+                capture_output=True, timeout=10,
+                creationflags=_NO_WINDOW,
+            )
+        except Exception:
+            pass
         # Release the defense-in-depth semaphore acquired before execution
         # (STABILITY_ANALYSIS 2.4).  Placed last so active-container cleanup
         # runs first; wrapped in try/except so a NameError for container_name
