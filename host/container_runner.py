@@ -921,13 +921,17 @@ async def run_container_agent(
                         capture_output=True, timeout=5, text=True,
                         creationflags=_NO_WINDOW,
                     )
-                    _docker_state_blob = (_ins.stdout or "").strip()
-                    if "OOMKilled=true" in _docker_state_blob:
+                    _stdout = (_ins.stdout or "").strip()
+                    _stderr = (_ins.stderr or "").strip()
+                    _docker_state_blob = (
+                        f"rc={_ins.returncode} stdout={_stdout!r} stderr={_stderr!r}"
+                    )
+                    if "OOMKilled=true" in _stdout:
                         _true_oom_killed = True
-                    elif "OOMKilled=false" in _docker_state_blob:
+                    elif "OOMKilled=false" in _stdout:
                         _true_oom_killed = False
                 except Exception as _ins_exc:
-                    _docker_state_blob = f"<inspect failed: {_ins_exc}>"
+                    _docker_state_blob = f"<inspect failed: {type(_ins_exc).__name__}: {_ins_exc}>"
 
             if _container_ran:
                 # Log OOM explicitly so operators can act (raise --memory limit)
@@ -1272,15 +1276,31 @@ async def cleanup_orphans() -> None:
     the same name and waste storage.  Use `docker ps -a` to catch all states.
     """
     try:
+        # Issue #565: previously this killed ALL evoclaw-* containers including
+        # running ones, mid-execution.  With cleanup_orphans called every 5 min
+        # by _orphan_cleanup_loop, any agent task >5 min was force-killed and
+        # mis-reported as exit 137 OOM.  This single bug caused 11+ rounds of
+        # fruitless Python-side memory fixes (#539-#561).
+        # Now: enumerate by NAME, skip names currently in _active_containers,
+        # and only force-remove the rest (truly orphaned from prior crashes).
+        async with _get_active_lock():
+            _live_names = set(_active_containers.keys())
+
         # -a: include stopped containers (Exited, Created, etc.) not just running ones.
         # This is critical for post-SIGKILL recovery where --rm never fired.
         proc = await asyncio.create_subprocess_exec(
-            "docker", "ps", "-a", "-q", "--filter", "name=evoclaw-",
+            "docker", "ps", "-a", "--filter", "name=evoclaw-",
+            "--format", "{{.ID}} {{.Names}}",
             stdout=asyncio.subprocess.PIPE,
             creationflags=_NO_WINDOW,
         )
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
-        ids = [i for i in out.decode().split() if i]
+        _all = [line.split(" ", 1) for line in out.decode().splitlines() if line.strip()]
+        ids = [cid for cid, name in _all if name not in _live_names]
+        _skipped = [name for cid, name in _all if name in _live_names]
+        if _skipped:
+            log.debug("cleanup_orphans: skipping %d active container(s): %s",
+                      len(_skipped), ", ".join(_skipped))
         if ids:
             rm_proc = await asyncio.create_subprocess_exec(
                 "docker", "rm", "-f", *ids,

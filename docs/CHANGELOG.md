@@ -1,3 +1,13 @@
+## [1.27.20] — 2026-05-07
+
+### Fixed
+- **🚨 ROOT CAUSE: orphan_cleanup_loop killing live containers every 5 minutes (mis-reported as OOM).** `cleanup_orphans` ran `docker rm -f` on every container matching `name=evoclaw-` — including ones still actively running an agent task. With the loop firing every 5 min from `_orphan_cleanup_loop`, any task longer than 5 min got SIGKILL'd, container_runner saw exit 137, mis-attributed it as "OOM-killed (exit 137)", retry storm started. Diagnostic `State.OOMKilled` query (#563) revealed `error: no such object` — container deleted before inspect. Sample timing: container `8bee26eb` ran 47 MEMDEBUG samples ≈ 5min, then died exactly on cleanup tick. **This single bug invalidates 11 prior PRs of Python-side memory fixes** (#539, #540, #542, #544, #545, #547, #548, #551, #553, #554, #557, #559, #561) — they may have been useful hardening but none addressed the actual OOM symptom. Fix: enumerate by name, skip containers in `_active_containers` set, only kill truly orphaned ones from prior crashes. (#565)
+
+### Technical Details
+- **Modified Files**: `host/container_runner.py:cleanup_orphans`
+- **Image rebuild required**: No (host-side change only)
+- **Breaking Changes**: None.
+
 ## [1.27.19] — 2026-05-07
 
 ### Added
