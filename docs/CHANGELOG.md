@@ -1,3 +1,22 @@
+## [1.27.26] — 2026-05-08
+
+### Added
+- **Telegram `/update` and `/restart` slash commands.** Privileged ops bypass the agent loop entirely. `OWNER_IDS` (platform-verified user IDs) gate. `/update` invokes `_run_self_update` directly (worktree path → ff-merge → restart). `/restart` writes `restart.flag` for `os.execv`. Prompt-injection safe (must be first char of message). Zero LLM cost. (#577)
+  - When user types `/update` → 0 LLM calls, 0 token gates, immediate execution.
+  - When user types `請更新後台` (natural language) → still goes through agent → still requires `SELF_UPDATE_TOKEN` (legacy path).
+  - Recommendation: use `/update` and `/restart` for routine ops; reserve agent dispatch for actual AI tasks.
+
+### Technical Details
+- **Modified Files**: `host/channels/telegram_channel.py` (two new `CommandHandler` registrations + helpers)
+- **Image rebuild required**: No (host-side change only)
+- **Breaking Changes**: None.
+- **Setup**: register the commands in BotFather via `/setcommands` for menu UX:
+  ```
+  update - Pull new code, run tests, restart (owner only)
+  restart - Restart host without code pull (owner only)
+  monitor - Set this group as monitor channel
+  ```
+
 ## [1.27.25] — 2026-05-08
 
 ### Changed
