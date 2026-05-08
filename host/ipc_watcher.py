@@ -1201,21 +1201,126 @@ async def _run_self_update_worktree(jid: str, route_fn: Callable) -> None:
             if jid:
                 _tail = test_output[-800:] if len(test_output) > 800 else test_output
                 await route_fn(jid, (
-                    f"❌ Worktree 測試失敗 (exit {test_rc})。"
-                    f"主 repo 完全未變。Worktree 留在 `{worktree_dir}` 供檢查。\n```\n{_tail}\n```"
+                    f"❌ Worktree 測試失敗 (exit {test_rc})。主 repo 完全未變。\n```\n{_tail}\n```"
                 ))
-            # PR-2 (#570) AI auto-patch will be wired here.  For now: cleanup.
-            try:
-                _cleanup = await asyncio.create_subprocess_exec(
-                    "git", "worktree", "remove", "--force", worktree_dir,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                    cwd=main_cwd,
-                    creationflags=_NO_WINDOW,
+
+            # ── Issue #570: AI auto-patch ────────────────────────────────────
+            # When AUTO_UPDATE_AI_FIX_ENABLED=true, ask an LLM to patch the
+            # code in the worktree, retry tests, and on success either open a
+            # PR for review (default) or ff-merge inline.  When disabled,
+            # skip straight to cleanup.
+            from . import self_update_ai_fix as _aifix
+            if _aifix.is_enabled():
+                if jid:
+                    await route_fn(jid, "🤖 啟動 AI auto-patch (試 N 次)…")
+                fix_result = await _aifix.attempt_fixes(
+                    _pathlib.Path(worktree_dir), test_output, _test_cmd_raw,
                 )
-                await asyncio.wait_for(_cleanup.wait(), timeout=20.0)
-            except Exception:
-                pass
+                if fix_result.status == "passed_pr_opened":
+                    msg = f"🤖✅ AI 在 {len(fix_result.attempts)} 次嘗試後修通了測試。已開 PR 等人工 review: {fix_result.pr_url or '(no URL)'}\n主 repo 未動。"
+                    log.info("self_update[worktree]: %s", msg)
+                    if jid:
+                        await route_fn(jid, msg)
+                    # Worktree branch was pushed; remove the local worktree.
+                    try:
+                        _cleanup = await asyncio.create_subprocess_exec(
+                            "git", "worktree", "remove", "--force", worktree_dir,
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.DEVNULL,
+                            cwd=main_cwd,
+                            creationflags=_NO_WINDOW,
+                        )
+                        await asyncio.wait_for(_cleanup.wait(), timeout=20.0)
+                    except Exception:
+                        pass
+                    return
+                elif fix_result.status == "passed_merge_inline":
+                    log.info(
+                        "self_update[worktree]: AI fix passed in %d attempt(s); "
+                        "REQUIRE_HUMAN_APPROVE=false → ff-merging worktree HEAD into main",
+                        len(fix_result.attempts),
+                    )
+                    if jid:
+                        await route_fn(jid, f"🤖✅ AI 在 {len(fix_result.attempts)} 次嘗試後修通測試。AUTO 模式直接合併。")
+                    # Commit the changes inside the worktree first so the
+                    # worktree HEAD advances to a real commit we can ff-merge.
+                    for argv in (
+                        ["git", "add", "-A"],
+                        ["git", "-c", "user.email=ai-fix@evoclaw", "-c", "user.name=evoclaw-ai-fix",
+                         "commit", "-m", "ai-fix: auto-patch (#570 inline merge)"],
+                    ):
+                        cm = await asyncio.create_subprocess_exec(
+                            *argv,
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.DEVNULL,
+                            cwd=worktree_dir,
+                            creationflags=_NO_WINDOW,
+                        )
+                        try:
+                            await asyncio.wait_for(cm.wait(), timeout=15.0)
+                        except Exception:
+                            pass
+                    # Get the worktree HEAD SHA and fall through to ff-merge.
+                    _rev = await asyncio.create_subprocess_exec(
+                        "git", "rev-parse", "HEAD",
+                        stdout=asyncio.subprocess.PIPE,
+                        cwd=worktree_dir,
+                        creationflags=_NO_WINDOW,
+                    )
+                    _rev_out, _ = await _rev.communicate()
+                    _wt_head = _rev_out.decode().strip()
+                    if _wt_head:
+                        # Replace FETCH_HEAD with the AI-patched commit so the
+                        # subsequent ff-merge picks it up.
+                        _upd = await asyncio.create_subprocess_exec(
+                            "git", "update-ref", "FETCH_HEAD", _wt_head,
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.DEVNULL,
+                            cwd=main_cwd,
+                            creationflags=_NO_WINDOW,
+                        )
+                        await asyncio.wait_for(_upd.wait(), timeout=10.0)
+                    # Fall through to the existing ff-merge / flag / restart code below
+                    # by simply NOT returning here and re-using the test-passed branch.
+                    test_rc = 0  # signal happy path
+                else:
+                    # failed_issue_opened, disabled, no_api_key
+                    msg = (
+                        f"🤖❌ AI auto-patch 結果: {fix_result.status}. "
+                        f"Issue: {fix_result.issue_url or '(none)'}"
+                    )
+                    log.error("self_update[worktree]: %s", msg)
+                    if jid:
+                        await route_fn(jid, msg)
+                    try:
+                        _cleanup = await asyncio.create_subprocess_exec(
+                            "git", "worktree", "remove", "--force", worktree_dir,
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.DEVNULL,
+                            cwd=main_cwd,
+                            creationflags=_NO_WINDOW,
+                        )
+                        await asyncio.wait_for(_cleanup.wait(), timeout=20.0)
+                    except Exception:
+                        pass
+                    return
+            else:
+                # AI fix disabled: cleanup worktree, give up.
+                try:
+                    _cleanup = await asyncio.create_subprocess_exec(
+                        "git", "worktree", "remove", "--force", worktree_dir,
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                        cwd=main_cwd,
+                        creationflags=_NO_WINDOW,
+                    )
+                    await asyncio.wait_for(_cleanup.wait(), timeout=20.0)
+                except Exception:
+                    pass
+                return
+
+        if test_rc != 0:
+            # Defensive: if something above set test_rc to non-zero again, exit.
             return
 
         log.info("self_update[worktree]: tests passed — fast-forwarding main")

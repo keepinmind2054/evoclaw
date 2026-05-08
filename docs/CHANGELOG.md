@@ -1,3 +1,24 @@
+## [1.27.23] — 2026-05-08
+
+### Added
+- **AI auto-patch on self_update test failures (#570).** When the worktree test gate (#569) fails, optionally spawn an LLM to suggest a unified diff that fixes the broken tests, apply it in the worktree, retry pytest, and on success either open a PR for human review (default) or fast-forward inline. Tests under `tests/` are hash-protected — patches that modify them are reverted and counted as failure. Patches may only touch `host/`, `container/agent-runner/`, `scripts/`, `docs/` (allowlist; everything else including `.github/` and `.env*` is rejected). Hard cap on retries. Audit trail (each attempt's diff + pytest output) included in PR/issue body. Fully opt-in. (#570)
+  - On all retries failing → opens a GitHub issue with the failure trail
+  - On a retry succeeding → opens a PR (default `REQUIRE_HUMAN_APPROVE=true`) or ff-merges + restarts (when `false`)
+
+### Technical Details
+- **New Files**: `host/self_update_ai_fix.py`
+- **Modified Files**: `host/config.py` (env knobs), `host/ipc_watcher.py:_run_self_update_worktree` (test-fail dispatch)
+- **New Env Vars**:
+  - `AUTO_UPDATE_AI_FIX_ENABLED` (default `false`)
+  - `AUTO_UPDATE_AI_FIX_MAX_RETRIES` (default `3`)
+  - `AUTO_UPDATE_AI_FIX_REQUIRE_HUMAN_APPROVE` (default `true` — open PR, do NOT auto-merge)
+  - `AUTO_UPDATE_AI_FIX_PROVIDER` (default `openai-compat`; also `claude` / `gemini`)
+  - `AUTO_UPDATE_AI_FIX_MODEL` (default = `NIM_MODEL`)
+  - `AUTO_UPDATE_AI_FIX_API_KEY` / `AUTO_UPDATE_AI_FIX_BASE_URL` (default = reuse main backend keys)
+- **Image rebuild required**: No (host-side change only)
+- **Breaking Changes**: None. Default `AUTO_UPDATE_AI_FIX_ENABLED=false` — must opt in.
+- **Security**: requires `gh` CLI authenticated (uses `gh pr create` / `gh issue create`).
+
 ## [1.27.22] — 2026-05-08
 
 ### Added

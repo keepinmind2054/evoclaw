@@ -303,6 +303,40 @@ AUTO_UPDATE_WORKTREE_DIR: str = (
     or str(DATA_DIR / "auto_update_worktree")
 )
 
+# ── AI auto-patch (Issue #570) ────────────────────────────────────────────────
+# When self_update test gate fails inside the worktree (#569), optionally
+# spawn an LLM to suggest a unified diff that fixes the failing tests, apply
+# it in the worktree, retry tests, and on success either open a PR for human
+# review (default) or fast-forward inline.
+#
+# Tests under tests/ are hash-protected — patches that modify them are
+# rejected.  Patches may only touch host/, container/agent-runner/, scripts/,
+# docs/.  See host/self_update_ai_fix.py for full rules.
+_env_file_aifix = read_env_file([
+    "AUTO_UPDATE_AI_FIX_ENABLED",
+    "AUTO_UPDATE_AI_FIX_MAX_RETRIES",
+    "AUTO_UPDATE_AI_FIX_REQUIRE_HUMAN_APPROVE",
+    "AUTO_UPDATE_AI_FIX_PROVIDER",
+    "AUTO_UPDATE_AI_FIX_MODEL",
+    "AUTO_UPDATE_AI_FIX_API_KEY",
+    "AUTO_UPDATE_AI_FIX_BASE_URL",
+])
+AUTO_UPDATE_AI_FIX_ENABLED: bool = (
+    os.environ.get("AUTO_UPDATE_AI_FIX_ENABLED")
+    or _env_file_aifix.get("AUTO_UPDATE_AI_FIX_ENABLED", "false")
+).lower() == "true"
+try:
+    AUTO_UPDATE_AI_FIX_MAX_RETRIES: int = max(1, int(
+        os.environ.get("AUTO_UPDATE_AI_FIX_MAX_RETRIES")
+        or _env_file_aifix.get("AUTO_UPDATE_AI_FIX_MAX_RETRIES", "3")
+    ))
+except ValueError:
+    AUTO_UPDATE_AI_FIX_MAX_RETRIES = 3
+AUTO_UPDATE_AI_FIX_REQUIRE_HUMAN_APPROVE: bool = (
+    os.environ.get("AUTO_UPDATE_AI_FIX_REQUIRE_HUMAN_APPROVE")
+    or _env_file_aifix.get("AUTO_UPDATE_AI_FIX_REQUIRE_HUMAN_APPROVE", "true")
+).lower() == "true"
+
 # Multi-instance Leader Election
 LEADER_ELECTION_ENABLED: bool = os.environ.get("LEADER_ELECTION_ENABLED", "false").lower() == "true"
 LEADER_HEARTBEAT_INTERVAL: int = _env_int("LEADER_HEARTBEAT_INTERVAL", 10)  # p12b fix: use _env_int for safe coercion
