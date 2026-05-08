@@ -56,7 +56,7 @@ async def _git_is_behind(cwd: str, branch: str) -> bool:
         creationflags=_NO_WINDOW,
     )
     try:
-        await asyncio.wait_for(fetch_proc.communicate(), timeout=60.0)
+        _fetch_out, _ = await asyncio.wait_for(fetch_proc.communicate(), timeout=60.0)
     except asyncio.TimeoutError:
         try:
             fetch_proc.kill()
@@ -65,7 +65,10 @@ async def _git_is_behind(cwd: str, branch: str) -> bool:
         log.warning("auto_update: git fetch timed out")
         return False
     if fetch_proc.returncode != 0:
-        log.warning("auto_update: git fetch exit=%s", fetch_proc.returncode)
+        # Capture stderr (merged into stdout above) so we know WHY exit=128.
+        # Common causes: credential helper lock, transient network, auth fail.
+        _err_msg = (_fetch_out.decode("utf-8", errors="replace") or "").strip()[:500]
+        log.warning("auto_update: git fetch exit=%s output=%r", fetch_proc.returncode, _err_msg)
         return False
 
     # git rev-list --count HEAD..origin/<branch>

@@ -1,3 +1,13 @@
+## [1.27.25] — 2026-05-08
+
+### Changed
+- **`auto_update`: capture git fetch stderr on failure.** `_git_is_behind` previously logged only `exit=N` on `git fetch` failure, leaving operators blind to the actual cause (credential helper lock, transient network, auth fail). Now logs `exit=N output='...'` with the merged stderr/stdout payload (truncated to 500 chars). No behavior change beyond observability. (#575)
+
+### Technical Details
+- **Modified Files**: `host/auto_update.py:_git_is_behind`
+- **Image rebuild required**: No (host-side change only)
+- **Breaking Changes**: None.
+
 ## [1.27.24] — 2026-05-08
 
 ### Added
