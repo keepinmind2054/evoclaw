@@ -1127,6 +1127,21 @@ async def _message_loop() -> None:
                     _stop_event.set()
                 break
 
+            # ── Issue #573: plain restart flag (no git pull, no test) ───────
+            # Triggered by `mcp__evoclaw__restart_host` — used to reload .env
+            # changes or recover from stuck channel state without pulling code.
+            # Reuses _self_update_requested + os.execv path so the lifecycle
+            # is identical (pm2 sees one stable supervisor PID).
+            restart_flag = config.DATA_DIR / "restart.flag"
+            if restart_flag.exists():
+                _self_update_requested = True
+                restart_flag.unlink(missing_ok=True)
+                log.info("restart flag detected — initiating graceful restart (no code pull)")
+                _running = False
+                if _stop_event is not None:
+                    _stop_event.set()
+                break
+
             # ── p22c: Drain health monitor alert queue ───────────────────────
             # health_monitor.py pushes (issue_key, message) tuples onto
             # _health_alert_queue; we deliver them here via route_outbound so

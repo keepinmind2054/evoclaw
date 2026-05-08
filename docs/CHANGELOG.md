@@ -1,3 +1,15 @@
+## [1.27.24] — 2026-05-08
+
+### Added
+- **`mcp__evoclaw__restart_host` tool — plain os.execv restart without git pull / test gate.** `self_update` requires `SELF_UPDATE_TOKEN` (out-of-band confirmation) which is overkill when operator just wants to reload `.env` changes or unstick channel state. New tool writes `restart.flag`; `main._message_loop` picks it up and triggers the same `os.execv` path as self_update — pm2 sees a stable supervisor PID. No token gate (lower stakes: doesn't pull remote code). Tool descriptions explicitly distinguish 更新 (self_update) from 重啟 (restart_host) so the agent picks the right one. (#573)
+
+### Technical Details
+- **New Files**: none
+- **Modified Files**: `host/main.py` (restart.flag handler in message loop), `host/ipc_watcher.py` (`restart_host` IPC handler), `container/agent-runner/_tools.py` (`tool_restart_host`), `container/agent-runner/_registry.py` (Gemini/OpenAI/Claude declarations + dispatcher)
+- **Image rebuild required**: Yes (container code changed)
+- **Breaking Changes**: None.
+- **Security**: no token gate. If prompt-injection is a concern, set `EVOCLAW_DISABLE_RESTART_TOOL=true` (TODO: not yet implemented — open issue if needed).
+
 ## [1.27.23] — 2026-05-08
 
 ### Added

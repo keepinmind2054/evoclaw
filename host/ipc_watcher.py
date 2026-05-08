@@ -628,6 +628,38 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
         t = _asyncio.create_task(_run_self_update(_su_jid, route_fn))
         t.add_done_callback(_ipc_task_done_callback)
 
+    elif msg_type == "restart_host":
+        # Issue #573: plain os.execv restart (no git pull, no test gate).
+        # Use cases:
+        #   * reload .env changes
+        #   * recover from stuck channel state
+        #   * force-pickup of new image after manual `docker build`
+        # Lower-stakes than self_update: no remote code pulled, only re-runs
+        # the existing on-disk python.  No token gate.
+        _rh_jid = payload.get("jid", "")
+        if not _rh_jid:
+            _rh_groups = db.get_all_registered_groups()
+            _rh_match = next((g for g in _rh_groups if g.get("folder") == group_folder), None)
+            _rh_jid = _rh_match["jid"] if _rh_match else ""
+        async def _do_restart_host():
+            try:
+                if _rh_jid:
+                    await route_fn(_rh_jid, "🔁 EvoClaw 即將重啟（不更新代碼）...")
+                flag = config.DATA_DIR / "restart.flag"
+                await _asyncio.get_running_loop().run_in_executor(
+                    None, lambda: flag.write_text("manual restart_host", encoding="utf-8")
+                )
+                log.info("restart_host: flag written — main loop will os.execv shortly")
+            except Exception as exc:
+                log.error("restart_host: failed to write flag: %s", exc)
+                if _rh_jid:
+                    try:
+                        await route_fn(_rh_jid, f"❌ 重啟失敗：{exc}")
+                    except Exception:
+                        pass
+        t = _asyncio.create_task(_do_restart_host())
+        t.add_done_callback(_ipc_task_done_callback)
+
     else:
         # Unknown IPC message type — log a warning instead of silently ignoring.
         # This aids debugging when a stale container image sends an unrecognised type.

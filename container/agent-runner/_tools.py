@@ -670,6 +670,29 @@ def tool_self_update(chat_jid: str = "") -> str:
         return f"Error: {exc}"
 
 
+def tool_restart_host(chat_jid: str = "") -> str:
+    """Restart the EvoClaw host process WITHOUT pulling new code (Issue #573).
+
+    Use when:
+      * Operator wants to reload .env changes
+      * Channel state is stuck and needs a fresh process
+      * A new agent image was just built and host needs to pick it up
+
+    Different from `self_update` which does git pull + tests.  This just
+    triggers `os.execv()` on the same on-disk code.  No token gate.
+    """
+    effective_jid = chat_jid or _constants._input_chat_jid or ""
+    try:
+        fname = _write_ipc_file(IPC_TASKS_DIR, {
+            "type": "restart_host",
+            "jid": effective_jid,
+        }, suffix="restart-host")
+        _log("📨 IPC", f"type=restart_host jid={effective_jid} → {fname.name}")
+        return "Restart requested — EvoClaw will restart shortly (no code pull)."
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
 def tool_memory_recall(args: dict) -> str:
     """Query the host MemoryBus via IPC and return relevant memories.
 
