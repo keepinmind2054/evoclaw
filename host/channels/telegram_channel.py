@@ -162,6 +162,98 @@ class TelegramChannel:
 
                 self._app.add_handler(CommandHandler("monitor", handle_monitor_cmd))
 
+                # ── Issue #577: owner-gated /update and /restart slash commands ──
+                # Bypass agent loop entirely.  Operator-only privileged ops:
+                #   /update  → host.ipc_watcher._run_self_update (worktree path)
+                #   /restart → write restart.flag → main_loop os.execv
+                # OWNER_IDS gate is platform-verified (TG can't spoof user_id).
+                # Prompt injection safe (`/update` must be FIRST char of msg).
+                _owner_ids_set = set(
+                    s.strip() for s in (os.environ.get("OWNER_IDS", "") or "").split(",")
+                    if s.strip()
+                )
+                # Fall back to .env file (read_env_file does not pollute os.environ)
+                if not _owner_ids_set:
+                    try:
+                        _oids = read_env_file(["OWNER_IDS"]).get("OWNER_IDS", "")
+                        _owner_ids_set = set(s.strip() for s in _oids.split(",") if s.strip())
+                    except Exception:
+                        pass
+
+                async def _is_owner(update: Update) -> bool:
+                    if not update.effective_user:
+                        return False
+                    return str(update.effective_user.id) in _owner_ids_set
+
+                async def handle_update_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+                    if not update.effective_chat:
+                        return
+                    chat_id = update.effective_chat.id
+                    if not _owner_ids_set:
+                        await self._app.bot.send_message(
+                            chat_id=chat_id,
+                            text="❌ /update 已停用：未設定 OWNER_IDS。請在 .env 設定後重啟。",
+                        )
+                        return
+                    if not await _is_owner(update):
+                        await self._app.bot.send_message(
+                            chat_id=chat_id,
+                            text=f"❌ 僅 owner 可執行 /update（你的 user_id={update.effective_user.id if update.effective_user else '?'}）",
+                        )
+                        return
+                    log.info("/update from owner uid=%s chat=%s", update.effective_user.id, chat_id)
+                    await self._app.bot.send_message(chat_id=chat_id, text="🔄 觸發 self_update（worktree 沙盒測試 → ff-merge → 重啟）...")
+                    # Lazy import to avoid circular dep
+                    try:
+                        from ..ipc_watcher import _run_self_update
+                    except Exception as imp_exc:
+                        await self._app.bot.send_message(chat_id=chat_id, text=f"❌ import 失敗：{imp_exc}")
+                        return
+                    jid = self._jid(chat_id)
+                    async def _route(_jid: str, text: str):
+                        try:
+                            await self._app.bot.send_message(chat_id=chat_id, text=text)
+                        except Exception:
+                            pass
+                    try:
+                        await _run_self_update(jid, _route)
+                    except Exception as exc:
+                        log.error("/update handler raised: %s", exc)
+                        try:
+                            await self._app.bot.send_message(chat_id=chat_id, text=f"❌ /update 失敗：{exc}")
+                        except Exception:
+                            pass
+
+                async def handle_restart_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+                    if not update.effective_chat:
+                        return
+                    chat_id = update.effective_chat.id
+                    if not _owner_ids_set:
+                        await self._app.bot.send_message(
+                            chat_id=chat_id,
+                            text="❌ /restart 已停用：未設定 OWNER_IDS。",
+                        )
+                        return
+                    if not await _is_owner(update):
+                        await self._app.bot.send_message(
+                            chat_id=chat_id,
+                            text="❌ 僅 owner 可執行 /restart",
+                        )
+                        return
+                    log.info("/restart from owner uid=%s chat=%s", update.effective_user.id, chat_id)
+                    await self._app.bot.send_message(chat_id=chat_id, text="🔁 EvoClaw 即將重啟（不更新代碼）...")
+                    try:
+                        flag = config.DATA_DIR / "restart.flag"
+                        await asyncio.get_running_loop().run_in_executor(
+                            None, lambda: flag.write_text("manual /restart slash command", encoding="utf-8")
+                        )
+                        log.info("/restart: flag written — main loop will os.execv")
+                    except Exception as exc:
+                        await self._app.bot.send_message(chat_id=chat_id, text=f"❌ 重啟失敗：{exc}")
+
+                self._app.add_handler(CommandHandler("update", handle_update_cmd))
+                self._app.add_handler(CommandHandler("restart", handle_restart_cmd))
+
                 async def handle_non_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     """Notify users who send non-text messages (Issue #70)."""
                     if not update.effective_chat:
