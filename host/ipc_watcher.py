@@ -649,6 +649,8 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
                 await _asyncio.get_running_loop().run_in_executor(
                     None, lambda: flag.write_text("manual restart_host", encoding="utf-8")
                 )
+                # Issue #579: write restart_notify so main loop can ack post-startup.
+                _write_restart_notify(_rh_jid, "restart_host")
                 log.info("restart_host: flag written — main loop will os.execv shortly")
             except Exception as exc:
                 log.error("restart_host: failed to write flag: %s", exc)
@@ -1052,6 +1054,29 @@ async def _run_start_remote_control(jid: str, sender: str, route_fn: Callable) -
         await asyncio.sleep(0.2)
 
 
+def _write_restart_notify(jid: str, source: str) -> None:
+    """Issue #579: persist a notify hint that main.py reads on next startup.
+
+    Creates ``<DATA_DIR>/restart_notify.json`` with the chat JID + source label
+    + start timestamp.  After os.execv the new main loop reads + unlinks this
+    file and sends "✅ restarted" back to the originating chat.
+
+    Best-effort: failures logged + swallowed (never block the restart path).
+    """
+    if not jid:
+        return
+    try:
+        notify = config.DATA_DIR / "restart_notify.json"
+        payload = {
+            "jid": jid,
+            "source": source,
+            "started_ts": time.time(),
+        }
+        notify.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        log.warning("restart_notify write failed (jid=%s source=%s): %s", jid, source, exc)
+
+
 async def _run_self_update(jid: str, route_fn: Callable) -> None:
     """Self-update entry point.
 
@@ -1422,6 +1447,8 @@ async def _run_self_update_worktree(jid: str, route_fn: Callable) -> None:
         await asyncio.get_running_loop().run_in_executor(
             None, lambda: flag.write_text(ff_msg[:1000], encoding="utf-8")
         )
+        # Issue #579: notify originating chat after new process is up.
+        _write_restart_notify(jid, "self_update_worktree")
         log.info("self_update[worktree]: flag written — restart pending")
         if jid:
             await route_fn(jid, f"✅ Worktree 測試通過、ff-merge 完成。EvoClaw 即將重啟。\n```\n{ff_msg[:300]}\n```")
@@ -1598,6 +1625,8 @@ async def _run_self_update_inplace(jid: str, route_fn: Callable) -> None:
         await asyncio.get_running_loop().run_in_executor(
             None, lambda: flag.write_text(_flag_content, encoding="utf-8")
         )
+        # Issue #579: notify originating chat after new process is up.
+        _write_restart_notify(jid, "self_update_inplace")
         log.info("self_update: flag written at %s — restart pending", flag)
 
         if jid:

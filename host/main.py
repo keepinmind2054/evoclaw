@@ -1732,6 +1732,37 @@ async def main() -> None:
     log.info("  Registered groups: %d", len(_registered_groups))
     log.info("--- end startup summary ---")
 
+    # ── Issue #579: post-restart notification ────────────────────────────
+    # If the previous process wrote restart_notify.json (containing the JID
+    # to notify and the source command), send a confirmation to that chat
+    # now that channels are connected.  Best-effort; failures don't block.
+    try:
+        _notify_path = config.DATA_DIR / "restart_notify.json"
+        if _notify_path.exists():
+            try:
+                _notify_data = json.loads(_notify_path.read_text(encoding="utf-8"))
+            except Exception:
+                _notify_data = {}
+            _notify_jid = _notify_data.get("jid", "")
+            _notify_source = _notify_data.get("source", "?")
+            _notify_started_ts = _notify_data.get("started_ts")
+            _notify_path.unlink(missing_ok=True)
+            if _notify_jid:
+                _dur_str = ""
+                if isinstance(_notify_started_ts, (int, float)):
+                    _dur_str = f"（耗時 {int(time.time() - _notify_started_ts)}s）"
+                _notify_text = f"✅ EvoClaw 已重啟完成{_dur_str}\nsource: {_notify_source}"
+                async def _send_notify():
+                    try:
+                        from .router import route_outbound as _ro
+                        await _ro(_notify_jid, _notify_text)
+                    except Exception as _send_exc:
+                        log.warning("post-restart notify send failed: %s", _send_exc)
+                # Fire-and-forget; channels are already connected at this point.
+                asyncio.create_task(_send_notify())
+    except Exception as _n_exc:
+        log.warning("restart_notify processing failed: %s", _n_exc)
+
     # ── 優雅關機：接到 SIGTERM/SIGINT 時設旗標讓各迴圈自然退出 ──────────────
     # p15d: _shutdown_count is an int stored in a list so the nested sync handler
     # can mutate it without a nonlocal declaration (which is not available in all

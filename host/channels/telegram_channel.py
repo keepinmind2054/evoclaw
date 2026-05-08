@@ -247,6 +247,12 @@ class TelegramChannel:
                         await asyncio.get_running_loop().run_in_executor(
                             None, lambda: flag.write_text("manual /restart slash command", encoding="utf-8")
                         )
+                        # Issue #579: notify back after new process up
+                        try:
+                            from ..ipc_watcher import _write_restart_notify
+                            _write_restart_notify(self._jid(chat_id), "restart_host_slash")
+                        except Exception as _n_exc:
+                            log.warning("/restart: notify write failed: %s", _n_exc)
                         log.info("/restart: flag written — main loop will os.execv")
                     except Exception as exc:
                         await self._app.bot.send_message(chat_id=chat_id, text=f"❌ 重啟失敗：{exc}")

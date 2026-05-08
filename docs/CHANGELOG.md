@@ -1,3 +1,16 @@
+## [1.27.27] — 2026-05-08
+
+### Added
+- **Post-restart notification.** Previously `/restart`, `/update`, agent `mcp__evoclaw__self_update`, and `auto_update_loop` all triggered an `os.execv` without any acknowledgement to the originating chat after the new process came up — operator had to manually check pm2 / dashboard. Now a `restart_notify.json` (jid + source label + start ts) is written alongside every `restart.flag` / `self_update.flag`. After startup, `main.py` reads + unlinks the file and sends `✅ EvoClaw 已重啟完成（耗時 Ns）\nsource: ...` back to the originating chat via `route_outbound`. Best-effort; failures don't block restart. (#579)
+
+### Technical Details
+- **New helper**: `host/ipc_watcher.py:_write_restart_notify(jid, source)` writes `<DATA_DIR>/restart_notify.json`
+- **Wired at**: `_run_self_update_worktree`, `_run_self_update_inplace`, `restart_host` IPC handler, `/restart` slash command
+- **Read by**: `host/main.py` post-startup-summary block
+- **Modified Files**: `host/main.py`, `host/ipc_watcher.py`, `host/channels/telegram_channel.py`
+- **Image rebuild required**: No (host-side change only)
+- **Breaking Changes**: None.
+
 ## [1.27.26] — 2026-05-08
 
 ### Added
