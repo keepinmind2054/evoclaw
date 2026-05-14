@@ -1,3 +1,15 @@
+## [1.27.32] — 2026-05-14
+
+### Fixed
+- **Agent no longer fabricates `已重啟 / 更新已觸發` after a refused `self_update` (#584).** Two-layer fix:
+  1. **`container/agent-runner/_tools.py` — neutral return strings.** `tool_self_update` previously returned `"Self-update requested — EvoClaw will pull latest code and restart shortly."`  That wording made the LLM treat IPC-enqueue as proof of success and emit future-tense progress narration (`正在啟動自我更新流程...`, `請稍候幾分鐘`) even when the host immediately rejected the request (e.g. `SELF_UPDATE_TOKEN` unset).  The new return string says `"Self-update IPC enqueued (NOT yet executed). ... DO NOT claim success, narrate future-tense progress, or fabricate restart timings — wait for the host's explicit reply"` and points the user at `/update` as the slash-command alternative.  Same neutral wording applied to `tool_restart_host`.
+  2. **`container/agent-runner/soul.md` — new `IPC enqueue ≠ 成功` section.** Codifies five "you MUST NOT" rules covering future-tense narration, fake completion claims, fabricated timings, invented follow-up IPCs (e.g. `正在設定 SELF_UPDATE_TOKEN...` — the agent has no host `.env` write access), and over-narration in general.  Includes explicit refusal-handling guidance: acknowledge verbatim, suggest a concrete next step (`/update`), STOP.
+
+### Technical Details
+- **Modified Files**: `container/agent-runner/_tools.py` (two tools), `container/agent-runner/soul.md` (new section).
+- **Image rebuild required**: **YES.** The agent runs inside `evoclaw-agent:latest`; `_tools.py` and `soul.md` are shipped in the image.  Operators must `docker build -t evoclaw-agent:latest container/` after merging (or wait for the next auto-update cycle that rebuilds the image).
+- **Breaking Changes**: None for end-users.  Agent prompts that previously triggered fake-restart narration will now produce a single line + wait for host reply.
+
 ## [1.27.31] — 2026-05-14
 
 ### Fixed

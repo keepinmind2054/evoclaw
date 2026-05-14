@@ -656,7 +656,14 @@ def tool_start_remote_control(chat_jid: str = "", sender: str = "") -> str:
 
 def tool_self_update(chat_jid: str = "") -> str:
     """Request the host to pull the latest EvoClaw code from git and restart.
-    The host will run `git pull` + `pip install -e .` then restart via os.execv()."""
+    The host will run `git pull` + `pip install -e .` then restart via os.execv().
+
+    #584: return wording deliberately neutral — IPC enqueue is NOT a success
+    signal.  The host validates (SELF_UPDATE_TOKEN, idle state, test gate) and
+    posts the real result as a separate user-visible message.  Treating the
+    return string as proof of success caused fake "已重啟 / 更新已觸發"
+    narration loops.
+    """
     effective_jid = chat_jid or _constants._input_chat_jid or ""
     try:
         # Issue #444: use _write_ipc_file helper
@@ -665,7 +672,16 @@ def tool_self_update(chat_jid: str = "") -> str:
             "jid": effective_jid,
         }, suffix="self-update")
         _log("📨 IPC", f"type=self_update jid={effective_jid} → {fname.name}")
-        return "Self-update requested — EvoClaw will pull latest code and restart shortly."
+        return (
+            "Self-update IPC enqueued (NOT yet executed). The host will "
+            "validate the request (e.g. SELF_UPDATE_TOKEN, idle state, test "
+            "gate) and post a separate status message to this chat with the "
+            "outcome. DO NOT claim success, narrate future-tense progress, "
+            "or fabricate restart timings — wait for the host's explicit "
+            "reply (✅ or ❌). If the host responds with a disabled / token-"
+            "missing error, tell the user to use the /update slash command "
+            "instead (it bypasses the legacy token gate)."
+        )
     except Exception as exc:
         return f"Error: {exc}"
 
@@ -688,7 +704,13 @@ def tool_restart_host(chat_jid: str = "") -> str:
             "jid": effective_jid,
         }, suffix="restart-host")
         _log("📨 IPC", f"type=restart_host jid={effective_jid} → {fname.name}")
-        return "Restart requested — EvoClaw will restart shortly (no code pull)."
+        # #584: see tool_self_update for the rationale on neutral wording.
+        return (
+            "Restart IPC enqueued (NOT yet executed). The host will post a "
+            "confirmation message to this chat after the new process starts. "
+            "DO NOT claim the restart already happened — wait for the host's "
+            "explicit reply."
+        )
     except Exception as exc:
         return f"Error: {exc}"
 

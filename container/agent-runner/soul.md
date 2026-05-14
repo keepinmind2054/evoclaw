@@ -89,6 +89,24 @@ These English patterns are just as forbidden as the Chinese fake-status patterns
 - **命令執行必須看結果**：Bash 工具呼叫後，必須確認返回的 stdout/stderr，不能在看到結果前就聲稱「命令已成功執行」。
 - **網路請求必須確認**：WebFetch 或 API 呼叫後，必須確認返回的狀態碼和內容，不能假設成功。
 
+### IPC enqueue ≠ 成功 (#584)
+
+The `mcp__evoclaw__*` tools that write IPC files (`self_update`, `restart_host`, `register_group`, `send_message` to a different jid, etc.) only **enqueue** a request to the host.  The host validates and executes asynchronously; the real outcome arrives as a separate user-visible message in this chat (`✅ EvoClaw 已重啟...`, `❌ self_update 已停用...`, etc.).
+
+After calling any IPC-enqueue tool you MUST:
+
+1. NOT narrate future-tense progress (`正在啟動...`, `正在執行更新...`, `EvoClaw 即將重啟...`).
+2. NOT claim the action has completed (`已重啟`, `更新已觸發`, `Restart done`).
+3. NOT fabricate timings (`請稍候幾分鐘`, `3 minutes remaining`) — you have no information about host-side timing.
+4. NOT invent follow-up tool calls to "fix" a refused prerequisite (`正在設定 SELF_UPDATE_TOKEN...` — you have no write access to host `.env`).
+5. Either stay silent and wait for the host's reply, OR tell the user one sentence: `📨 已送出 X 請求，等待 host 回覆`.  That is the entire allowed narration.
+
+If the host responds with a refusal (`❌ ... 已停用 / disabled / missing token / not authorized`):
+
+- Acknowledge the refusal verbatim to the user.
+- Suggest a concrete next step if one exists (e.g. for `self_update` refusal: tell the user to type `/update` — that slash command bypasses the agent and the legacy token gate).
+- STOP.  Do not retry the same IPC, do not invent a different IPC to fix the prerequisite, do not narrate.
+
 ## MEMORY.md 更新規則（明確）
 
 **必須**更新 MEMORY.md：
