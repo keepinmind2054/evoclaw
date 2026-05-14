@@ -1,3 +1,17 @@
+## [1.27.29] — 2026-05-11
+
+### Fixed
+- **`.env.example` drift — `Env Drift` CI now green.** The `envdrift` workflow (`github:jszzr/envdrift#v0.1.0`) had been failing on every push to main for ~6 weeks (since #512), training reviewers to ignore CI. Drift report listed **57 missing keys** and **13 unused keys**. Manual audit of every entry against `host/` reads: every "Missing" var has a real read site (4 LLM providers, 10 `AUTO_UPDATE_*` knobs, enterprise connectors, leader election, SDK API, WS bridge, etc.); 12 of 13 "Unused" vars are scanner blind-spots (read via `read_env_file([...])` helper or `_env_int()` wrapper rather than direct `os.environ.get()`); only `GROUPS_DIR` was truly dead (hard-coded `BASE_DIR / "groups"` in `host/config.py:22`). (#525)
+
+### Technical Details
+- **Added to `.env.example`**: `ANTHROPIC_API_KEY`, `CLAUDE_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `TELEGRAM_PROXY`, `DISCORD_TRUSTED_BOT_IDS`, `DISCORD_WEBHOOK_URL`, `MATRIX_HOMESERVER`, `MATRIX_USER_ID`, `MATRIX_ACCESS_TOKEN`, `MATRIX_ROOM_ID`, `MATRIX_SYNC_TOKEN`, `IPC_MAX_FILES_PER_CYCLE`, `SENDER_RATE_LIMIT_MAX`, `SENDER_RATE_LIMIT_WINDOW_SECS`, `HEARTBEAT_INTERVAL`, `MONITOR_JID`, `EVOCLAW_DATA_DIR`, `EVOCLAW_HOOKS_CONFIG`, `EVOCLAW_SDK_URL`, `OWNER_IDS`, `SELF_UPDATE_TOKEN`, `DATABASE_URL`, `DB_PATH`, `SQLITE_PATH`, `WS_BRIDGE_HOST`, `WS_BRIDGE_TOKEN`, `SDK_API_HOST`, `SDK_API_PORT`, `SDK_API_TOKEN`, `SDK_API_NO_AUTH`, `LEADER_ELECTION_ENABLED`, `LEADER_HEARTBEAT_INTERVAL`, `LEADER_LEASE_TIMEOUT`, `INSTANCE_ID`, `HPC_HOST`, `HPC_PARTITION`, `HPC_SCHEDULER`, `HPC_SSH_KEY`, `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PROJECT`, `LDAP_SERVER`, `LDAP_BASE_DN`, `LDAP_BIND_DN`, `LDAP_BIND_PW`, `CONTAINER_NETWORK`, `AUTO_UPDATE_ENABLED`, `AUTO_UPDATE_INTERVAL_SECS`, `AUTO_UPDATE_BRANCH`, `AUTO_UPDATE_TEST_CMD`, `AUTO_UPDATE_USE_WORKTREE`, `AUTO_UPDATE_WORKTREE_DIR`, `AUTO_UPDATE_AI_FIX_ENABLED`, `AUTO_UPDATE_AI_FIX_MAX_RETRIES`, `AUTO_UPDATE_AI_FIX_REQUIRE_HUMAN_APPROVE`.
+- **Removed from `.env.example`**: `GROUPS_DIR` (no env read — config.py:22 hard-codes `BASE_DIR / "groups"`).
+- **Kept 12 scanner false positives**: `TELEGRAM_BOT_TOKEN`, `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`, `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `DISCORD_BOT_TOKEN` (all read via `read_env_file([...])` in channel files), `POLL_INTERVAL`, `SCHEDULER_POLL_INTERVAL`, `IPC_POLL_INTERVAL`, `MAX_CONCURRENT_CONTAINERS`, `CONTAINER_STOP_GRACE_SECS` (all read via `_env_int()` wrapper in `host/config.py`). Without `--strict`, envdrift exits 0 on unused-only drift, so the workflow goes green even with these documented knobs present.
+- **Verification**: `npx -y github:jszzr/envdrift#v0.1.0 . --example .env.example --include host` → `No missing keys`, exit code 0.
+- **Modified Files**: `.env.example`
+- **Image rebuild required**: No (config docs only)
+- **Breaking Changes**: None.
+
 ## [1.27.28] — 2026-05-08
 
 ### Removed
