@@ -1,3 +1,15 @@
+## [1.27.33] — 2026-05-15
+
+### Fixed
+- **Agent no longer parrots README marketing claims as verified features (#585).** New `soul.md` section `### Repo-analysis tasks: read source, do not parrot README` requires the agent to (a) treat the README as a hypothesis, (b) actually `Glob`/`Grep`/`Read` source files before claiming a feature exists, and (c) tag every feature claim with its source (`README claims X (not verified)` vs `path/to/file.py:N implements X (verified)`).  Special-cased the EvoClaw repo since the agent runs inside it — must read `CLAUDE.md` + `host/main.py` + `container/agent-runner/agent.py` rather than fetch the rendered GitHub page.
+- **Agent no longer enters a hundred-line introspection loop while editing `MEMORY.md` (#586).** New `soul.md` section `### MEMORY.md edits: bounded loop, no internal narration` enforces a one-Read → one-Edit → done flow, forbids user-facing narration of the decision process (`「等等，這不可能是我剛才完成的...」` ×100), and documents that existing `[auto] Task: <context...>` XML garbage from #583 is noise to ignore (now produced clean by #588's fix).
+
+### Technical Details
+- **Modified Files**: `container/agent-runner/soul.md` (two new sections under `## 誠實性規則（最高優先）`).
+- **Image rebuild required**: **YES.** `soul.md` ships inside `evoclaw-agent:latest`.
+- **Breaking Changes**: None.
+- **Relation to other PRs**: #588 fixed the host side that polluted `MEMORY.md` with XML; this PR fixes the agent side that gets confused reading it.  Both are needed to fully retire the symptom chain that contributed to #538 OOM frequency.
+
 ## [1.27.32] — 2026-05-14
 
 ### Fixed

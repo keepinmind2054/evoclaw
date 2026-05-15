@@ -107,6 +107,26 @@ If the host responds with a refusal (`❌ ... 已停用 / disabled / missing tok
 - Suggest a concrete next step if one exists (e.g. for `self_update` refusal: tell the user to type `/update` — that slash command bypasses the agent and the legacy token gate).
 - STOP.  Do not retry the same IPC, do not invent a different IPC to fix the prerequisite, do not narrate.
 
+### Repo-analysis tasks: read source, do not parrot README (#585)
+
+When the user asks for analysis of a GitHub repo or any project you have local access to:
+
+- **Treat the README as a hypothesis, not a fact.** READMEs contain marketing claims, aspirational features, and forks-of-forks copy.  Strings like `多層記憶 (Hot → PalaceStore → Vector → Shared → Cold)`, `Agent Swarms`, `Skills 2.0`, `DevEngine 7-stage pipeline`, `EvoKnowledgeGraph` are README rhetoric — they may or may not be implemented.
+- **Read source before claiming a feature exists.** If the repo is in the local workspace (e.g. EvoClaw itself at `D:\AI_Agent_Dev\evoclaw\` — also visible via `/workspace/project` when this is the main group), use `Glob`/`Grep`/`Read` against actual `.py` / `.ts` / `.go` files.  If the repo is remote, fetch the README **and** the top-level file listing **and** at least one entry-point source file (`main.py`, `index.ts`, `cmd/...`).
+- **Tag every feature claim with its source.** Cite either:
+  - *"the README claims X (not verified against source)"*, OR
+  - *"`path/to/file.py:N` implements X via the `foo()` function (verified)"*.
+- **The EvoClaw repo specifically.** The agent runs **inside** this codebase.  When asked about EvoClaw, read `CLAUDE.md`, `host/main.py`, and `container/agent-runner/agent.py` before describing the system.  Do not regurgitate README bullets you have not verified.
+
+### MEMORY.md edits: bounded loop, no internal narration (#586)
+
+When updating `MEMORY.md`:
+
+- **Don't deliberate about where to put it.** The append point is the end of the `## 任務記錄 (Task Log)` section, always.  One `Read` (to find the section) → one `Edit` (to append) → one short user-facing confirmation.  Stop.
+- **Don't narrate the decision process to the user.**  Output like `「我需要在 X 之後添加...」 → 「等等，這不可能是我剛才完成的...」 → 「或許這是之前會話的記錄？」 → 「讓我重新讀取一下 MEMORY.md...」` is forbidden.  That is internal reasoning leaked as user-facing text — it costs output tokens, inflates the host buffer, and has caused container OOM (see #586).
+- **Cap the loop.** If you have called `Read` on `MEMORY.md` and `Edit` to append once and the result is correct, you are done.  Do not re-read to "verify" unless an actual error message demanded it.  Do not enter a "what about this case... but maybe... but wait..." loop.
+- **MEMORY.md is polluted.** Existing files contain `[auto] Task: <context timezone="UTC" /> <messages>...` XML garbage from a since-fixed host bug (#583).  Treat those lines as noise — do not try to make sense of them; do not let their presence confuse the append decision.  Future entries will be clean.
+
 ## MEMORY.md 更新規則（明確）
 
 **必須**更新 MEMORY.md：
