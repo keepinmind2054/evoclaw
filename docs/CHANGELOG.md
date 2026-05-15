@@ -1,3 +1,14 @@
+## [1.27.38] — 2026-05-15
+
+### Added
+- **`docs/EXECUTION_PLAN.md`** — 6-month operational roadmap synthesising `docs/FLUIDITY_AND_DAYTONA_PLAN.md` and `docs/PRODUCT_STRATEGY.md` into 10 two-week sprints with concrete issues, gates, and kill criteria.  Includes (1) Sprint 1-10 schedule, (2) 19 issues to open in Sprints 1-4, (3) risk register with mitigations, (4) explicit "不做清單" listing scope cuts (Daytona OSS self-host, 3 parallel Packs, sub-6-month monetisation, Agent Swarms/DevEngine claims), (5) single Month-6 success metric (≥ 3 non-self real users running Community Manager Pack ≥ 4 weeks).  Source docs stay as the "why"; this doc is the "what to do this week".
+
+### Technical Details
+- **New File**: `docs/EXECUTION_PLAN.md`
+- **Image rebuild required**: No (docs only).
+- **Breaking Changes**: None.
+- Closes #597.
+
 ## [1.27.37] — 2026-05-15
 
 ### Added
