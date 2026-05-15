@@ -133,12 +133,34 @@ class SecretUrlRedactor(logging.Filter):
         if record.args:
             if isinstance(record.args, dict):
                 record.args = {
-                    k: (_redact_url_secrets(v) if isinstance(v, str) else v)
-                    for k, v in record.args.items()
+                    k: _maybe_redact_any(v) for k, v in record.args.items()
                 }
             else:
-                record.args = tuple(
-                    _redact_url_secrets(a) if isinstance(a, str) else a
-                    for a in record.args
-                )
+                record.args = tuple(_maybe_redact_any(a) for a in record.args)
         return True
+
+
+def _maybe_redact_any(arg):
+    """Redact an arbitrary log-record argument that may not be a plain str.
+
+    #590 follow-up #2: httpx logs URLs as ``httpx.URL(...)`` objects, not as
+    plain strings.  The old ``isinstance(arg, str)`` guard skipped them, so
+    the formatter's ``%s`` placeholder rendered the unredacted URL via the
+    object's ``__str__`` method.  This helper:
+
+    - For str arguments: run the redactor directly.
+    - For non-str arguments: stringify with ``str(arg)``, run the redactor,
+      and only swap in the redacted string when the redactor actually
+      matched something.  Otherwise return the original object unchanged so
+      type-sensitive format specifiers (e.g. ``%d`` for an int) still work.
+    """
+    if isinstance(arg, str):
+        return _redact_url_secrets(arg)
+    try:
+        as_str = str(arg)
+    except Exception:
+        return arg
+    redacted = _redact_url_secrets(as_str)
+    if redacted != as_str:
+        return redacted
+    return arg
