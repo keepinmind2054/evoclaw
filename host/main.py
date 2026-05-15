@@ -207,8 +207,13 @@ def _setup_logging() -> None:
     LOG_FORMAT=json  → emit newline-delimited JSON (compatible with Loki/Datadog/CloudWatch)
     LOG_FORMAT=text  → human-readable text (default)
     LOG_LEVEL        → logging level (default: INFO)
+
+    #590: SecretUrlRedactor is attached to the root logger so third-party
+    libraries (httpx, urllib3, discord.gateway) cannot leak Telegram bot
+    tokens / Discord webhook tokens / Slack hook tokens via their default
+    INFO-level URL logging.
     """
-    from host.log_formatter import JsonFormatter
+    from host.log_formatter import JsonFormatter, SecretUrlRedactor
 
     level = getattr(logging, config.LOG_LEVEL, logging.INFO)
     log_format = config.LOG_FORMAT
@@ -228,6 +233,10 @@ def _setup_logging() -> None:
     # Remove any existing handlers to avoid duplicate output
     root.handlers.clear()
     root.addHandler(handler)
+    # Install secret-URL redactor on the root logger (#590).  The filter
+    # mutates msg/args in place so every handler — and every child logger
+    # that propagates to root — sees the redacted text.
+    root.addFilter(SecretUrlRedactor())
 
 
 _setup_logging()

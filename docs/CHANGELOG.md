@@ -1,3 +1,18 @@
+## [1.27.34] — 2026-05-15
+
+### Security
+- **Stop leaking Telegram bot token (and Discord webhook / Slack hook tokens) into pm2 logs (#590).** `httpx` (used by `python-telegram-bot`) logs every HTTP request URL at `INFO` level, including the token-in-path that Telegram's API mandates (`https://api.telegram.org/bot<TOKEN>/<method>`). pm2 captured 49,172 such lines into `D:\AI_Agent_Dev\evoclaw\logs\pm2-err.log` (33 MB) over a 6-day run — anyone with read access to that file could extract a working token and impersonate the bot. New `SecretUrlRedactor` (`host/log_formatter.py`) is a `logging.Filter` attached to the root logger by `_setup_logging()`; it rewrites the token portion of Telegram, Discord-webhook, and Slack-hook URLs in `record.msg` and `record.args` before any handler emits.  Covers all child loggers via propagation, including third-party (`httpx`, `urllib3`, `discord.gateway`).
+
+### Technical Details
+- **New code**: `host/log_formatter.py` — `SecretUrlRedactor` class + `_redact_url_secrets()` helper + `_SECRET_URL_PATTERNS` tuple covering Telegram / Discord / Slack patterns.
+- **Wired in**: `host/main.py:_setup_logging()` — `root.addFilter(SecretUrlRedactor())` after handler attach.
+- **Tests**: `tests/test_log_redactor.py` — 11 unit tests covering each pattern, plain-line pass-through, tuple-args, dict-args, non-string args.
+- **Image rebuild required**: No (host-side change only — `pm2 restart evoclaw` is sufficient).
+- **Breaking Changes**: None for end-users.  Existing log shippers / Loki dashboards see `***REDACTED***` in place of the secret portion of URLs; the rest of the URL (path, status, timing) is unchanged.
+- **Operator follow-up** (NOT part of this PR):
+  1. The 33 MB of existing `pm2-err.log` still contains the working token. After deploy: rotate the Telegram bot token at BotFather, update `.env`, then `pm2 flush evoclaw` to purge the historic log.
+  2. Same goes for any Discord webhook / Slack hook tokens that previously hit the log.
+
 ## [1.27.33] — 2026-05-15
 
 ### Fixed
