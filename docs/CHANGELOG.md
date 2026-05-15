@@ -1,3 +1,20 @@
+## [1.27.37] — 2026-05-15
+
+### Added
+- **`docs/FLUIDITY_AND_DAYTONA_PLAN.md`** — imported from sibling repo; analyses why EvoClaw's per-turn `docker run` model feels slow vs `nanoclaw` / `hermes agent` and proposes a 4-phase migration toward a long-lived stateful agent runtime (optionally on Daytona).  **Added §19–22 "可行性審視"**: every code-citation claim verified against current `host/` and `container/agent-runner/`; phase estimates re-baselined (original 12-21 weeks → realistic 20-31 weeks, 30-50% optimistic); flagged 5 risks the original missed (Daytona OSS still on Docker Compose, untested on Windows host, no python-tests regression net, ignored today's #583–#594 fixes, no #538 OOM baseline); added explicit go/no-go decision nodes between phases.
+- **`docs/PRODUCT_STRATEGY.md`** — imported from sibling repo; positions EvoClaw as a *Persistent Multi-Agent Operations Platform* rather than competing with coding agents.  **Added §14–17 "可行性審視"**: maps each strategy claim (`Persistent / Multi-Agent / Governable / Group-native / 5-layer Memory / Skills 2.0 / DevEngine`) to real `host/` modules and notes which README claims exceed code maturity (links to #585); estimates 50-150h per Solution Pack; flags that the 6-month timeline to revenue is optimistic; recommends a 6-month plan that ships *one* Pack (Community Manager) rather than three.
+
+### Why this matters
+- Both docs existed only in a sibling repo where they could not be discovered by EvoClaw contributors.
+- The audited versions ground every claim in current code rather than aspirational README rhetoric (the same hazard logged in #585).
+- Future technical and product decisions now have a versioned, code-grounded reference point.
+
+### Technical Details
+- **New Files**: `docs/FLUIDITY_AND_DAYTONA_PLAN.md`, `docs/PRODUCT_STRATEGY.md`.
+- **Image rebuild required**: No (docs only).
+- **Breaking Changes**: None.
+- Closes #595.
+
 ## [1.27.36] — 2026-05-15
 
 ### Security
