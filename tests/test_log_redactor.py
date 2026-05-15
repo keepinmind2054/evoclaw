@@ -88,6 +88,33 @@ class TestSecretUrlRedactor:
         filt.filter(rec)
         assert rec.args == ("ok", 42, None)
 
+    def test_url_object_arg_is_redacted(self, filt: SecretUrlRedactor):
+        """#590 follow-up #2: httpx passes URLs as ``httpx.URL(...)`` objects,
+        not plain str.  Confirm a string-like wrapper whose ``__str__``
+        contains a secret URL gets redacted."""
+        class _URL:
+            def __init__(self, s: str):
+                self._s = s
+            def __str__(self) -> str:
+                return self._s
+
+        url = _URL("https://api.telegram.org/bot1:abcdef/getMe")
+        rec = _make_record("%s %s", args=("POST", url))
+        filt.filter(rec)
+        # args[1] should now be a str with the redacted URL, not the original
+        # _URL object (which would re-stringify to the secret form).
+        assert isinstance(rec.args[1], str)
+        assert "1:abcdef" not in rec.args[1]
+        assert "***REDACTED***" in rec.args[1]
+
+    def test_non_url_object_arg_keeps_type(self, filt: SecretUrlRedactor):
+        """Type-sensitive format specifiers (e.g. %d for int) must keep
+        working: only swap arg types when the redactor actually matched."""
+        rec = _make_record("%d", args=(200,))
+        filt.filter(rec)
+        assert rec.args == (200,)
+        assert isinstance(rec.args[0], int)
+
     def test_dict_args_are_redacted(self, filt: SecretUrlRedactor):
         # logging.Logger.log("%(url)s", {"url": "..."}) packs args as a
         # 1-tuple containing the dict; LogRecord.__init__ then unwraps it

@@ -1,3 +1,15 @@
+## [1.27.36] — 2026-05-15
+
+### Security
+- **#590 follow-up #2: redact `httpx.URL` objects in log args, not just `str`.** After landing #593 (handler-attached filter) live verification on the running pm2 process still showed Telegram bot tokens in `pm2-err.log`.  Debug instrumentation revealed `httpx` passes the URL as a `httpx.URL(...)` *object*, not a plain `str` — so the previous `isinstance(arg, str)` guard skipped it and `%s` rendered the unredacted URL via `__str__`.  New `_maybe_redact_any()` helper: stringifies non-str args, runs the redactor, and only swaps in the redacted string when the redactor matched something (so type-sensitive format specifiers like `%d` for ints keep working).  Live `pm2 restart evoclaw` verified: 30/30 recent `httpx` lines now show `bot***REDACTED***/`.
+
+### Technical Details
+- **Modified Files**: `host/log_formatter.py` (new `_maybe_redact_any()` helper, filter now uses it for both tuple and dict args).
+- **Tests**: `tests/test_log_redactor.py` — 2 new tests under `TestSecretUrlRedactor` (`test_url_object_arg_is_redacted`, `test_non_url_object_arg_keeps_type`).  15 tests total, all passing.
+- **Image rebuild required**: No.
+- **Live verification**: `grep "httpx" pm2-err.log | tail -30 → 0 leaks, 30 redacted`.
+- **Breaking Changes**: None.
+
 ## [1.27.35] — 2026-05-15
 
 ### Security
