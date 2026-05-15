@@ -1,3 +1,16 @@
+## [1.27.39] — 2026-05-15
+
+### Added
+- **`scripts/scrub_memory_xml.py`** — one-shot cleanup tool for the XML-prompt-prefix garbage that polluted `MEMORY.md` files before #588 fixed the writer.  Default scope `groups/**/MEMORY.md`; supports explicit paths and glob patterns; `--dry-run` reports without writing; backups land at `<file>.bak.<unix-ts>` unless `--no-backup`.  Operators who have not yet scrubbed historic files should run `python scripts/scrub_memory_xml.py` once; new entries produced after #588 are already clean.
+
+### Why this matters
+- Live `MEMORY.md` files still contained 18 XML garbage lines (`telegram_8259652816`: 17, `telegram_monitor`: 1) after #588 / #591 merged, even though future entries are clean.  Per #586, the agent reading these garbage lines triggers the introspection-OOM loop — soul.md rules forbid the loop, but presenting the agent with confusing input still raises the risk.  This script makes recovery a one-command operation.
+
+### Technical Details
+- **New Files**: `scripts/scrub_memory_xml.py`, `tests/test_scrub_memory_xml.py` (8 unit tests, all passing).
+- **Image rebuild required**: No.
+- **Breaking Changes**: None.
+
 ## [1.27.38] — 2026-05-15
 
 ### Added
