@@ -91,11 +91,11 @@ class GroupQueue:
         self._active_count: int = 0                 # 目前正在執行的 container 總數
         self._waiting_groups: collections.deque = collections.deque()  # 等待 concurrency 槽位的群組 JID 清單（FIFO, O(1) popleft）
         self._waiting_set: set = set()              # O(1) membership check for _waiting_groups (issue #446)
-        self._process_messages_fn: Optional[Callable[[str], Awaitable[bool]]] = None
+        self._process_messages_fn: Optional[Callable[[str, dict], Awaitable[bool]]] = None
         self._shutting_down: bool = False
         self._retry_tasks: set = set()
 
-    def set_process_messages_fn(self, fn: Callable[[str], Awaitable[bool]]) -> None:
+    def set_process_messages_fn(self, fn: Callable[[str, dict], Awaitable[bool]]) -> None:
         """
         Register the coroutine to call when messages need processing.
         fn(group_jid) -> bool (True = success, False = retry)
@@ -127,6 +127,8 @@ class GroupQueue:
 
         if state.active:
             # 有 container 正在跑，先標記等下次排程
+            if state.pending_message_queued_at_ms is None:
+                state.pending_message_queued_at_ms = int(time.time() * 1000)
             state.pending_messages = True
             log.debug(f"[{group_jid}] Container active — message queued")
             return
@@ -135,12 +137,16 @@ class GroupQueue:
             # 有重試已排程中（指數退避等待中），不要立即再啟動新 container。
             # 只標記 pending_messages，讓排程重試到期後自然觸發處理。
             # 這防止 Docker circuit breaker 開路時形成緊密無限重試迴圈。
+            if state.pending_message_queued_at_ms is None:
+                state.pending_message_queued_at_ms = int(time.time() * 1000)
             state.pending_messages = True
             log.debug(f"[{group_jid}] Retry pending (count={state.retry_count}) — message queued, not starting new run")
             return
 
         if self._active_count >= config.MAX_CONCURRENT_CONTAINERS:
             # 全域並發已滿，加入等待佇列（FIFO，避免飢餓）
+            if state.pending_message_queued_at_ms is None:
+                state.pending_message_queued_at_ms = int(time.time() * 1000)
             state.pending_messages = True
             if group_jid not in self._waiting_set:  # O(1) membership check (issue #446)
                 if len(self._waiting_groups) < MAX_WAITING_GROUPS:
@@ -157,8 +163,10 @@ class GroupQueue:
         # 條件都滿足，同步更新狀態後建立 asyncio task（避免 race：多個 task 排入前計數來不及更新）
         state.active = True
         self._active_count += 1
+        _queued_at_ms = state.pending_message_queued_at_ms or int(time.time() * 1000)
+        state.pending_message_queued_at_ms = None
         t = asyncio.create_task(
-            self._run_for_group(group_jid, reason="messages"),
+            self._run_for_group(group_jid, reason="messages", queued_at_ms=_queued_at_ms),
             name=f"group-msg-{group_jid}",
         )
         t.add_done_callback(_task_done_callback)
@@ -249,7 +257,7 @@ class GroupQueue:
 
     # ── Internal runners ──────────────────────────────────────────────────────
 
-    async def _run_for_group(self, group_jid: str, reason: str) -> None:
+    async def _run_for_group(self, group_jid: str, reason: str, queued_at_ms: int | None = None) -> None:
         """
         實際執行「訊息回覆」container 的內部方法。
         標記群組為 active、增加全域計數，執行完畢後自動呼叫 _drain_group
@@ -265,7 +273,14 @@ class GroupQueue:
 
         try:
             if self._process_messages_fn:
-                success = await self._process_messages_fn(group_jid)
+                started_at_ms = int(time.time() * 1000)
+                effective_queued_at_ms = queued_at_ms or started_at_ms
+                success = await self._process_messages_fn(group_jid, {
+                    "reason": reason,
+                    "queued_at_ms": effective_queued_at_ms,
+                    "started_at_ms": started_at_ms,
+                    "queue_wait_ms": max(0, started_at_ms - effective_queued_at_ms),
+                })
                 if success:
                     state.retry_count = 0  # 成功後重置退避計數
                 else:
@@ -387,10 +402,12 @@ class GroupQueue:
                 # 這防止 Docker circuit breaker 開路時 _drain_group 形成緊密迴圈。
                 log.debug(f"[{group_jid}] Retry pending in drain — deferring message processing")
                 return
+            _queued_at_ms = state.pending_message_queued_at_ms or int(time.time() * 1000)
+            state.pending_message_queued_at_ms = None
             state.active = True
             self._active_count += 1
             t = asyncio.create_task(
-                self._run_for_group(group_jid, reason="drain"),
+                self._run_for_group(group_jid, reason="drain", queued_at_ms=_queued_at_ms),
                 name=f"group-msg-{group_jid}",
             )
             t.add_done_callback(_task_done_callback)
@@ -441,10 +458,12 @@ class GroupQueue:
                 # pending_messages=True and enqueue a duplicate run.  Clear it now
                 # (synchronously, before creating the task) to prevent double-dispatch.
                 state.pending_messages = False
+                _queued_at_ms = state.pending_message_queued_at_ms or int(time.time() * 1000)
+                state.pending_message_queued_at_ms = None
                 state.active = True
                 self._active_count += 1
                 t = asyncio.create_task(
-                    self._run_for_group(next_jid, reason="waiting"),
+                    self._run_for_group(next_jid, reason="waiting", queued_at_ms=_queued_at_ms),
                     name=f"group-msg-{next_jid}",
                 )
                 t.add_done_callback(_task_done_callback)

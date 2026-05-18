@@ -1,5 +1,16 @@
 # EvoClaw
 
+## Runtime Observability
+
+EvoClaw now emits Phase 0 timing and prompt-size logs on the hot execution path so latency work can be measured instead of guessed.
+
+- `phase0.message_batch`: request timing, queue timing, prompt length, message counts
+- `phase0.prompt_metrics`: input JSON size plus history / scheduled-task / hot-memory sizing
+- `phase0.first_progress`: time-to-first-progress (`ttft_ms`) when the agent emits its first stderr/progress line
+- `phase0.run_complete`: end-of-run timing for success / timeout / error paths
+
+These events are emitted by `host/main.py`, `host/group_queue.py`, and `host/container_runner.py` and are intended to support follow-up work on queue prioritization and prompt slimming.
+
 [![Version](https://img.shields.io/badge/version-v1.35.0-blue)](https://github.com/KeithKeepGoing/evoclaw/blob/main/docs/CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)

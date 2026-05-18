@@ -2038,3 +2038,19 @@ register_dynamic_tool(
 | 1.10.0 | 2026-03-10 | 完整進化引擎、DevEngine、健康監控器 |
 | 1.9.0 | 2026-02-15 | 增強免疫系統、適應性進化 |
 | 1.8.0 | 2026-02-01 | 技能引擎、WhatsApp 支援 |
+## [1.27.40] - 2026-05-18
+
+### Added
+- **Phase 0 latency + prompt instrumentation for the interactive run path (#601).** `host/group_queue.py` now carries real queue timing metadata (`queued_at_ms`, `started_at_ms`, `queue_wait_ms`) into each execution. `host/main.py` logs per-batch request/queue context under `phase0.message_batch`. `host/container_runner.py` logs prompt-size metrics (`input_json_bytes`, history/task/memory sizes), first-progress timing (`phase0.first_progress`, `ttft_ms` when available), and terminal run summaries (`phase0.run_complete`) across success / timeout / error paths.
+
+### Why this matters
+- The repo has several plausible latency sources, but they were not measured end-to-end before this change.
+- Phase 1 work such as queue prioritization and prompt slimming now has a baseline instead of relying on intuition.
+- Queue wait is now recorded from the real scheduler path rather than reconstructed later in the request flow.
+
+### Technical Details
+- **Modified Files**: `host/main.py`, `host/group_queue.py`, `host/container_runner.py`.
+- **Image rebuild required**: No (host-side instrumentation only).
+- **Local verification**: `python -m py_compile host/main.py host/container_runner.py host/group_queue.py`.
+- **Breaking Changes**: None.
+- Closes #601.

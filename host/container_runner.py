@@ -459,6 +459,7 @@ async def run_container_agent(
     conversation_history: list | None = None,
     parent_container: Optional[str] = None,
     on_error: Optional[Callable[[str], Awaitable[None]]] = None,
+    trace_context: Optional[dict] = None,
 ) -> dict:
     """
     在獨立的 Docker container 中執行 agent，並等待結果。
@@ -488,6 +489,8 @@ async def run_container_agent(
                 log.debug("on_error callback raised: %s", _ne)
 
     folder = group["folder"]
+    trace_context = trace_context or {}
+    turn_id = trace_context.get("turn_id", "")
 
     _circuit_remaining = _docker_circuit_open(folder)
     if _circuit_remaining:
@@ -594,14 +597,39 @@ async def run_container_agent(
         "runId": run_id,  # 關聯 ID：供 container 在 stderr 中記錄，與 host 日誌對齊
         "hotMemory": hot_memory,  # 三層記憶：熱記憶（8KB MEMORY.md，每次對話自動注入）
         "agentId": _agent_id,  # Phase 2 (UnifiedClaw): stable agent_id for FitnessReporter
+        "traceContext": trace_context,
     }
     # BUG-CR-03 FIX (LOW): use ensure_ascii=False so Chinese characters in
     # prompt / hot_memory are serialised as UTF-8 rather than \uXXXX escape
     # sequences.  The container reads stdin as UTF-8, so compact encoding is
     # both correct and significantly smaller for CJK content.
     input_json = json.dumps(input_data, ensure_ascii=False)
+    effective_history = conversation_history if conversation_history is not None else conv_history
+    prompt_metrics = {
+        "prompt_chars": len(prompt),
+        "input_json_bytes": len(input_json.encode("utf-8")),
+        "conversation_history_count": len(effective_history),
+        "conversation_history_chars": sum(len(str(m.get("content", ""))) for m in effective_history),
+        "scheduled_task_count": len(scheduled_tasks),
+        "scheduled_task_chars": len(json.dumps(scheduled_tasks, ensure_ascii=False)),
+        "hot_memory_chars": len(hot_memory or ""),
+        "hot_memory_bytes": len((hot_memory or "").encode("utf-8")),
+        "evolution_hints_chars": len(evolution_hints or ""),
+    }
     # 記錄 container 啟動時間，用於計算回應時間（適應度追蹤）
     t0 = time.time()
+    log.info(
+        "phase0.prompt_metrics",
+        extra={
+            "event": "phase0_prompt_metrics",
+            "run_id": run_id,
+            "turn_id": turn_id,
+            "jid": jid,
+            "folder": folder,
+            **trace_context,
+            **prompt_metrics,
+        },
+    )
     async with _get_active_lock():
         _active_containers[container_name] = {
             "name": container_name,
@@ -695,6 +723,7 @@ async def run_container_agent(
 
     proc = None       # asyncio subprocess reference — used for direct kill on CancelledError
     _win_exit_code: int | None = None  # Windows-only: returncode from subprocess.run()
+    first_progress_at_ms: int | None = None
     # p16c BUG-FIX (CRITICAL): stderr_lines must be initialised at function scope
     # before the platform branch.  On Windows the subprocess is run via
     # asyncio.to_thread(), so the Linux-only _stream_stderr() closure that
@@ -768,6 +797,7 @@ async def run_container_agent(
 
             async def _stream_stderr() -> None:
                 """逐行讀取 stderr 並更新 current_activity + log_buffer。"""
+                nonlocal first_progress_at_ms
                 assert proc.stderr is not None
                 _EMOJI_TAGS = ("🚀","📥","💬","🤖","🧠","🔧","📨","📎","📤","❌","🏁","⚠️")
                 while True:
@@ -780,6 +810,25 @@ async def run_container_agent(
                         break
                     line = line_bytes.decode(errors="replace").rstrip()
                     if line:
+                        if first_progress_at_ms is None:
+                            first_progress_at_ms = int(time.time() * 1000)
+                            _request_received_at_ms = trace_context.get("request_received_at_ms")
+                            _ttft_ms = None
+                            if _request_received_at_ms:
+                                _ttft_ms = max(0, first_progress_at_ms - int(_request_received_at_ms))
+                            log.info(
+                                "phase0.first_progress",
+                                extra={
+                                    "event": "phase0_first_progress",
+                                    "run_id": run_id,
+                                    "turn_id": turn_id,
+                                    "jid": jid,
+                                    "folder": folder,
+                                    "first_progress_at_ms": first_progress_at_ms,
+                                    "ttft_ms": _ttft_ms,
+                                    **trace_context,
+                                },
+                            )
                         if len(stderr_lines) < _MAX_STDERR_LINES:
                             stderr_lines.append(line)
                         elif len(stderr_lines) == _MAX_STDERR_LINES:
@@ -1073,7 +1122,26 @@ async def run_container_agent(
         # container 成功完成：通知呼叫方可以安全推進游標
         # 這是 rollback 安全機制的最後一步 — 只有到這裡才確認「已處理完畢」
         response_ms = int((time.time() - t0) * 1000)
-        # 記錄成功執行數據到演化引擎（適應度追蹤）
+        _request_received_at_ms = trace_context.get("request_received_at_ms")
+        _ttft_ms = None
+        if first_progress_at_ms and _request_received_at_ms:
+            _ttft_ms = max(0, first_progress_at_ms - int(_request_received_at_ms))
+        log.info(
+            "phase0.run_complete",
+            extra={
+                "event": "phase0_run_complete",
+                "run_id": run_id,
+                "turn_id": turn_id,
+                "jid": jid,
+                "folder": folder,
+                "status": "success",
+                "response_ms": response_ms,
+                "first_progress_at_ms": first_progress_at_ms,
+                "ttft_ms": _ttft_ms,
+                **trace_context,
+                **prompt_metrics,
+            },
+        )
         record_run(jid, run_id, response_ms, retry_count=0, success=True)
         safe_stderr = _redact_secrets(stderr) if stderr else ""
         stdout_preview = stdout[:200] if stdout else ""
@@ -1155,6 +1223,26 @@ async def run_container_agent(
                 pass
         # 記錄超時失敗數據（適應度扣分）
         _timeout_ms = int(config.CONTAINER_TIMEOUT * 1000)
+        _request_received_at_ms = trace_context.get("request_received_at_ms")
+        _ttft_ms = None
+        if first_progress_at_ms and _request_received_at_ms:
+            _ttft_ms = max(0, first_progress_at_ms - int(_request_received_at_ms))
+        log.info(
+            "phase0.run_complete",
+            extra={
+                "event": "phase0_run_complete",
+                "run_id": run_id,
+                "turn_id": turn_id,
+                "jid": jid,
+                "folder": folder,
+                "status": "timeout",
+                "response_ms": _timeout_ms,
+                "first_progress_at_ms": first_progress_at_ms,
+                "ttft_ms": _ttft_ms,
+                **trace_context,
+                **prompt_metrics,
+            },
+        )
         record_run(jid, run_id, _timeout_ms, retry_count=0, success=False)
         db.log_container_finish(run_id, time.time(), "timeout", "Container timed out", "", _timeout_ms)
         _record_docker_failure(folder)
@@ -1185,7 +1273,26 @@ async def run_container_agent(
     except Exception as e:
         log.error("Container %s error: %s", folder, e)
         response_ms = int((time.time() - t0) * 1000)
-        # 記錄異常失敗數據
+        _request_received_at_ms = trace_context.get("request_received_at_ms")
+        _ttft_ms = None
+        if first_progress_at_ms and _request_received_at_ms:
+            _ttft_ms = max(0, first_progress_at_ms - int(_request_received_at_ms))
+        log.info(
+            "phase0.run_complete",
+            extra={
+                "event": "phase0_run_complete",
+                "run_id": run_id,
+                "turn_id": turn_id,
+                "jid": jid,
+                "folder": folder,
+                "status": "error",
+                "response_ms": response_ms,
+                "first_progress_at_ms": first_progress_at_ms,
+                "ttft_ms": _ttft_ms,
+                **trace_context,
+                **prompt_metrics,
+            },
+        )
         record_run(jid, run_id, response_ms, retry_count=0, success=False)
         db.log_container_finish(run_id, time.time(), "error", str(e), "", response_ms)
         _record_docker_failure(folder)

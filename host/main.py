@@ -715,7 +715,7 @@ async def _on_message(jid: str, sender: str, sender_name: str, content: str,
 
 
 async def _process_group_messages(group: dict, messages: list[dict],
-                                   on_success=None) -> None:
+                                  on_success=None, queue_meta: dict | None = None) -> None:
     """
     將一批訊息格式化後交給 container 執行。
 
@@ -725,6 +725,8 @@ async def _process_group_messages(group: dict, messages: list[dict],
     """
     folder = group["folder"]
     jid = group["jid"]
+    queue_meta = queue_meta or {}
+    turn_id = str(uuid.uuid4())
 
     # Phase 1 (UnifiedClaw): Track agent identity per group
     try:
@@ -819,6 +821,32 @@ async def _process_group_messages(group: dict, messages: list[dict],
 
     # Capture prompt text for warm memory logging (join all new message contents)
     _user_prompt_text = " ".join(m.get("content", "") for m in messages if m.get("content", "").strip())
+    request_received_at_ms = max((int(m.get("timestamp", 0) or 0) for m in messages), default=int(time.time() * 1000))
+    trace_context = {
+        "turn_id": turn_id,
+        "request_received_at_ms": request_received_at_ms,
+        "queued_at_ms": queue_meta.get("queued_at_ms"),
+        "queue_started_at_ms": queue_meta.get("started_at_ms"),
+        "queue_wait_ms": queue_meta.get("queue_wait_ms"),
+        "queue_reason": queue_meta.get("reason", "unknown"),
+    }
+    log.info(
+        "phase0.message_batch",
+        extra={
+            "event": "phase0_message_batch",
+            "turn_id": turn_id,
+            "jid": jid,
+            "folder": folder,
+            "message_count": len(messages),
+            "conversation_history_count": len(conversation_history),
+            "prompt_chars": len(prompt),
+            "request_received_at_ms": request_received_at_ms,
+            "queued_at_ms": queue_meta.get("queued_at_ms"),
+            "queue_started_at_ms": queue_meta.get("started_at_ms"),
+            "queue_wait_ms": queue_meta.get("queue_wait_ms"),
+            "queue_reason": queue_meta.get("reason", "unknown"),
+        },
+    )
 
     async def on_output(text: str):
         # 將 container 的回覆透過 router 發送回對應的聊天室
@@ -960,6 +988,7 @@ async def _process_group_messages(group: dict, messages: list[dict],
                 session_id=session_id,
                 on_success=_on_success_tracked,
                 on_error=on_error,
+                trace_context=trace_context,
             ),
             timeout=_backstop_timeout,
         )
@@ -1593,7 +1622,7 @@ async def main() -> None:
     _prepull_task.add_done_callback(_task_done_callback_main)
 
     # ── 將 GroupQueue 與實際的訊息處理邏輯串接 ──────────────────────────────
-    async def _process_messages_for_jid(jid: str) -> bool:
+    async def _process_messages_for_jid(jid: str, queue_meta: dict) -> bool:
         """
         GroupQueue 的 callback：當輪到某個群組執行時被呼叫。
         從 DB 取得該群組的待處理訊息，執行 container，
@@ -1624,7 +1653,7 @@ async def main() -> None:
                 _last_timestamp = ts
                 db.set_state("lastTimestamp", str(_last_timestamp))
 
-        await _process_group_messages(group, msgs, on_success=advance)
+        await _process_group_messages(group, msgs, on_success=advance, queue_meta=queue_meta)
         # Fix: return actual success/failure so GroupQueue can schedule retries.
         # Previously always returned True, meaning GroupQueue never retried after
         # a container error — the message would only be retried on the next poll
