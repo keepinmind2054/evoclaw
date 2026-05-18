@@ -1,3 +1,13 @@
+## [1.27.40] — 2026-05-15
+
+### Added
+- **`docs/SELF_UPDATE.md`** — single authoritative reference for EvoClaw's self-update & restart mechanism, previously scattered across `host/auto_update.py` / `host/ipc_watcher.py` / `host/main.py` code comments and ~8 CHANGELOG entries. Covers: the os.execv-not-pm2 design rationale (#530), the four trigger paths (`/update` slash, `auto_update_loop`, `self_update` IPC, `restart_host` IPC), the worktree-sandbox test-gate flow (#569), AI auto-patch on test failure (#570), `self_update.flag` vs `restart.flag` semantics, `/update` vs natural-language "請更新" (#577/#584), manual deploy steps, and the **known gap that self-update never rebuilds the agent image** (`container/` changes need a manual `docker build`).
+
+### Technical Details
+- **New File**: `docs/SELF_UPDATE.md`
+- **Image rebuild required**: No (docs only).
+- **Breaking Changes**: None.
+
 ## [1.27.39] — 2026-05-15
 
 ### Added
