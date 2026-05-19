@@ -1,3 +1,16 @@
+## [1.27.44] — 2026-05-19
+
+### Fixed
+- **Web portal (port 8766) no longer shuts itself down at startup — `_watch_stop` killed the just-started server (#611).** Once #608 let `start_webportal()` actually run, the portal logged `Web portal started at http://127.0.0.1:8766/` but the port never stayed listening, and the log showed `RuntimeWarning: coroutine 'Event.wait' was never awaited`. Cause: `_watch_stop` read the event loop via `stop_event._loop`, but `asyncio.Event._loop` exists yet is `None` until the event is first awaited (Py 3.10+), so the `except AttributeError` fallback to `_captured_loop` never fired. `run_coroutine_threadsafe(stop_event.wait(), None)` raised, the coroutine was never scheduled (hence the warning), `except Exception: pass` swallowed it, and execution **fell through to `server.shutdown()`** — stopping the server milliseconds after `t.start()`. `start_dashboard()` has the same `_loop` flaw but calls `run_coroutine_threadsafe` *outside* its `try`, so the exception kills the watcher thread before `server.shutdown()` is reached — which is why dashboard 8765 survived and webportal 8766 did not. Fix: resolve the loop as `getattr(stop_event, "_loop", None) or _captured_loop`, and `return` (leaving the server running) instead of falling through to `server.shutdown()` when the watcher cannot arm.
+
+### Technical Details
+- **Modified Files**: `host/webportal.py` (`_watch_stop` — loop resolution + no shutdown-on-failure).
+- **Image rebuild required**: No (host-side change only — `pm2 restart evoclaw` to apply).
+- **Breaking Changes**: None.
+- **Verification**: after `pm2 restart evoclaw`, port 8766 stays in `LISTEN` state and serves HTTP.
+- **Known related**: `start_dashboard()` carries the same `stop_event._loop`-is-`None` flaw; its watcher is effectively a no-op (cannot arm) but does not kill the dashboard. Out of scope for #611 — tracked separately if graceful dashboard shutdown is needed.
+- Closes #611.
+
 ## [1.27.43] — 2026-05-19
 
 ### Fixed

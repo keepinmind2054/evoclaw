@@ -508,15 +508,23 @@ def start_webportal(stop_event=None):
         _captured_loop = _asyncio.get_running_loop()
 
         def _watch_stop():
-            try:
-                loop = stop_event._loop  # type: ignore[attr-defined]
-            except AttributeError:
-                loop = _captured_loop
+            # asyncio.Event._loop exists but is None until the event is first
+            # awaited (Py 3.10+), so `stop_event._loop` alone yields None and
+            # never triggers the AttributeError fallback.  Use the loop captured
+            # at call time as the reliable source.  (#611)
+            loop = getattr(stop_event, "_loop", None) or _captured_loop
             try:
                 future = _asyncio.run_coroutine_threadsafe(stop_event.wait(), loop)
-                future.result()
+                future.result()  # blocks until stop_event.set()
             except Exception:
-                pass
+                # The watcher could not arm itself.  Do NOT fall through to
+                # server.shutdown() — that would kill a server that was never
+                # asked to stop (the #611 bug).  Leave the server running.
+                log.exception(
+                    "WebPortal: stop-event watcher failed to arm; "
+                    "server will keep running and will not auto-shutdown"
+                )
+                return
             server.shutdown()
 
         watcher = threading.Thread(target=_watch_stop, daemon=True, name="webportal-stopper")
