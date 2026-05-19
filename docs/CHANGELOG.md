@@ -1,3 +1,15 @@
+## [1.27.43] — 2026-05-19
+
+### Fixed
+- **`WEBPORTAL_ENABLED` now falls back to the `.env` file — the web portal (port 8766) no longer silently fails to start.** `host/config.py` read `WEBPORTAL_ENABLED` (and `WEBPORTAL_PORT` / `WEBPORTAL_HOST`) from `os.environ` only. EvoClaw loads `.env` via `host/env.py:read_env_file()`, which by design **does not pollute `os.environ`**, and `ecosystem.config.js` injects only `PYTHONUNBUFFERED`. So an operator's `WEBPORTAL_ENABLED=true` in `.env` never reached `os.environ`, evaluated to `false`, and `start_webportal()` returned `None` at `webportal.py:477` — port 8766 never bound, with no error logged. The dashboard (8765) was unaffected because `start_dashboard()` has no ENABLED gate. Fix: the three `WEBPORTAL_*` keys now use the same env-var → `.env`-file → default fallback already used by `ENABLED_CHANNELS` and `CONTAINER_MEMORY`.
+
+### Technical Details
+- **Modified Files**: `host/config.py` (`WEBPORTAL_ENABLED` / `WEBPORTAL_PORT` / `WEBPORTAL_HOST` resolution).
+- **Image rebuild required**: No (host-side change only — `pm2 restart evoclaw` to apply).
+- **Breaking Changes**: None. Deployments that set `WEBPORTAL_ENABLED` as a real environment variable are unaffected (env var still takes priority).
+- **Verification**: with `WEBPORTAL_ENABLED=true` in `.env` and no env var set, `host.config.WEBPORTAL_ENABLED` now evaluates `True`.
+- Closes #608.
+
 ## [1.27.42] — 2026-05-19
 
 ### Fixed

@@ -203,9 +203,28 @@ def warn_dashboard_no_password() -> None:
             "Set DASHBOARD_PASSWORD in .env to enable HTTP Basic Auth."
         )
 DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "admin")
-WEBPORTAL_ENABLED = os.environ.get("WEBPORTAL_ENABLED", "false").lower() == "true"
-WEBPORTAL_PORT = _env_int("WEBPORTAL_PORT", 8766)
-WEBPORTAL_HOST = os.environ.get("WEBPORTAL_HOST", "127.0.0.1")
+# Web portal config — env var takes priority; fall back to .env file so
+# operators can set it there (mirrors ENABLED_CHANNELS below).  Reading
+# os.environ alone silently ignored WEBPORTAL_ENABLED=true in .env because
+# read_env_file() deliberately does not pollute os.environ.
+_env_file_webportal = read_env_file(
+    ["WEBPORTAL_ENABLED", "WEBPORTAL_PORT", "WEBPORTAL_HOST"]
+)
+WEBPORTAL_ENABLED = (
+    os.environ.get("WEBPORTAL_ENABLED")
+    or _env_file_webportal.get("WEBPORTAL_ENABLED")
+    or "false"
+).lower() == "true"
+WEBPORTAL_PORT = int(
+    os.environ.get("WEBPORTAL_PORT")
+    or _env_file_webportal.get("WEBPORTAL_PORT")
+    or 8766
+)
+WEBPORTAL_HOST = (
+    os.environ.get("WEBPORTAL_HOST")
+    or _env_file_webportal.get("WEBPORTAL_HOST")
+    or "127.0.0.1"
+)
 HEALTH_PORT = _env_int("HEALTH_PORT", 8769)
 
 # Channels to load (comma-separated, default: telegram)
