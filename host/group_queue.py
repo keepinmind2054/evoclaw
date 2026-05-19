@@ -9,6 +9,7 @@ over pending messages. Includes exponential backoff retry on failure.
 import asyncio
 import collections
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Awaitable, Optional, Deque
 
@@ -59,6 +60,7 @@ class _GroupState:
     is_task_container: bool = False # 目前跑的是排程任務（而非訊息回覆）
     running_task_id: Optional[str] = None  # 正在執行的任務 ID（去重複用）
     pending_messages: bool = False  # 是否有訊息等待下一輪處理
+    pending_message_queued_at_ms: Optional[int] = None  # 首個 pending 訊息入列時間（phase-0 latency 觀測，#601）
     pending_tasks: Deque = field(default_factory=collections.deque)  # 等待執行的 _QueuedTask 清單 (O(1) popleft)
     pending_task_ids: set = field(default_factory=set)  # O(1) duplicate check for pending_tasks (issue #446)
     retry_count: int = 0            # 目前連續失敗次數（用於退避計算）

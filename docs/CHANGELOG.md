@@ -1,3 +1,15 @@
+## [1.27.42] — 2026-05-19
+
+### Fixed
+- **Message loop no longer crashes every poll — `_GroupState` missing field + missing `import time` (#601 regression).** #601 (phase-0 latency instrumentation) introduced two defects in `host/group_queue.py`: (1) it added nine references to `state.pending_message_queued_at_ms` (lines 130/140/148/166/167/405/406/461/462) but never declared the field on the `_GroupState` dataclass; (2) it added seven `int(time.time() * 1000)` calls without adding `import time`. The first `enqueue_message_check()` call raised `AttributeError: '_GroupState' object has no attribute 'pending_message_queued_at_ms'` — and that `AttributeError` at the field-read masked the latent `NameError: name 'time' is not defined` one line below. The host message loop logged `Message loop error: ...` on **every 2 s poll**; the agent processed zero messages — EvoClaw was operationally down. Fix: declare `pending_message_queued_at_ms: Optional[int] = None` on the dataclass **and** add `import time`.
+
+### Technical Details
+- **Modified Files**: `host/group_queue.py` (`import time` added; `_GroupState` dataclass — one field added).
+- **Image rebuild required**: No (host-side change only — `pm2 restart evoclaw` to apply).
+- **Breaking Changes**: None.
+- **Verification**: `enqueue_message_check()` exercised through the `state.active` and `retry_count` branches — both set `pending_message_queued_at_ms` and raise neither `AttributeError` nor `NameError`.
+- Closes #607.
+
 ## [1.27.41] — 2026-05-19
 
 ### Fixed
