@@ -25,8 +25,29 @@ import time
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import parse_qs as _parse_qs_std, urlsplit as _urlsplit
 
 from . import config
+
+
+def _parse_query(path: str) -> dict[str, str]:
+    """Parse the query string of an HTTP request path into a flat ``{key: value}`` dict.
+
+    BUG FIX: the previous inline parser in ``_Handler.do_GET`` split on '&'
+    and '=' but never URL-decoded keys or values.  Frontend
+    ``URLSearchParams({jid: "tg:8259652816"})`` produces ``jid=tg%3A8259652816``
+    on the wire; the literal ``"tg%3A8259652816"`` was then fed to
+    ``db.get_hot_memory()``, never matched, and the 記憶查看器 rendered empty.
+
+    Backed by stdlib ``urllib.parse.parse_qs`` so both '+' and '%XX' escapes
+    are decoded the same way ``URLSearchParams`` and HTML forms produce them.
+    Multi-valued keys collapse to their first value to preserve the previous
+    ``dict[str, str]`` API expected by every call site.
+    """
+    query = _urlsplit(path).query
+    # keep_blank_values=True so ?jid= still surfaces as {"jid": ""}
+    parsed = _parse_qs_std(query, keep_blank_values=True)
+    return {k: v[0] for k, v in parsed.items() if v}
 
 # Module-level shutdown flag set by start_dashboard() when stop_event is provided.
 # Checked by the SSE log stream loop so it exits promptly on graceful shutdown
@@ -1709,12 +1730,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._require_auth(); return
 
         path = path_raw
-        query = self.path[len(path)+1:] if "?" in self.path else ""
-        qs = {}
-        for part in query.split("&"):
-            if "=" in part:
-                k, _, v = part.partition("=")
-                qs[k] = v
+        # BUG-DB-FIX: the previous inline parser did not URL-decode keys or
+        # values, so any query string containing '%XX' or '+' escapes (e.g.
+        # `jid=tg%3A123` from URLSearchParams) reached call sites as a literal
+        # string and silently broke DB lookups.  See `_parse_query` for the
+        # decoder backed by `urllib.parse.parse_qs`.
+        qs = _parse_query(self.path)
 
         if path == "/" or path == "/index.html":
             shell = _SHELL.replace("PORT_PLACEHOLDER", str(config.DASHBOARD_PORT))
