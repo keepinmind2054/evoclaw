@@ -1,3 +1,16 @@
+## [1.27.45] — 2026-05-20
+
+### Fixed
+- **Gemini agent no longer spam-repeats completion-confirmation messages within a single run (#613).** In `telegram_8259652816` on 2026-05-19 the agent sent 7 bot messages within one container run, most being redundant `✅ 已完成 / 任務完成 / 所有任務已完成` narration. `pm2-err.log` confirmed a single `Processing 1 message(s)` dispatch — the loop was internal, not host re-dispatch (`host/db.py:579` `get_new_messages` correctly filters `is_bot_message=0`). The existing `_only_notify_turns` guard in `_loop_gemini.py` did not catch it because the agent **interleaved** real `Read`/`Write` work between the duplicate completion messages, resetting the counter each time. Fix in two parts: (1) `soul.md` now contains an explicit "結果只送一次" rule under 誠實性規則, listing the forbidden duplicate-confirmation patterns; (2) `_loop_gemini.py` counts every `send_message` whose text matches a completion-phrase regex (`✅ 已完成`, `任務完成`, `所有任務已完成`, `task complete`, `all tasks done`, …) — when the count reaches 2 the iteration loop hard-breaks via `🚨 COMPLETION-LOOP`, capping user-visible damage to at most one duplicate regardless of whether the model obeys the prompt rule.
+
+### Technical Details
+- **Modified Files**: `container/agent-runner/_loop_gemini.py` (new `_COMPLETION_PHRASE_RE_G` regex, `_completion_send_count` tracker, per-fc detection, end-of-iteration hard break); `container/agent-runner/soul.md` (new "結果只送一次" section under 誠實性規則).
+- **Image rebuild required**: **Yes** — `docker build -t evoclaw-agent:latest container/` before `pm2 restart evoclaw` (per `reference_deploy_flow.md`).
+- **Breaking Changes**: None. A run that legitimately needs more than one `已完成` confirmation (extremely rare) will hit the hard break — but such a pattern is the spam signature this fix targets.
+- **Verification**: regex smoke-tested against the 7 observed messages — first informational `📄 已讀取` does not match, completion-confirmation messages #2 and #3 do match → loop would have broken after 2 sends instead of 7.
+- **Known related**: `_loop_openai.py` and `_loop_claude.py` have the same structural flaw. Production runs Gemini, so this PR fixes only `_loop_gemini.py`; OpenAI/Claude tracked as follow-up.
+- Closes #613.
+
 ## [1.27.44] — 2026-05-19
 
 ### Fixed

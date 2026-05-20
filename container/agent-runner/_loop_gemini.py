@@ -77,6 +77,7 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
     _turns_since_notify = 0   # turns since last mcp__evoclaw__send_message call
     _only_notify_turns = 0    # consecutive turns with ONLY send_message (no real work)
     _no_tool_turns = 0        # consecutive turns without any tool call
+    _completion_send_count = 0  # # of send_message calls whose text matched completion-confirmation phrases (#613)
     # Tools that represent actual work (not just reporting)
     _SUBSTANTIVE_TOOLS_GEMINI = frozenset([
         "Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch",
@@ -96,6 +97,19 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
         r'|(?:Task\s+(?:is\s+)?(?:complete|done|finished))'            # Task complete
         r'|(?:Successfully\s+(?:completed|executed|ran|written))',      # Successfully executed
         _re_gemini.DOTALL | _re_gemini.IGNORECASE,
+    )
+    # #613: completion-confirmation phrases sent via send_message. The agent must
+    # not deliver more than ONE such confirmation per run. The second match within
+    # a single run triggers a hard break to prevent the "✅已完成 / 任務完成 /
+    # 所有任務已完成 / ✅已完成 / 任務完成 ..." duplicate-spam pattern.
+    _COMPLETION_PHRASE_RE_G = _re_gemini.compile(
+        r'(?:✅\s*已完成'
+        r'|✅\s*完成'
+        r'|所有任務(?:都)?(?:已)?完成'
+        r'|任務完成'
+        r'|task\s+(?:is\s+)?(?:complete|done|finished)'
+        r'|all\s+tasks?\s+(?:are\s+)?(?:complete|done|finished))',
+        _re_gemini.IGNORECASE,
     )
 
     # P16B-FIX-7: cache GEMINI_MODEL once before the loop rather than re-reading
@@ -241,6 +255,17 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
                 if "MEMORY.md" in _fc_args_str or _memory_path_str in _fc_args_str:
                     _memory_written = True
                     _log("🧠 MEMORY-WRITE", f"Gemini updated MEMORY.md via {fc.name} on turn {n}")
+            # #613: count completion-confirmation send_message calls. Multiple
+            # confirmations per run are spam (e.g. "✅已完成" then "任務完成"
+            # then "所有任務已完成"). Tracked regardless of whether other tools
+            # ran this turn — _only_notify_turns above resets on interleaved
+            # real work and so misses this pattern entirely.
+            if fc.name == "mcp__evoclaw__send_message":
+                _send_args_dict = dict(fc.args) if fc.args else {}
+                _send_text = str(_send_args_dict.get("text") or _send_args_dict.get("message") or "")
+                if _COMPLETION_PHRASE_RE_G.search(_send_text):
+                    _completion_send_count += 1
+                    _log("⚠️ COMPLETION-SEND", f"Gemini sent completion-confirmation #{_completion_send_count} on turn {n}: {_send_text[:80]!r}")
             # 將工具結果包裝成 FunctionResponse 格式，Gemini 要求此格式
             fn_responses.append(
                 types.Part(function_response=types.FunctionResponse(
@@ -358,6 +383,16 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
                         continue
                 break
             history = _keep_fewshot + history[_tail_start:]
+
+        # #613: hard break on duplicate completion-confirmation sends. The first
+        # confirmation is the legitimate "task done" message; a second is spam
+        # ("✅已完成" then "任務完成" then "所有任務已完成" loop). Soft warnings
+        # (FAKE-PROGRESS / MILESTONE) failed to stop this in practice because
+        # interleaved real work resets _only_notify_turns. Break the loop now
+        # rather than waiting for MAX_ITER to cap the bleeding.
+        if _completion_send_count >= 2:
+            _log("🚨 COMPLETION-LOOP", f"Gemini emitted {_completion_send_count} completion-confirmation send_message calls in this run — breaking to prevent duplicate spam")
+            break
 
     if not final_response:
         _log("⚠️ LOOP-EXHAUST", f"Gemini agent loop hit MAX_ITER={MAX_ITER} without text response — no final text collected")

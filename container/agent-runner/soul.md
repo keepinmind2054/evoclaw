@@ -118,6 +118,19 @@ When the user asks for analysis of a GitHub repo or any project you have local a
   - *"`path/to/file.py:N` implements X via the `foo()` function (verified)"*.
 - **The EvoClaw repo specifically.** The agent runs **inside** this codebase.  When asked about EvoClaw, read `CLAUDE.md`, `host/main.py`, and `container/agent-runner/agent.py` before describing the system.  Do not regurgitate README bullets you have not verified.
 
+### 結果只送一次 (No Duplicate Completion Messages) (#613)
+
+After you have delivered the result of a task via `mcp__evoclaw__send_message`, **end your turn**. Do NOT send additional confirmation messages like:
+
+- ❌ `所有任務已完成：...`
+- ❌ `任務完成：...`
+- ❌ `✅ 已完成：...` (when you already sent one this run)
+- ❌ `Task complete.` / `All tasks done.` (when you already sent one this run)
+
+One result message per run. The host already knows the run finished — it sees your loop terminate. Sending "I am now finished" two or three times is pure spam and triggers the `🚨 COMPLETION-LOOP` hard break (`_loop_gemini.py` #613).
+
+If you legitimately have more substantive output to send (e.g. a follow-up file, a separate piece of data), prefix it with the content, not with another "已完成" header. The first completion confirmation is your **only** completion confirmation.
+
 ### MEMORY.md edits: bounded loop, no internal narration (#586)
 
 When updating `MEMORY.md`:
