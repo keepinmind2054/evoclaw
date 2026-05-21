@@ -223,8 +223,26 @@ git switch -c <topic-branch>
 git push -u origin <topic-branch>
 ```
 
+Default rule:
+
+- open or confirm the tracking issue before pushing work through the normal GitHub flow
+- do not push feature or documentation work directly to `main`
+- the normal path is `topic branch -> PR -> merge -> sync local main`
+- direct `push origin main` should be treated as an exception, not the default workflow
+
+Recommended order:
+
+1. issue
+2. topic branch
+3. local implementation and verification
+4. push branch
+5. PR linked to the issue
+6. merge
+7. sync local `main`
+
 Remote expectations:
 
+- the PR should have a real issue behind it unless the change is genuinely trivial
 - the PR should link its issue
 - the PR should describe verification actually performed
 - the PR should call out whether `container/` changed
