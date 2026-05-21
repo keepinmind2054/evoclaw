@@ -1,3 +1,18 @@
+## [1.27.46] — 2026-05-20
+
+### Fixed
+- **Dashboard `/api/memory` (記憶查看器) no longer returns empty for every group — query parser now URL-decodes keys and values.** The inline parser in `_Handler.do_GET` (`host/dashboard.py:1712`) split on `&`/`=` but never URL-decoded, so the frontend call `URLSearchParams({jid: "tg:8259652816"})` produced `jid=tg%3A8259652816` on the wire and the literal `"tg%3A8259652816"` was then handed to `db.get_hot_memory()`. No row matched and 「🧠 記憶查看」 rendered `此群組尚無熱記憶` / `此時段無暖記憶日誌` for every selectable JID. Every channel JID format (`tg:…`, `wa:…:…`, `dc:…:…`, `gm:…`) carries at least one `:` so the bug affected 100% of group selections. Fix: replace the inline parser with a new module-level `_parse_query(path)` helper backed by `urllib.parse.parse_qs(keep_blank_values=True)`, decoding both `%XX` and `+` escapes the same way `URLSearchParams` and HTML forms produce them. Multi-valued keys collapse to the first value to preserve the existing `dict[str, str]` API expected by every call site.
+
+### Technical Details
+- **Modified Files**: `host/dashboard.py` (new `_parse_query` helper + inline parser replaced with one-liner); `tests/test_dashboard_qs_parser.py` (new — 9 cases covering single-/multi-colon JIDs, '+'/'%20' space encoding, blank values, repeated keys, and previously-unencoded values).
+- **Image rebuild required**: No — host-side only. `pm2 restart evoclaw` to apply.
+- **Breaking Changes**: None. Previously-unencoded values still round-trip unchanged; only formerly-broken encoded values now work.
+- **Verification**:
+  - Before: `curl ".../api/memory?jid=tg%3A8259652816"` → `{"hot_memory": "", "warm_logs": []}`.
+  - After: same call returns 20 `warm_logs` entries and the populated `hot_memory` blob, matching the result of `curl ".../api/memory?jid=tg:8259652816"`.
+  - `pytest tests/test_dashboard_qs_parser.py` — 9 passed.
+- **Known related**: every `GET` handler in `dashboard.py` (`/api/logs`, `/api/messages`, `/api/container-logs`, `/api/dev/log/…`, …) read from the same `qs` dict, so any query param containing `:`, ` `, or other reserved characters was previously misparsed. This single helper fixes them all.
+
 ## [1.27.45] — 2026-05-20
 
 ### Fixed
