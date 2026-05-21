@@ -1,3 +1,22 @@
+## [1.27.47] — 2026-05-20
+
+### Fixed
+- **Agent no longer dispatches `"（處理完成，但未能產生文字回應，請重新詢問。）"` after legit Chinese closing summaries — SEMANTIC-FAKE / FAKE-STATUS guards now allow claims that are backed by real tool work.** `_loop_gemini.py:200`, `_loop_openai.py:527`, `_loop_claude.py:149` wiped `final_response` whenever `_ACTION_CLAIM_RE` matched on a text-only model turn. But the *closing* turn of any healthy agentic run is **always** text-only by design — it summarises the prior tool turns. So any final sentence containing "已建立 / 已完成 / 已部署 / 已修復 / Successfully completed the fix …" was wiped, the loop ran to MAX_ITER, `final_response` stayed empty, and the user saw the empty-response fallback instead of the agent's actual answer (observed on `telegram_8259652816` 2026-05-20 across Gmail credentials Q&A, MCP/Skill safety walkthrough, and skill creation — every multi-turn task ended with the fallback string despite real work being done). Fix: new helper `_constants.is_unverified_action_claim(text, substantive_action_count)` returns True only when the agent has not executed a single substantive tool (`Bash`/`Read`/`Write`/`Edit`/`Glob`/`Grep`/`WebFetch`/`mcp__evoclaw__run_agent`) in the entire run. The three loop files now also track `_substantive_action_count` and pass it to both the FAKE-STATUS regex check and the SEMANTIC-FAKE helper, so closing summaries that *follow* real work are correctly let through. The original hallucination pattern this guard was written to catch — agent claims "已建立 X" without ever having called a tool — still fires (regression-tested).
+
+### Technical Details
+- **Modified Files**:
+  - `container/agent-runner/_constants.py` — new `is_unverified_action_claim(text, substantive_action_count)` helper with docstring explaining the bug.
+  - `container/agent-runner/_loop_gemini.py` — `_substantive_action_count` counter, increment after `_did_real_work`, FAKE-STATUS / SEMANTIC-FAKE guards now require `_substantive_action_count == 0`.
+  - `container/agent-runner/_loop_openai.py` — same structural change.
+  - `container/agent-runner/_loop_claude.py` — same structural change.
+  - `tests/test_semantic_fake_guard.py` — new; 9 cases pinning helper behaviour (legit summaries pass, zero-work hallucinations caught, regex intent preserved).
+- **Image rebuild required**: **Yes** — `docker build -t evoclaw-agent:latest container/` then `pm2 restart evoclaw` (per `reference_deploy_flow.md`). All four edited files live in `container/agent-runner/`.
+- **Breaking Changes**: None. A run that *legitimately* produces a completion claim before doing any work is still flagged (the helper's `substantive_action_count == 0` branch). Runs that do *not* claim completion are unaffected (regex never matches → helper returns False).
+- **Verification**:
+  - `pytest tests/test_semantic_fake_guard.py` — 9 passed (legit-after-work allowed Chinese/English/`了` suffix, zero-work claims still caught, regex matches every target verb, regex still ignores `我已了解` and `成功的範例` from BUG-P21-1).
+  - Smoke import of all three loop modules succeeds after the edits.
+- **Known related**: PR #613 (`fix(agent): break Gemini loop on duplicate completion-confirmation send_message`) and this fix attack two different failure modes of the same end-of-run logic; PR #613 caps repeated `send_message` spam, this PR stops the *opposite* failure where one legitimate summary gets erased entirely.
+
 ## [1.27.46] — 2026-05-20
 
 ### Fixed

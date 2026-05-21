@@ -39,3 +39,28 @@ _ACTION_CLAIM_RE = _re_module_level.compile(
     r')',
     _re_module_level.IGNORECASE,
 )
+
+
+def is_unverified_action_claim(text: str, substantive_action_count: int) -> bool:
+    """Decide whether a text-only model turn claims action completion *without* having
+    done any real tool work in the current run.
+
+    BUG FIX (記憶查看器 issue follow-up): the SEMANTIC-FAKE / FAKE-STATUS checks in
+    `_loop_gemini.py`, `_loop_openai.py`, and `_loop_claude.py` previously wiped
+    ``final_response`` whenever the regex matched **on a text-only turn**.  In every
+    healthy multi-turn agentic run the final turn is *always* text-only by design
+    (it summarises the work done in the preceding tool turns), so the legitimate
+    closing sentence — ``"MCP 安全檢查 skill 已建立完成"``, ``"已更新 README.md"``,
+    ``"Successfully completed the fix"`` — matched the regex and was wiped.  The
+    loop then ran until MAX_ITER and emitted ``"（處理完成，但未能產生文字回應，
+    請重新詢問。）"`` to the user despite the agent having actually completed the
+    work.
+
+    Fix: only treat the claim as *unverified* when ``substantive_action_count == 0``,
+    i.e. the agent has not executed a single substantive tool (Bash/Read/Write/Edit/
+    Glob/Grep/WebFetch/run_agent) in the entire run.  When real work happened the
+    completion claim is, by definition, *verified by execution* — let it through.
+    """
+    if substantive_action_count > 0:
+        return False
+    return bool(_ACTION_CLAIM_RE.search(text))

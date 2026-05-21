@@ -119,7 +119,7 @@ from _constants import (
     _MAX_TOOL_RESULT_CHARS, _MAX_HISTORY_MESSAGES,
 )
 from _utils import _log, _llm_call_with_retry, _KeyPool
-from _constants import _ACTION_CLAIM_RE
+from _constants import _ACTION_CLAIM_RE, is_unverified_action_claim
 from _tools import _messages_sent_via_tool
 
 # ── Module-level compiled regexes (issue #453: avoid re-compiling every loop iteration) ──
@@ -316,6 +316,9 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
     _no_tool_turns = 0  # consecutive turns without any tool call (Fix #169)
     _turns_since_notify = 0  # turns since last mcp__evoclaw__send_message call (milestone enforcer)
     _only_notify_turns = 0   # consecutive turns with ONLY send_message (no substantive tools)
+    _substantive_action_count = 0  # # of turns this run that called a substantive tool —
+                                    # gates FAKE-STATUS / SEMANTIC-FAKE guards so legit
+                                    # closing summaries after real work pass through.
     _memory_written = False  # True once agent writes to MEMORY.md this session (Enforcer v3)
     # P16B-FIX-3: guard against empty group_folder so the path does not resolve to
     # the relative string "MEMORY.md", which would never match an absolute path in
@@ -509,28 +512,31 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
             _ext_fake_hits = _EXTENDED_FAKE_RE.findall(content)
             if _ext_fake_hits:
                 _fake_hits = (_fake_hits or []) + _ext_fake_hits
-            if _fake_hits and n < MAX_ITER - 1:
-                _log("⚠️ FAKE-STATUS", f"model wrote {len(_fake_hits)} fake status line(s) — tool_choice='required' on next turn")
+            # BUG-FIX: only fire when the entire run has done ZERO substantive work.
+            # Closing summaries after real Bash/Read/Write earlier in the run legitimately
+            # contain ✅ Done / 已完成 / Task complete; wiping those produced the user-visible
+            # "（處理完成，但未能產生文字回應，請重新詢問。）" fallback instead of the answer.
+            if _fake_hits and _substantive_action_count == 0 and n < MAX_ITER - 1:
+                _log("⚠️ FAKE-STATUS", f"model wrote {len(_fake_hits)} fake status line(s) with zero substantive tool calls this run — tool_choice='required' on next turn")
                 history.append({
                     "role": "user",
                     "content": (
-                        "【系統警告】你剛才的回覆包含假狀態行（例如 *(正在執行...)* ），沒有呼叫任何工具。"
+                        "【系統警告】你剛才的回覆包含假狀態行（例如 *(正在執行...)* ），但本輪整輪沒有呼叫任何實質工具。"
                         "下一輪系統將強制要求你必須呼叫工具，請立刻使用 Bash tool 或其他工具執行所需命令。"
                     ),
                 })
                 continue
 
             # ── Semantic cross-validation: action claim without any tool call ──
-            # Catches completion-verb hallucinations that slip past syntactic patterns.
-            # OpenAI: tool calls appear as msg.tool_calls (None or empty list when absent)
-            _had_tool_calls_this_turn_oai = bool(getattr(msg, "tool_calls", None))
-            if not _had_tool_calls_this_turn_oai and _ACTION_CLAIM_RE.search(content) and n < MAX_ITER - 1:
-                _log("⚠️ SEMANTIC-FAKE", "OpenAI model claims action complete but called no tools this turn")
+            # Same guard as FAKE-STATUS above — only flag claims that are not backed
+            # by any substantive tool execution in the current run.
+            if is_unverified_action_claim(content, _substantive_action_count) and n < MAX_ITER - 1:
+                _log("⚠️ SEMANTIC-FAKE", "OpenAI model claims action complete but called no substantive tool all run")
                 history.append({
                     "role": "user",
                     "content": (
-                        "【系統驗證】你的回應中聲稱已執行了某項操作，但本輪沒有呼叫任何工具。"
-                        "請實際使用對應工具（Read/Write/Edit/Bash）執行並確認，不要只是聲明已完成。"
+                        "【系統驗證】你的回應中聲稱已執行了某項操作，但本輪整輪沒有呼叫任何實質工具（Bash/Read/Write/Edit/Grep/run_agent）。"
+                        "請實際使用對應工具執行並確認，不要只是聲明已完成。"
                     ),
                 })
                 continue
@@ -562,6 +568,10 @@ def run_agent_openai(client_holder, system_instruction: str, user_message: str, 
         _tool_names_this_turn = {tc.function.name for tc in msg.tool_calls}
         _sent_message_this_turn = "mcp__evoclaw__send_message" in _tool_names_this_turn
         _did_real_work = bool(_tool_names_this_turn & _SUBSTANTIVE_TOOLS)
+        if _did_real_work:
+            # Track lifetime substantive work so the text-only FAKE-STATUS / SEMANTIC-FAKE
+            # guards above let legitimate closing summaries through.
+            _substantive_action_count += 1
 
         if _sent_message_this_turn and _did_real_work:
             # Genuine progress report: real work + notification

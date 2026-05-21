@@ -16,7 +16,7 @@ from _constants import (
     _MAX_TOOL_RESULT_CHARS, _MAX_HISTORY_MESSAGES, WORKSPACE,
 )
 from _utils import _log, _llm_call_with_retry, _KeyPool
-from _constants import _ACTION_CLAIM_RE
+from _constants import _ACTION_CLAIM_RE, is_unverified_action_claim
 from _tools import _messages_sent_via_tool
 
 
@@ -78,6 +78,9 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
     _only_notify_turns = 0    # consecutive turns with ONLY send_message (no real work)
     _no_tool_turns = 0        # consecutive turns without any tool call
     _completion_send_count = 0  # # of send_message calls whose text matched completion-confirmation phrases (#613)
+    _substantive_action_count = 0  # # of turns this run that called a substantive tool (Bash/Read/Write/...)
+                                    # Used by FAKE-STATUS / SEMANTIC-FAKE guards to allow legit
+                                    # closing summaries after real work — see _constants.is_unverified_action_claim
     # Tools that represent actual work (not just reporting)
     _SUBSTANTIVE_TOOLS_GEMINI = frozenset([
         "Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch",
@@ -183,25 +186,32 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
             _no_tool_turns += 1
 
             # ── Fake status detection on text-only turn ──────────────────────
+            # BUG-FIX: only fire when the entire run has done ZERO substantive work.
+            # Final-turn summaries legitimately contain ✅ Done / 已完成 / Task complete
+            # AFTER real Bash/Read/Write/Edit calls earlier in the run; wiping those
+            # closing sentences made the loop run to MAX_ITER and emit the fallback
+            # "（處理完成，但未能產生文字回應，請重新詢問。）" to the user.
             _fake_hits = _FAKE_STATUS_RE_G.findall(final_response)
-            if _fake_hits and n < MAX_ITER - 1:
-                _log("⚠️ FAKE-STATUS", f"Gemini wrote {len(_fake_hits)} fake status indicator(s) without tool calls")
+            if _fake_hits and _substantive_action_count == 0 and n < MAX_ITER - 1:
+                _log("⚠️ FAKE-STATUS", f"Gemini wrote {len(_fake_hits)} fake status indicator(s) with zero substantive tool calls this run")
                 history.append(types.Content(role="user", parts=[types.Part(text=(
-                    "【系統警告】你剛才的回覆包含假狀態指示（例如 ✅ Done 或 *(正在執行...)* ），但沒有呼叫任何工具。"
+                    "【系統警告】你剛才的回覆包含假狀態指示（例如 ✅ Done 或 *(正在執行...)* ），但本輪整輪沒有呼叫任何實質工具。"
                     "請立刻使用 Bash tool 或其他工具實際執行所需命令，不要只是描述或假裝完成。"
                 ))]))
                 final_response = ""
                 continue
 
             # ── Semantic cross-validation: action claim without any tool call ──
-            # Catches completion-verb hallucinations that slip past syntactic patterns.
-            # Gemini: fn_calls is already empty here (we're in the `if not fn_calls` branch)
-            # so _had_tool_calls_this_turn is always False at this point.
-            if _ACTION_CLAIM_RE.search(final_response) and n < MAX_ITER - 1:
-                _log("⚠️ SEMANTIC-FAKE", "Gemini claims action complete but called no tools this turn")
+            # Same guard as FAKE-STATUS above — only flag claims that are not backed
+            # by *any* substantive tool execution in the current run.  Without this
+            # guard the legitimate closing sentence "MCP 安全檢查 skill 已建立完成"
+            # (issued after Write+Bash+Read in earlier turns) was wiped and the user
+            # saw the empty-response fallback instead of the agent's actual answer.
+            if is_unverified_action_claim(final_response, _substantive_action_count) and n < MAX_ITER - 1:
+                _log("⚠️ SEMANTIC-FAKE", "Gemini claims action complete but called no substantive tool all run")
                 history.append(types.Content(role="user", parts=[types.Part(text=(
-                    "【系統驗證】你的回應中聲稱已執行了某項操作，但本輪沒有呼叫任何工具。"
-                    "請實際使用對應工具（Read/Write/Edit/Bash）執行並確認，不要只是聲明已完成。"
+                    "【系統驗證】你的回應中聲稱已執行了某項操作，但本輪整輪沒有呼叫任何實質工具（Bash/Read/Write/Edit/Grep/run_agent）。"
+                    "請實際使用對應工具執行並確認，不要只是聲明已完成。"
                 ))]))
                 final_response = ""
                 continue
@@ -277,6 +287,10 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
         # ── Milestone Enforcer: anti-fabrication (same logic as OpenAI loop) ──
         _sent_message_this_turn = "mcp__evoclaw__send_message" in _tool_names_this_turn
         _did_real_work = bool(_tool_names_this_turn & _SUBSTANTIVE_TOOLS_GEMINI)
+        if _did_real_work:
+            # Track lifetime substantive work in this run so FAKE-STATUS / SEMANTIC-FAKE
+            # guards above can let legitimate closing summaries through.
+            _substantive_action_count += 1
 
         if _sent_message_this_turn and _did_real_work:
             _turns_since_notify = 0

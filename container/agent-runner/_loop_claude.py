@@ -13,7 +13,7 @@ from _constants import (
     _MAX_TOOL_RESULT_CHARS, _MAX_HISTORY_MESSAGES,
 )
 from _utils import _log, _llm_call_with_retry, _KeyPool
-from _constants import _ACTION_CLAIM_RE
+from _constants import _ACTION_CLAIM_RE, is_unverified_action_claim
 from _tools import _messages_sent_via_tool
 # execute_tool will be imported lazily to avoid circular imports:
 # from _registry import execute_tool
@@ -76,6 +76,9 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
     _retry_warning: str = ""  # injected before next LLM call when tool retries detected
     _turns_since_notify = 0   # turns since last mcp__evoclaw__send_message call
     _only_notify_turns = 0    # consecutive turns with ONLY send_message (no real work)
+    _substantive_action_count = 0  # # of turns this run that called a substantive tool —
+                                    # gates FAKE-STATUS / SEMANTIC-FAKE guards so legit
+                                    # closing summaries after real work pass through.
     # Tools that represent actual work (not just reporting)
     _SUBSTANTIVE_TOOLS_CLAUDE = frozenset([
         "Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch",
@@ -124,13 +127,18 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
                 if hasattr(block, "text") and block.text is not None
             )
             # ── Fake status detection on end_turn (no tool calls made) ─────────
+            # BUG-FIX: only fire when the run has done ZERO substantive work.
+            # Legit closing summaries after real Bash/Read/Write tool calls earlier
+            # in the run legitimately contain ✅ Done / 已完成 / Task complete; wiping
+            # them produced "（處理完成，但未能產生文字回應，請重新詢問。）" instead
+            # of the agent's actual answer.
             _fake_hits = _FAKE_STATUS_RE.findall(final_response)
-            if _fake_hits and n < MAX_ITER - 1:
-                _log("⚠️ FAKE-STATUS", f"Claude wrote {len(_fake_hits)} fake status indicator(s) without tool calls")
+            if _fake_hits and _substantive_action_count == 0 and n < MAX_ITER - 1:
+                _log("⚠️ FAKE-STATUS", f"Claude wrote {len(_fake_hits)} fake status indicator(s) with zero substantive tool calls this run")
                 messages.append({
                     "role": "user",
                     "content": (
-                        "【系統警告】你剛才的回覆包含假狀態指示（例如 ✅ Done 或 *(正在執行...)* ），但沒有呼叫任何工具。"
+                        "【系統警告】你剛才的回覆包含假狀態指示（例如 ✅ Done 或 *(正在執行...)* ），但本輪整輪沒有呼叫任何實質工具。"
                         "請立刻使用 Bash tool 或其他工具實際執行所需命令，不要只是描述或假裝完成。"
                     ),
                 })
@@ -138,21 +146,16 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
                 continue
 
             # ── Semantic cross-validation: action claim without any tool call ──
-            # If the agent's text claims it completed an action (using common
-            # completion verbs) but did NOT call any tools this turn, inject a
-            # verification demand.  This catches hallucinations that slip past the
-            # syntactic _FAKE_STATUS_RE patterns above.
-            _had_tool_calls_this_turn = any(
-                hasattr(b, "type") and b.type == "tool_use"
-                for b in response.content
-            )
-            if not _had_tool_calls_this_turn and _ACTION_CLAIM_RE.search(final_response) and n < MAX_ITER - 1:
-                _log("⚠️ SEMANTIC-FAKE", "Claude claims action complete but called no tools this turn")
+            # Same guard as FAKE-STATUS above — only flag claims that are not backed
+            # by any substantive tool execution in the current run.  See
+            # _constants.is_unverified_action_claim for the rationale.
+            if is_unverified_action_claim(final_response, _substantive_action_count) and n < MAX_ITER - 1:
+                _log("⚠️ SEMANTIC-FAKE", "Claude claims action complete but called no substantive tool all run")
                 messages.append({
                     "role": "user",
                     "content": (
-                        "【系統驗證】你的回應中聲稱已執行了某項操作，但本輪沒有呼叫任何工具。"
-                        "請實際使用對應工具（Read/Write/Edit/Bash）執行並確認，不要只是聲明已完成。"
+                        "【系統驗證】你的回應中聲稱已執行了某項操作，但本輪整輪沒有呼叫任何實質工具（Bash/Read/Write/Edit/Grep/run_agent）。"
+                        "請實際使用對應工具執行並確認，不要只是聲明已完成。"
                     ),
                 })
                 final_response = ""
@@ -256,6 +259,10 @@ def run_agent_claude(client_holder, model: str, system_instruction: str, user_me
         # ── Milestone Enforcer: anti-fabrication (same logic as OpenAI loop) ──
         _sent_message_this_turn = "mcp__evoclaw__send_message" in _tool_names_this_turn
         _did_real_work = bool(_tool_names_this_turn & _SUBSTANTIVE_TOOLS_CLAUDE)
+        if _did_real_work:
+            # Track lifetime substantive work so the end_turn FAKE-STATUS / SEMANTIC-FAKE
+            # guards above can let legitimate closing summaries through.
+            _substantive_action_count += 1
 
         if _sent_message_this_turn and _did_real_work:
             _turns_since_notify = 0
