@@ -11,6 +11,10 @@ EvoClaw now emits Phase 0 timing and prompt-size logs on the hot execution path 
 
 These events are emitted by `host/main.py`, `host/group_queue.py`, and `host/container_runner.py` and are intended to support follow-up work on queue prioritization and prompt slimming.
 
+## Development Workflow
+
+For the centralized development / PR / update / restart workflow, see [docs/DEVELOPMENT_WORKFLOW.md](docs/DEVELOPMENT_WORKFLOW.md).
+
 [![Version](https://img.shields.io/badge/version-v1.35.0-blue)](https://github.com/KeithKeepGoing/evoclaw/blob/main/docs/CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
