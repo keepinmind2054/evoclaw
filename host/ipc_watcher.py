@@ -396,36 +396,21 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
             log.info(f"Group registered via IPC: {folder}")
 
     elif msg_type == "refresh_groups":
-        # 寫入旗標檔案通知 _message_loop 重新從 DB 載入群組清單
-        # 用檔案旗標（而非直接呼叫函式）是因為 IPC watcher 與 message loop
-        # 在不同的 asyncio task 中，透過旗標可以避免跨 task 的直接耦合
-        # p16c BUG-FIX (MEDIUM): use atomic tmp+rename so the main loop never reads
-        # an empty or half-written flag file if it polls exactly at write time.
-        flag = config.DATA_DIR / "refresh_groups.flag"
-        _flag_tmp = flag.with_suffix(".flag.tmp")
-        _flag_tmp.write_text("1", encoding="utf-8")
-        _flag_tmp.rename(flag)
+        # 寫入資料庫狀態通知 _message_loop 重新從 DB 載入群組清單
+        # 使用資料庫狀態（而非檔案）以避免 Windows 平台下的檔案讀寫鎖定衝突
+        db.set_state("control:refresh_groups", "1")
         log.info("Groups refresh requested via IPC")
 
     elif msg_type == "reset_group":
         # 重置指定群組的失敗計數器，解凍被 cooldown 鎖定的群組。
         # 僅限主群組可呼叫，防止普通群組互相干擾或濫用重置功能。
-        # p16c BUG-FIX (HIGH): the comment described a main/monitor restriction but
-        # no code enforced it, allowing any group's container to reset the failure
-        # counter of any other group — a privilege-escalation vector.
         if not is_main:
             raise PermissionError("Only main group can reset group failure counters")
         target_jid = payload.get("jid", "")
         if not target_jid:
             raise ValueError("reset_group requires 'jid' field")
-        # Write a flag file — main.py's _message_loop reads it and resets counters
-        # Using file flag avoids cross-task direct coupling (same pattern as refresh_groups)
-        # p16c BUG-FIX (MEDIUM): use atomic tmp+rename so the main loop never reads
-        # a partial JSON payload if it polls exactly at write time.
-        flag = config.DATA_DIR / "reset_group.flag"
-        _reset_tmp = flag.with_suffix(".flag.tmp")
-        _reset_tmp.write_text(json.dumps({"jid": target_jid, "ts": time.time()}), encoding="utf-8")
-        _reset_tmp.rename(flag)
+        # 寫入資料庫狀態 — main.py's _message_loop 讀取它並重置計數器
+        db.set_state("control:reset_group", json.dumps({"jid": target_jid, "ts": time.time()}))
         log.info("reset_group requested via IPC for jid=%s by group=%s", target_jid, group_folder)
 
     elif msg_type == "apply_skill":
@@ -645,13 +630,12 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
             try:
                 if _rh_jid:
                     await route_fn(_rh_jid, "🔁 EvoClaw 即將重啟（不更新代碼）...")
-                flag = config.DATA_DIR / "restart.flag"
                 await _asyncio.get_running_loop().run_in_executor(
-                    None, lambda: flag.write_text("manual restart_host", encoding="utf-8")
+                    None, lambda: db.set_state("control:restart", "manual restart_host")
                 )
                 # Issue #579: write restart_notify so main loop can ack post-startup.
                 _write_restart_notify(_rh_jid, "restart_host")
-                log.info("restart_host: flag written — main loop will os.execv shortly")
+                log.info("restart_host: signal written — main loop will os.execv shortly")
             except Exception as exc:
                 log.error("restart_host: failed to write flag: %s", exc)
                 if _rh_jid:
@@ -924,7 +908,7 @@ def _rc_save(pid: int, url: str, sender: str, jid: str) -> None:
                     "startedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}),
         encoding="utf-8",
     )
-    _tmp.rename(_dest)
+    _tmp.replace(_dest)
 
 
 def restore_remote_control() -> None:
@@ -1273,6 +1257,25 @@ async def _run_self_update_worktree(jid: str, route_fn: Callable) -> None:
                 fix_result = await _aifix.attempt_fixes(
                     _pathlib.Path(worktree_dir), test_output, _test_cmd_raw,
                 )
+                if fix_result.status == "security_violation":
+                    alert_msg = "🚨 CRITICAL SECURITY ALERT: AI-Fix 自動更新檢測到惡意代碼注入意圖！已強制終止自動更新並鎖定，請管理員立即介入人工審查！"
+                    log.critical("self_update[worktree]: %s", alert_msg)
+                    if jid:
+                        await route_fn(jid, alert_msg)
+                    # 清除 worktree 確保安全
+                    try:
+                        _cleanup = await asyncio.create_subprocess_exec(
+                            "git", "worktree", "remove", "--force", worktree_dir,
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.DEVNULL,
+                            cwd=main_cwd,
+                            creationflags=_NO_WINDOW,
+                        )
+                        await asyncio.wait_for(_cleanup.wait(), timeout=20.0)
+                    except Exception:
+                        pass
+                    return
+
                 if fix_result.status == "passed_pr_opened":
                     msg = f"🤖✅ AI 在 {len(fix_result.attempts)} 次嘗試後修通了測試。已開 PR 等人工 review: {fix_result.pr_url or '(no URL)'}\n主 repo 未動。"
                     log.info("self_update[worktree]: %s", msg)
@@ -1442,14 +1445,22 @@ async def _run_self_update_worktree(jid: str, route_fn: Callable) -> None:
                 except Exception:
                     pass
 
-        # ── Write flag → main loop will os.execv ─────────────────────────────
+        # ── Write flag and set DB state → main loop will os.execv ────────────
         flag = config.DATA_DIR / "self_update.flag"
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: flag.write_text(ff_msg[:1000], encoding="utf-8")
+            )
+            log.info("self_update[worktree]: flag written — restart pending")
+        except Exception as fe:
+            log.warning("self_update[worktree]: failed to write flag file: %s", fe)
+        
         await asyncio.get_running_loop().run_in_executor(
-            None, lambda: flag.write_text(ff_msg[:1000], encoding="utf-8")
+            None, lambda: db.set_state("control:self_update", ff_msg[:1000])
         )
         # Issue #579: notify originating chat after new process is up.
         _write_restart_notify(jid, "self_update_worktree")
-        log.info("self_update[worktree]: flag written — restart pending")
+        log.info("self_update[worktree]: DB state set — restart pending")
         if jid:
             await route_fn(jid, f"✅ Worktree 測試通過、ff-merge 完成。EvoClaw 即將重啟。\n```\n{ff_msg[:300]}\n```")
     except Exception as exc:
@@ -1617,17 +1628,25 @@ async def _run_self_update_inplace(jid: str, route_fn: Callable) -> None:
                     pip_output = pip_out.decode("utf-8", errors="replace").strip()
                     log.warning("self_update: pip install non-zero exit: %s", pip_output[:300])
 
-        # ── write flag for main loop to pick up and os.execv() ───────────────
+        # ── write flag and set DB state for main loop to pick up and os.execv() ─
         flag = config.DATA_DIR / "self_update.flag"
-        # p28a: write_text() is blocking I/O — run in executor to avoid
-        # stalling the event loop on a slow or pressured filesystem.
         _flag_content = git_output[:1000]
+        try:
+            # p28a: write_text() is blocking I/O — run in executor to avoid
+            # stalling the event loop on a slow or pressured filesystem.
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: flag.write_text(_flag_content, encoding="utf-8")
+            )
+            log.info("self_update: flag written at %s — restart pending", flag)
+        except Exception as fe:
+            log.warning("self_update: failed to write flag file: %s", fe)
+        
         await asyncio.get_running_loop().run_in_executor(
-            None, lambda: flag.write_text(_flag_content, encoding="utf-8")
+            None, lambda: db.set_state("control:self_update", _flag_content)
         )
         # Issue #579: notify originating chat after new process is up.
         _write_restart_notify(jid, "self_update_inplace")
-        log.info("self_update: flag written at %s — restart pending", flag)
+        log.info("self_update: DB state set — restart pending")
 
         if jid:
             changed = "Already up to date." not in git_output

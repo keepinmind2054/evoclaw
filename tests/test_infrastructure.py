@@ -91,7 +91,7 @@ class TestGroupQueue:
 
         called_jids = []
 
-        async def fake_process(jid):
+        async def fake_process(jid, *args, **kwargs):
             called_jids.append(jid)
             return True
 
@@ -114,7 +114,7 @@ class TestGroupQueue:
         """
         barrier = asyncio.Event()
 
-        async def slow_process(jid):
+        async def slow_process(jid, *args, **kwargs):
             await barrier.wait()
             return True
 
@@ -395,12 +395,12 @@ class TestIpcErrorHandling:
 
             await ipc_mod.process_ipc_dir(group_folder, False, dummy_route)
 
-        moved = list(errors_dir.glob("bad_001.json"))
+        moved = list(errors_dir.glob("bad_001*.json"))
         assert len(moved) == 1, "Bad JSON file should have been moved to errors dir"
         assert not bad_file.exists(), "Original bad file should be gone"
 
     @pytest.mark.asyncio
-    async def test_ipc_valid_message_is_deleted_after_processing(self, tmp_path):
+    async def test_ipc_valid_message_is_deleted_after_processing(self, tmp_path, in_memory_db):
         """Valid IPC files should be deleted after successful processing."""
         import host.ipc_watcher as ipc_mod
 
@@ -544,8 +544,8 @@ class TestMainGroupUniqueness:
 
 class TestStopContainerAwaitsProcWait:
     @pytest.mark.asyncio
-    async def test_stop_container_uses_docker_kill(self):
-        """_stop_container should issue 'docker kill <name>' (not 'docker stop')."""
+    async def test_stop_container_uses_docker_stop(self):
+        """_stop_container should issue 'docker stop' (not 'docker kill')."""
         import host.container_runner as cr
 
         captured_cmds = []
@@ -560,33 +560,32 @@ class TestStopContainerAwaitsProcWait:
         with patch("asyncio.create_subprocess_exec", side_effect=capture_exec):
             await cr._stop_container("evoclaw-test-container")
 
-        # At minimum the first command must be "docker kill <name>"
+        # At minimum the first command must be "docker stop --time <grace> <name>"
         assert len(captured_cmds) >= 1
         first_cmd = captured_cmds[0]
         assert first_cmd[0] == "docker"
-        assert first_cmd[1] == "kill"
+        assert first_cmd[1] == "stop"
+        assert "--time" in first_cmd
         assert "evoclaw-test-container" in first_cmd
-        # Must NOT use the old "--time" flag (that was for "docker stop")
-        assert "--time" not in first_cmd
 
     @pytest.mark.asyncio
-    async def test_stop_container_fallback_rm_on_kill_failure(self):
-        """When docker kill fails (_kill_ok=False), _stop_container must fall back to docker rm -f."""
+    async def test_stop_container_fallback_rm_on_stop_failure(self):
+        """When docker stop fails (_stop_ok=False), _stop_container must fall back to docker rm -f."""
         import host.container_runner as cr
 
         captured_cmds = []
 
-        # First call (docker kill): returncode = 1 → _kill_ok = False → triggers fallback
-        kill_proc = MagicMock()
-        kill_proc.wait = AsyncMock(return_value=1)
-        kill_proc.returncode = 1
+        # First call (docker stop): returncode = 1 → _stop_ok = False → triggers fallback
+        stop_proc = MagicMock()
+        stop_proc.wait = AsyncMock(return_value=1)
+        stop_proc.returncode = 1
 
         # Second call (docker rm -f): succeeds
         rm_proc = MagicMock()
         rm_proc.wait = AsyncMock(return_value=0)
         rm_proc.returncode = 0
 
-        responses = iter([kill_proc, rm_proc])
+        responses = iter([stop_proc, rm_proc])
 
         async def capture_exec(*args, **kwargs):
             captured_cmds.append(list(args))
@@ -595,8 +594,8 @@ class TestStopContainerAwaitsProcWait:
         with patch("asyncio.create_subprocess_exec", side_effect=capture_exec):
             await cr._stop_container("mycontainer")
 
-        assert len(captured_cmds) == 2, "Expected kill then rm -f fallback"
-        assert captured_cmds[0][1] == "kill"
+        assert len(captured_cmds) == 2, "Expected stop then rm -f fallback"
+        assert captured_cmds[0][1] == "stop"
         assert captured_cmds[1][1] == "rm"
         assert "-f" in captured_cmds[1]
         assert "mycontainer" in captured_cmds[1]
@@ -772,7 +771,7 @@ class TestSchedulerGroupQueueRouting:
         import asyncio
 
         mock_queue = MagicMock()
-        mock_queue.enqueue_task = MagicMock()
+        mock_queue.enqueue_task = AsyncMock()
 
         fake_task = {
             "id": "task-abc",
@@ -787,7 +786,7 @@ class TestSchedulerGroupQueueRouting:
         stop_event = asyncio.Event()
 
         with patch("host.task_scheduler.db") as mock_db:
-            mock_db.get_due_tasks = MagicMock(return_value=[fake_task])
+            mock_db.async_get_due_tasks = AsyncMock(return_value=[fake_task])
             with patch("host.task_scheduler.config") as mock_cfg:
                 mock_cfg.SCHEDULER_POLL_INTERVAL = 0.01
 
@@ -923,9 +922,15 @@ class TestContainerSecurityFlags:
             mock_proc.communicate = AsyncMock(return_value=(b"", b""))
             raise Exception("abort after capture")
 
+        def fake_subprocess_run(cmd, *args, **kwargs):
+            captured_cmd.extend(cmd)
+            raise Exception("abort after capture")
+
         monkeypatch.setattr("asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+        monkeypatch.setattr("subprocess.run", fake_subprocess_run)
         monkeypatch.setattr(cfg, "CONTAINER_MEMORY", "")
         monkeypatch.setattr(cfg, "CONTAINER_CPUS", "")
+        monkeypatch.setattr(cfg, "CONTAINER_NETWORK", "none")
 
         groups_dir = tmp_path / "groups"
         groups_dir.mkdir()
@@ -975,7 +980,12 @@ class TestContainerSecurityFlags:
             captured_cmd.extend(args)
             raise Exception("abort after capture")
 
+        def fake_subprocess_run(cmd, *args, **kwargs):
+            captured_cmd.extend(cmd)
+            raise Exception("abort after capture")
+
         monkeypatch.setattr("asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+        monkeypatch.setattr("subprocess.run", fake_subprocess_run)
         monkeypatch.setattr(cfg, "CONTAINER_MEMORY", "")
         monkeypatch.setattr(cfg, "CONTAINER_CPUS", "")
 
@@ -1027,7 +1037,12 @@ class TestContainerSecurityFlags:
             captured_cmd.extend(args)
             raise Exception("abort after capture")
 
+        def fake_subprocess_run(cmd, *args, **kwargs):
+            captured_cmd.extend(cmd)
+            raise Exception("abort after capture")
+
         monkeypatch.setattr("asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+        monkeypatch.setattr("subprocess.run", fake_subprocess_run)
         monkeypatch.setattr(cfg, "CONTAINER_MEMORY", "")
         monkeypatch.setattr(cfg, "CONTAINER_CPUS", "")
 

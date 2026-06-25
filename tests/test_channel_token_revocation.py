@@ -33,20 +33,32 @@ class TestTelegramUnauthorized:
     @pytest.mark.asyncio
     async def test_unauthorized_logs_critical(self, caplog):
         """send_message() logs CRITICAL when bot raises Unauthorized."""
-        # Build minimal stubs for python-telegram-bot classes
-        class FakeUnauthorized(Exception):
+        class FakeForbidden(Exception):
+            pass
+
+        class FakeUnauthorized(FakeForbidden):
             pass
 
         fake_tg_error_mod = types.ModuleType("telegram.error")
+        fake_tg_error_mod.Forbidden = FakeForbidden
         fake_tg_error_mod.Unauthorized = FakeUnauthorized
-        fake_tg_error_mod.Forbidden = type("Forbidden", (Exception,), {})
         fake_tg_error_mod.RetryAfter = type("RetryAfter", (Exception,), {"retry_after": 5})
         fake_tg_error_mod.TimedOut = type("TimedOut", (Exception,), {})
         fake_tg_error_mod.NetworkError = type("NetworkError", (Exception,), {})
 
         # Stub the telegram package hierarchy
         fake_telegram = types.ModuleType("telegram")
+        fake_telegram.__path__ = []
         fake_telegram.error = fake_tg_error_mod
+        fake_telegram.Update = MagicMock
+        fake_telegram.Bot = MagicMock
+
+        fake_tg_ext_mod = types.ModuleType("telegram.ext")
+        fake_tg_ext_mod.Application = MagicMock
+        fake_tg_ext_mod.MessageHandler = MagicMock
+        fake_tg_ext_mod.CommandHandler = MagicMock
+        fake_tg_ext_mod.filters = MagicMock
+        fake_tg_ext_mod.ContextTypes = MagicMock
 
         fake_bot = AsyncMock()
         fake_bot.send_message = AsyncMock(side_effect=FakeUnauthorized("Bot was deauthorized"))
@@ -57,6 +69,7 @@ class TestTelegramUnauthorized:
         modules = {
             "telegram": fake_telegram,
             "telegram.error": fake_tg_error_mod,
+            "telegram.ext": fake_tg_ext_mod,
         }
 
         with patch.dict("sys.modules", modules):
@@ -65,11 +78,9 @@ class TestTelegramUnauthorized:
             channel._app = fake_app
             channel._token = "fake:token"
 
-            # Patch the import inside send_message to use our stubs
-            with patch("host.channels.telegram_channel.TelegramChannel._app", fake_app):
-                with caplog.at_level(logging.CRITICAL, logger="host.channels.telegram_channel"):
-                    with patch.dict("sys.modules", modules):
-                        await channel.send_message("tg:12345", "test message")
+            with caplog.at_level(logging.CRITICAL, logger="host.channels.telegram_channel"):
+                with patch.dict("sys.modules", modules):
+                    await channel.send_message("tg:12345", "test message")
 
         critical_records = [r for r in caplog.records if r.levelno == logging.CRITICAL]
         assert critical_records, (
@@ -79,18 +90,31 @@ class TestTelegramUnauthorized:
     @pytest.mark.asyncio
     async def test_unauthorized_aborts_remaining_chunks(self, caplog):
         """After Unauthorized, no further send_message calls are made for remaining chunks."""
-        class FakeUnauthorized(Exception):
+        class FakeForbidden(Exception):
+            pass
+
+        class FakeUnauthorized(FakeForbidden):
             pass
 
         fake_tg_error_mod = types.ModuleType("telegram.error")
+        fake_tg_error_mod.Forbidden = FakeForbidden
         fake_tg_error_mod.Unauthorized = FakeUnauthorized
-        fake_tg_error_mod.Forbidden = type("Forbidden", (Exception,), {})
         fake_tg_error_mod.RetryAfter = type("RetryAfter", (Exception,), {"retry_after": 5})
         fake_tg_error_mod.TimedOut = type("TimedOut", (Exception,), {})
         fake_tg_error_mod.NetworkError = type("NetworkError", (Exception,), {})
 
         fake_telegram = types.ModuleType("telegram")
+        fake_telegram.__path__ = []
         fake_telegram.error = fake_tg_error_mod
+        fake_telegram.Update = MagicMock
+        fake_telegram.Bot = MagicMock
+
+        fake_tg_ext_mod = types.ModuleType("telegram.ext")
+        fake_tg_ext_mod.Application = MagicMock
+        fake_tg_ext_mod.MessageHandler = MagicMock
+        fake_tg_ext_mod.CommandHandler = MagicMock
+        fake_tg_ext_mod.filters = MagicMock
+        fake_tg_ext_mod.ContextTypes = MagicMock
 
         send_call_count = []
         fake_bot = AsyncMock()
@@ -103,7 +127,11 @@ class TestTelegramUnauthorized:
         fake_app = MagicMock()
         fake_app.bot = fake_bot
 
-        modules = {"telegram": fake_telegram, "telegram.error": fake_tg_error_mod}
+        modules = {
+            "telegram": fake_telegram,
+            "telegram.error": fake_tg_error_mod,
+            "telegram.ext": fake_tg_ext_mod,
+        }
 
         with patch.dict("sys.modules", modules):
             from host.channels.telegram_channel import TelegramChannel
@@ -153,7 +181,7 @@ class TestWhatsAppTokenRevocation:
         channel._last_wamid = {}
 
         with caplog.at_level(logging.CRITICAL, logger="host.channels.whatsapp_channel"):
-            await channel.send_message("wa:recipient", "test")
+            await channel.send_message("wa:12345:67890", "test")
 
         critical_records = [r for r in caplog.records if r.levelno == logging.CRITICAL]
         assert critical_records, "Expected CRITICAL log entry for HTTP 401"
@@ -185,7 +213,7 @@ class TestWhatsAppTokenRevocation:
         channel._session = fake_session
         channel._last_wamid = {}
 
-        await channel.send_message("wa:recipient", "hello")
+        await channel.send_message("wa:12345:67890", "hello")
 
         # Must have called post exactly once, then returned (no retry)
         assert len(post_call_count) == 1, (
@@ -235,7 +263,7 @@ class TestWhatsAppTokenRevocation:
         channel._last_wamid = {}
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
-            await channel.send_message("wa:recipient", "hello")
+            await channel.send_message("wa:12345:67890", "hello")
 
         assert len(post_calls) == 2, (
             f"Expected exactly 2 POST calls (1 original + 1 retry) for 503, got {len(post_calls)}"
@@ -263,7 +291,7 @@ class TestWhatsAppTokenRevocation:
         channel._last_wamid = {}
 
         with caplog.at_level(logging.CRITICAL, logger="host.channels.whatsapp_channel"):
-            await channel.send_message("wa:recipient", "test")
+            await channel.send_message("wa:12345:67890", "test")
 
         critical_msgs = [r.message for r in caplog.records if r.levelno == logging.CRITICAL]
         assert any(
@@ -289,6 +317,9 @@ class TestDiscordLoginFailure:
         fake_discord.Intents = MagicMock()
         fake_discord.Intents.default = MagicMock(return_value=MagicMock())
         fake_discord.Client = MagicMock()
+        fake_discord.Message = MagicMock
+        fake_discord.abc = MagicMock()
+        fake_discord.abc.Messageable = MagicMock
 
         modules = {"discord": fake_discord}
 

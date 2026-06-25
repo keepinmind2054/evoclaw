@@ -507,6 +507,23 @@ def start_webportal(stop_event=None):
         # loop here avoids the deprecated get_event_loop() fallback.
         _captured_loop = _asyncio.get_running_loop()
 
+        # Start background active session cleanup loop (PROJECT A)
+        async def _session_cleanup_loop():
+            log.info("WebPortal: Session active background cleanup loop started")
+            while not stop_event.is_set():
+                try:
+                    with _sessions_lock:
+                        _expire_sessions()
+                except Exception as cleanup_exc:
+                    log.warning("WebPortal: Session background cleanup failed: %s", cleanup_exc)
+                try:
+                    await _asyncio.wait_for(stop_event.wait(), timeout=600.0)
+                except _asyncio.TimeoutError:
+                    pass
+            log.info("WebPortal: Session active background cleanup loop stopped")
+
+        _captured_loop.create_task(_session_cleanup_loop())
+
         def _watch_stop():
             # asyncio.Event._loop exists but is None until the event is first
             # awaited (Py 3.10+), so `stop_event._loop` alone yields None and

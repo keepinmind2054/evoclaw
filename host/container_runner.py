@@ -673,12 +673,69 @@ async def run_container_agent(
         # Prevent fork bombs: cap the number of processes the container can spawn.
         "--pids-limit", str(config.CONTAINER_PIDS_LIMIT),
     ]
+    # ── Level B 啟發式偵測（與 container 端 agent.py 保持一致） ──
+    _prompt_lower = prompt.lower() if prompt else ""
+    _LEVEL_B_KEYWORDS = [
+        "debug", "修復", "fix", "配置", "configure", "install", "安裝",
+        "optimize", "優化", "implement", "實作", "refactor", "重構",
+        "analyze", "分析", "deploy", "部署", "multi-step", "step by step",
+        "system", "系統", "migrate", "migration", "architecture", "架構",
+        "寫", "write", "create", "建立", "generate", "產生", "整理", "總結",
+        "搜尋", "search", "找", "查", "git", "docker", "python", "code",
+        "report", "報告", "schedule", "排程", "plan", "計劃", "計畫",
+        "test", "測試", "review", "審查", "audit", "稽核", "monitor", "監控",
+        "automate", "自動化", "integrate", "整合", "pipeline", "流程",
+        "compare", "比較", "summarize", "summarise", "摘要",
+        "npm", "pip", "yarn", "cargo", "make", "cmake", "gradle",
+        "repo", "repository", "倉庫", "更新", "有沒有", "有沒", "檢查", "check",
+        "看看", "看一下", "有什麼", "列出", "list", "show", "顯示",
+    ]
+    _is_level_b = (
+        is_scheduled_task or
+        len(prompt or "") > 150 or
+        any(kw in _prompt_lower for kw in _LEVEL_B_KEYWORDS)
+    )
+
+    mem_limit = config.CONTAINER_MEMORY
+    if mem_limit:
+        if _is_level_b:
+            def _parse_to_mb(s: str) -> int:
+                s = s.strip().lower()
+                if not s:
+                    return 0
+                import re
+                m = re.match(r"^(\d+)([a-z]*)$", s)
+                if not m:
+                    return 512
+                val = int(m.group(1))
+                unit = m.group(2)
+                if unit in ("g", "gb"):
+                    return val * 1024
+                if unit in ("m", "mb"):
+                    return val
+                if unit in ("k", "kb"):
+                    return max(1, val // 1024)
+                return max(1, val // (1024 * 1024))
+
+            config_mb = _parse_to_mb(mem_limit)
+            if config_mb < 1024:
+                mem_limit = "1024m"
+                log.info("[RESOURCE] Dynamic Memory Capping: Level B or scheduled task detected. Promoting memory limit from %s to 1024m", config.CONTAINER_MEMORY)
+            
+            # 從環境變數讀取 CONTAINER_MEMORY_MAX，限制最大上限
+            max_limit_str = os.environ.get("CONTAINER_MEMORY_MAX", "2048m")
+            max_mb = _parse_to_mb(max_limit_str)
+            current_mb = _parse_to_mb(mem_limit)
+            if current_mb > max_mb:
+                mem_limit = max_limit_str
+                log.info("[RESOURCE] Dynamic Memory Capping: Capped memory limit at CONTAINER_MEMORY_MAX (%s)", max_limit_str)
+
     # ── Per-container resource limits (Issue #61) ──────────────────────────────
     # Prevent a runaway agent from OOM-killing the host process.
     # Both limits are opt-out: set CONTAINER_MEMORY="" or CONTAINER_CPUS="" to disable.
-    if config.CONTAINER_MEMORY:
-        cmd += ["--memory", config.CONTAINER_MEMORY, "--memory-swap", config.CONTAINER_MEMORY]
-        log.info("[RESOURCE] container=%s memory=%s cpus=%s", container_name, config.CONTAINER_MEMORY, config.CONTAINER_CPUS or "unlimited")
+    if mem_limit:
+        cmd += ["--memory", mem_limit, "--memory-swap", mem_limit]
+        log.info("[RESOURCE] container=%s memory=%s cpus=%s", container_name, mem_limit, config.CONTAINER_CPUS or "unlimited")
     if config.CONTAINER_CPUS:
         cmd += ["--cpus", config.CONTAINER_CPUS]
     # ── Container log size limit (BUG-19B-01) ─────────────────────────────────

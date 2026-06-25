@@ -213,6 +213,8 @@ class TestTextFormatRegression:
 
         # Import and call _setup_logging
         import importlib
+        import host.config as host_config
+        importlib.reload(host_config)
         import host.main as host_main
         importlib.reload(host_main)
 
@@ -232,6 +234,8 @@ class TestTextFormatRegression:
         monkeypatch.setenv("LOG_LEVEL", "DEBUG")
 
         import importlib
+        import host.config as host_config
+        importlib.reload(host_config)
         import host.main as host_main
         importlib.reload(host_main)
 

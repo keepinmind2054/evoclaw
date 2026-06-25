@@ -1087,12 +1087,14 @@ async def _message_loop() -> None:
                 log.info("Leadership acquired — resuming message processing")
                 _message_loop._logged_not_leader = False  # type: ignore[attr-defined]
 
-            # 偵測是否有 refresh_groups.flag 旗標檔，有的話重新從 DB 載入群組清單
+            # 偵測是否有 refresh_groups.flag 旗標檔或資料庫狀態，有的話重新從 DB 載入群組清單
             # 這讓 IPC watcher 可以在不重啟程序的情況下動態新增群組
             refresh_flag = config.DATA_DIR / "refresh_groups.flag"
-            if refresh_flag.exists():
+            _db_refresh = db.get_state("control:refresh_groups") == "1"
+            if refresh_flag.exists() or _db_refresh:
                 try:
                     refresh_flag.unlink(missing_ok=True)
+                    db.set_state("control:refresh_groups", "0")
                     _registered_groups = db.get_all_registered_groups()
                     current_jids = {g["jid"] for g in _registered_groups}
                     # Initialise cursors for any newly added groups
@@ -1132,17 +1134,25 @@ async def _message_loop() -> None:
 
             # ── reset_group flag: clear fail counters for a specific group ───
             reset_flag = config.DATA_DIR / "reset_group.flag"
-            if reset_flag.exists():
+            _db_reset = db.get_state("control:reset_group")
+            if reset_flag.exists() or _db_reset:
                 try:
                     import json as _rjson
-                    # p28a: read_text() is blocking I/O — run in executor so the
-                    # event loop is not stalled on a slow filesystem.
-                    _rflag_text = await asyncio.get_running_loop().run_in_executor(
-                        None, lambda: reset_flag.read_text(encoding="utf-8")
-                    )
-                    _rflag_data = _rjson.loads(_rflag_text)
-                    reset_flag.unlink(missing_ok=True)
-                    _target_jid = _rflag_data.get("jid", "")
+                    _target_jid = ""
+                    if reset_flag.exists():
+                        # p28a: read_text() is blocking I/O — run in executor so the
+                        # event loop is not stalled on a slow filesystem.
+                        _rflag_text = await asyncio.get_running_loop().run_in_executor(
+                            None, lambda: reset_flag.read_text(encoding="utf-8")
+                        )
+                        _rflag_data = _rjson.loads(_rflag_text)
+                        reset_flag.unlink(missing_ok=True)
+                        _target_jid = _rflag_data.get("jid", "")
+                    elif _db_reset:
+                        _rflag_data = _rjson.loads(_db_reset)
+                        db.set_state("control:reset_group", "")
+                        _target_jid = _rflag_data.get("jid", "")
+
                     if _target_jid:
                         async def _reset_fail_state(tj=_target_jid):
                             _group_fail_counts.pop(tj, None)
@@ -1161,10 +1171,12 @@ async def _message_loop() -> None:
 
             # ── Self-update flag: restart via os.execv() ────────────────────
             self_update_flag = config.DATA_DIR / "self_update.flag"
-            if self_update_flag.exists():
+            _db_self_update = db.get_state("control:self_update")
+            if self_update_flag.exists() or _db_self_update:
                 _self_update_requested = True
                 self_update_flag.unlink(missing_ok=True)
-                log.info("self_update flag detected — initiating graceful restart")
+                db.set_state("control:self_update", "")
+                log.info("self_update signal detected — initiating graceful restart")
                 _running = False
                 if _stop_event is not None:
                     _stop_event.set()
@@ -1176,10 +1188,12 @@ async def _message_loop() -> None:
             # Reuses _self_update_requested + os.execv path so the lifecycle
             # is identical (pm2 sees one stable supervisor PID).
             restart_flag = config.DATA_DIR / "restart.flag"
-            if restart_flag.exists():
+            _db_restart = db.get_state("control:restart")
+            if restart_flag.exists() or (_db_restart and _db_restart != "0"):
                 _self_update_requested = True
                 restart_flag.unlink(missing_ok=True)
-                log.info("restart flag detected — initiating graceful restart (no code pull)")
+                db.set_state("control:restart", "0")
+                log.info("restart signal detected — initiating graceful restart (no code pull)")
                 _running = False
                 if _stop_event is not None:
                     _stop_event.set()

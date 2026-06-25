@@ -29,15 +29,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-_AGENT_PY = Path(__file__).parent.parent / "container" / "agent-runner" / "agent.py"
+_AGENT_PY = Path(__file__).parent.parent / "container" / "agent-runner" / "_tools.py"
 
 
 def _extract_tool_web_fetch():
     """
-    Extract the tool_web_fetch function from agent.py by exec-ing the relevant
-    portion of the file.  We do this rather than importing the full agent
-    module because agent.py has heavy transitive dependencies (anthropic SDK,
-    docker SDK, etc.) that are not available in CI.
+    Extract the tool_web_fetch function from _tools.py by exec-ing the relevant
+    portion of the file.  We do this rather than importing the full tools
+    module because it may have dependencies not available in CI.
 
     Returns the function object ready to call.
     """
@@ -48,7 +47,7 @@ def _extract_tool_web_fetch():
     end_marker = "\ndef "  # next top-level function definition
 
     start_idx = src.find(start_marker)
-    assert start_idx != -1, "Could not locate tool_web_fetch in agent.py"
+    assert start_idx != -1, "Could not locate tool_web_fetch in _tools.py"
 
     # Walk back to find the line start (there might be a decorator)
     line_start = src.rfind("\n", 0, start_idx) + 1
@@ -65,7 +64,11 @@ def _extract_tool_web_fetch():
 
     # Build a minimal namespace with the imports the function needs
     # _log is a helper called by tool_web_fetch for SSRF warnings; provide a no-op stub.
-    ns: dict = {"_log": lambda tag, msg="": None}
+    import threading
+    ns: dict = {
+        "_log": lambda tag, msg="": None,
+        "_SSRF_PATCH_LOCK": threading.Lock(),
+    }
     exec(
         "import urllib.request, urllib.error, urllib.parse, socket, ipaddress, re\n" + fn_src,
         ns,

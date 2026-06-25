@@ -243,9 +243,18 @@ class TelegramChannel:
                     log.info("/restart from owner uid=%s chat=%s", update.effective_user.id, chat_id)
                     await self._app.bot.send_message(chat_id=chat_id, text="🔁 EvoClaw 即將重啟（不更新代碼）...")
                     try:
+                        from .. import db
                         flag = config.DATA_DIR / "restart.flag"
+                        try:
+                            await asyncio.get_running_loop().run_in_executor(
+                                None, lambda: flag.write_text("manual /restart slash command", encoding="utf-8")
+                            )
+                            log.info("/restart: flag file written")
+                        except Exception as fe:
+                            log.warning("/restart: failed to write flag file: %s", fe)
+
                         await asyncio.get_running_loop().run_in_executor(
-                            None, lambda: flag.write_text("manual /restart slash command", encoding="utf-8")
+                            None, lambda: db.set_state("control:restart", "1")
                         )
                         # Issue #579: notify back after new process up
                         try:
@@ -253,7 +262,7 @@ class TelegramChannel:
                             _write_restart_notify(self._jid(chat_id), "restart_host_slash")
                         except Exception as _n_exc:
                             log.warning("/restart: notify write failed: %s", _n_exc)
-                        log.info("/restart: flag written — main loop will os.execv")
+                        log.info("/restart: DB state set — main loop will os.execv")
                     except Exception as exc:
                         await self._app.bot.send_message(chat_id=chat_id, text=f"❌ 重啟失敗：{exc}")
 

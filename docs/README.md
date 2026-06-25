@@ -43,6 +43,7 @@
 | [DEBUG_CHECKLIST.md](./DEBUG_CHECKLIST.md) | 常見問題除錯清單，含已知問題（含已修復）與對應排查步驟。 |
 | [APPLE-CONTAINER-NETWORKING.md](./APPLE-CONTAINER-NETWORKING.md) | macOS 上使用 Apple Container 的網路設定指南（vmnet 配置）。需要讓容器存取網際網路時參考。 |
 | [test-scenarios.md](./test-scenarios.md) | 系統測試情境文件，涵蓋各模組的整合測試案例。 |
+| [DOCS_AUDIT.md](./DOCS_AUDIT.md) | docs 目錄逐檔分析、UTF-8 狀態稽核，以及 agent 讀取文件時避免 terminal mojibake 的流程。 |
 
 ---
 

@@ -195,30 +195,30 @@ class TestRcSaveAtomicWrite:
             assert data["pid"] == 2
             assert data["url"] == "http://new.example.com"
 
-    def test_rc_save_atomic_pattern_via_rename_spy(self, tmp_path):
+    def test_rc_save_atomic_pattern_via_replace_spy(self, tmp_path):
         """
-        Verify the atomic pattern by spying on Path.rename.
-        The .tmp file must be renamed to the final path.
+        Verify the atomic pattern by spying on Path.replace.
+        The .tmp file must be replaced to the final path.
         """
-        rename_calls = []
-        _orig_rename = Path.rename
+        replace_calls = []
+        _orig_replace = Path.replace
 
-        def _spy_rename(self_path, target):
-            rename_calls.append((Path(self_path).name, Path(str(target)).name))
-            return _orig_rename(self_path, target)
+        def _spy_replace(self_path, target):
+            replace_calls.append((Path(self_path).name, Path(str(target)).name))
+            return _orig_replace(self_path, target)
 
         with patch("host.config.DATA_DIR", tmp_path):
-            with patch.object(Path, "rename", _spy_rename):
+            with patch.object(Path, "replace", _spy_replace):
                 from host.ipc_watcher import _rc_save
                 _rc_save(pid=7, url="http://rc.test", sender="spy", jid="tg:42")
 
-        # Verify that a rename from the .tmp file to the final .json file occurred.
+        # Verify that a replace from the .tmp file to the final .json file occurred.
         # We compare basenames only so this is independent of the tmp_path root.
         tmp_to_final = [
-            (src, dst) for src, dst in rename_calls
+            (src, dst) for src, dst in replace_calls
             if src == "remote-control.json.tmp" and dst == "remote-control.json"
         ]
         assert tmp_to_final, (
-            f"Expected a rename from 'remote-control.json.tmp' to 'remote-control.json'; "
-            f"actual rename calls (basenames): {rename_calls}"
+            f"Expected a replace from 'remote-control.json.tmp' to 'remote-control.json'; "
+            f"actual replace calls (basenames): {replace_calls}"
         )

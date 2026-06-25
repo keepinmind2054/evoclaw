@@ -12,10 +12,16 @@ was ever executed.  The fix switches to Popen + chunked read() + proc.kill().
 import os
 import subprocess
 import sys
+import shutil
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+pytestmark = pytest.mark.skipif(
+    shutil.which("grep") is None,
+    reason="grep command line utility not installed on this system"
+)
 
 # Add container/agent-runner/ to sys.path so we can import _tools directly.
 _AGENT_DIR = Path(__file__).parent.parent / "container" / "agent-runner"

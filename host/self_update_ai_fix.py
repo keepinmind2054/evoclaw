@@ -210,6 +210,60 @@ def _extract_diff(text: str) -> Optional[str]:
     return None
 
 
+def _validate_patch_content(diff_text: str) -> bool:
+    """加固 AI Auto-Patch 的靜態安全過濾器。
+
+    過濾 Unified Diff 中意圖引入連網、修改敏感部分或 Host 執行 subprocess 的程式碼。
+    回傳 True 表示通過，False 表示不安全。
+    """
+    for line in diff_text.splitlines():
+        if line.startswith("+++ b/") or line.startswith("--- a/"):
+            filename = line[6:].strip()
+            if "_tools.py" in filename or "tools_" in filename:
+                log.warning("ai_fix: Security violation: attempt to modify sensitive tools file: %s", filename)
+                return False
+
+    added_lines = []
+    for line in diff_text.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            added_lines.append(line[1:])
+
+    network_pattern = re.compile(r"\b(socket|urllib|requests|httpx|aiohttp|websocket|urllib2|curl|wget)\b", re.IGNORECASE)
+    subprocess_pattern = re.compile(r"\b(subprocess|system|popen|spawn|pty|shlex|execv|execve|fork)\b", re.IGNORECASE)
+    security_pattern = re.compile(r"(?:\b|_)(ssrf|bypass_ssrf|allowlist|white_list|authorization|auth|authorized|credential|token|api_key|password)(?:\b|_)", re.IGNORECASE)
+
+    for content in added_lines:
+        content_clean = re.sub(r"#.*$", "", content).strip()
+        if not content_clean:
+            continue
+        
+        if ("import " in content_clean or "from " in content_clean) and network_pattern.search(content_clean):
+            log.warning("ai_fix: Security violation: attempt to import network module in line: %s", content)
+            return False
+            
+        if any(call in content_clean for call in ("socket.", ".socket(", "requests.", "httpx.", "aiohttp.", "urllib.", "urllib2.")):
+            log.warning("ai_fix: Security violation: attempt to perform network call in line: %s", content)
+            return False
+
+        if ("import " in content_clean or "from " in content_clean) and subprocess_pattern.search(content_clean):
+            log.warning("ai_fix: Security violation: attempt to import subprocess module in line: %s", content)
+            return False
+            
+        if any(call in content_clean for call in ("subprocess.run", "subprocess.Popen", "subprocess.call", "os.system", "os.popen", "pty.spawn", "shlex.split")):
+            log.warning("ai_fix: Security violation: attempt to invoke subprocess in line: %s", content)
+            return False
+
+        if security_pattern.search(content_clean):
+            log.warning("ai_fix: Security violation: attempt to modify security/auth code in line: %s", content)
+            return False
+
+        if "shell=True" in content_clean:
+            log.warning("ai_fix: Security violation: shell=True is forbidden in auto-patch: %s", content)
+            return False
+
+    return True
+
+
 def _diff_touches_only_allowlist(diff_text: str) -> tuple[bool, list[str]]:
     """Returns (allowed, offending_paths)."""
     paths = set()
@@ -504,6 +558,13 @@ async def attempt_fixes(worktree: Path, initial_pytest_output: str, test_cmd: st
             result.attempts.append(record)
             continue
         record["diff"] = diff
+
+        if not _validate_patch_content(diff):
+            record["reject_reason"] = "(security violation)"
+            result.attempts.append(record)
+            result.status = "security_violation"
+            log.critical("ai_fix: Security alert! AI-generated patch failed security validation (possible code injection attempt). Terminating auto-update.")
+            break
 
         ok_path, bad_paths = _diff_touches_only_allowlist(diff)
         if not ok_path:

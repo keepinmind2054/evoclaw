@@ -100,27 +100,34 @@ def init_database(db_path: Path) -> None:
                 # will either succeed (file is an unusual but valid SQLite format) or fail
                 # with a clear OperationalError rather than a silent corruption.
 
-        new_conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        new_conn.row_factory = sqlite3.Row
-        new_conn.execute("PRAGMA journal_mode=WAL")
-        new_conn.execute("PRAGMA synchronous=NORMAL")
-        new_conn.execute("PRAGMA busy_timeout=5000")  # 5s retry on SQLITE_BUSY
-        new_conn.execute("PRAGMA cache_size=-32000")   # 32MB page cache for faster reads
-        new_conn.execute("PRAGMA temp_store=MEMORY")   # Keep temp tables in memory
-        # Enable foreign key enforcement (Issue #64).
-        # SQLite disables FK constraints by default; without this pragma, any schema
-        # additions using ON DELETE CASCADE / ON DELETE RESTRICT are silently ignored,
-        # producing orphaned rows that skew metrics and fill the database.
-        new_conn.execute("PRAGMA foreign_keys = ON")
-        _create_tables(new_conn)
-        # Close the previous connection (if any) before replacing it so we
-        # do not leak the file descriptor on re-initialization.
-        if _db is not None:
-            try:
-                _db.close()
-            except Exception:
-                pass
-        _db = new_conn
+        try:
+            new_conn = sqlite3.connect(str(db_path), check_same_thread=False)
+            new_conn.row_factory = sqlite3.Row
+            new_conn.execute("PRAGMA journal_mode=WAL")
+            new_conn.execute("PRAGMA synchronous=NORMAL")
+            new_conn.execute("PRAGMA busy_timeout=5000")  # 5s retry on SQLITE_BUSY
+            new_conn.execute("PRAGMA cache_size=-32000")   # 32MB page cache for faster reads
+            new_conn.execute("PRAGMA temp_store=MEMORY")   # Keep temp tables in memory
+            # Enable foreign key enforcement (Issue #64).
+            # SQLite disables FK constraints by default; without this pragma, any schema
+            # additions using ON DELETE CASCADE / ON DELETE RESTRICT are silently ignored,
+            # producing orphaned rows that skew metrics and fill the database.
+            new_conn.execute("PRAGMA foreign_keys = ON")
+            _create_tables(new_conn)
+            # Close the previous connection (if any) before replacing it so we
+            # do not leak the file descriptor on re-initialization.
+            if _db is not None:
+                try:
+                    _db.close()
+                except Exception:
+                    pass
+            _db = new_conn
+        except sqlite3.DatabaseError as _db_exc:
+            log.critical(
+                "DATABASE CONNECTION FAILED at %s — could not initialize connection: %s. "
+                "The process will continue but database queries will fail.",
+                db_path, _db_exc,
+            )
     log.info(f"Database initialized: {db_path}")
 
 def _create_tables(db: sqlite3.Connection) -> None:

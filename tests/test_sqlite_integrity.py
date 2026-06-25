@@ -85,15 +85,16 @@ class TestIntegrityCheckOk:
 
         def patched_connect(path, **kwargs):
             c = _orig_connect(path, **kwargs)
-            _orig_execute = c.execute
-
-            def tracked_execute(sql, *args):
-                if "integrity_check" in sql.lower():
-                    executed_pragmas.append(sql)
-                return _orig_execute(sql, *args)
-
-            c.execute = tracked_execute
-            return c
+            class ConnectionWrapper:
+                def __init__(self, conn):
+                    self.conn = conn
+                def execute(self, sql, *args):
+                    if "integrity_check" in sql.lower():
+                        executed_pragmas.append(sql)
+                    return self.conn.execute(sql, *args)
+                def __getattr__(self, name):
+                    return getattr(self.conn, name)
+            return ConnectionWrapper(c)
 
         with patch("sqlite3.connect", side_effect=patched_connect):
             import host.db as db_mod
@@ -260,8 +261,8 @@ class TestNormalOperationsAfterIntegrityCheck:
         db_mod.init_database(db_path)
 
         try:
-            # register_group is a normal DB operation; it must succeed
-            db_mod.register_group(
+            # set_registered_group is a normal DB operation; it must succeed
+            db_mod.set_registered_group(
                 folder="test_group",
                 jid="tg:9999",
                 name="Test Group",

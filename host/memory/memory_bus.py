@@ -94,6 +94,8 @@ class SharedMemoryStore:
         content     TEXT    NOT NULL,
         importance  REAL    NOT NULL DEFAULT 0.5,
         access_count INTEGER NOT NULL DEFAULT 0,
+        namespace   TEXT    NOT NULL DEFAULT '',
+        topic_tag   TEXT    NOT NULL DEFAULT '',
         created_at  REAL    NOT NULL,
         updated_at  REAL    NOT NULL
     );
@@ -101,6 +103,8 @@ class SharedMemoryStore:
         ON shared_memories(scope, project);
     CREATE INDEX IF NOT EXISTS idx_shared_memories_agent
         ON shared_memories(agent_id);
+    CREATE INDEX IF NOT EXISTS idx_shared_ns_topic
+        ON shared_memories(namespace, topic_tag);
     CREATE VIRTUAL TABLE IF NOT EXISTS shared_memories_fts
         USING fts5(content, content='shared_memories', content_rowid='rowid');
     CREATE TRIGGER IF NOT EXISTS shared_memories_ai AFTER INSERT ON shared_memories BEGIN
@@ -972,17 +976,14 @@ class MemoryBus:
                 memory_file.parent.mkdir(parents=True, exist_ok=True)
                 current = memory_file.read_text(encoding="utf-8") if memory_file.exists() else ""
                 updated = current + "\n" + patch
+                encoded_updated = updated.encode("utf-8")
                 # Truncate to max_bytes, being careful with UTF-8 boundaries.
-                # BUG-MB-01 FIX: the naive encoded[:max_bytes].decode(errors="ignore")
-                # can silently discard the last partial multi-byte character at the
-                # cut boundary.  Use the same safe boundary-walking truncation that
-                # hot.py employs so we never produce invalid UTF-8 or lose more
-                # data than necessary.
-                if len(updated.encode("utf-8")) > max_bytes:
+                if len(encoded_updated) > max_bytes:
                     from .hot import _safe_truncate_utf8
                     updated = _safe_truncate_utf8(updated, max_bytes)
+                    encoded_updated = updated.encode("utf-8")
                 tmp_path = memory_file.with_suffix('.tmp')
-                tmp_path.write_text(updated, encoding="utf-8")
+                tmp_path.write_bytes(encoded_updated)
                 os.replace(tmp_path, memory_file)
                 logger.debug(f"Hot memory patched for agent {agent_id}: +{len(patch)} chars")
                 return True

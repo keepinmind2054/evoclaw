@@ -88,6 +88,10 @@ def _patch_base_dir(monkeypatch, repo: Path, data_dir: Path):
     from host import config as _cfg
     monkeypatch.setattr(_cfg, "BASE_DIR", repo)
     monkeypatch.setattr(_cfg, "DATA_DIR", data_dir)
+    # Patch the config reference inside host.ipc_watcher to prevent test pollution
+    # from module reloads in other test files.
+    import host.ipc_watcher
+    monkeypatch.setattr(host.ipc_watcher, "config", _cfg)
     data_dir.mkdir(exist_ok=True)
 
 
@@ -152,6 +156,8 @@ async def test_already_up_to_date_skips_gate(fake_repo, tmp_path, monkeypatch):
 
     data_dir = tmp_path / "data"
     _patch_base_dir(monkeypatch, fake_repo, data_dir)
+    from host import config as _cfg
+    monkeypatch.setattr(_cfg, "AUTO_UPDATE_USE_WORKTREE", False)
 
     # A test command that WOULD fail if it ran — proves the gate was skipped.
     monkeypatch.setenv("AUTO_UPDATE_TEST_CMD", f'"{sys.executable}" -c "import sys; sys.exit(1)"')

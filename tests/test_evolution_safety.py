@@ -37,14 +37,14 @@ def _run_evolve_and_capture(genome_in: dict, fitness: float, avg_ms: float) -> d
     """
     captured: dict = {}
 
-    def fake_upsert(jid, **kwargs):
-        captured.update(kwargs)
+    def fake_upsert_with_event(jid, genome_fields, event_kwargs):
+        captured.update(genome_fields)
 
     def fake_get(jid):
         return dict(genome_in)
 
     import host.evolution.genome as genome_mod
-    with patch.object(genome_mod, "upsert_genome", side_effect=fake_upsert), \
+    with patch("host.db.upsert_group_genome_with_event", side_effect=fake_upsert_with_event), \
          patch.object(genome_mod, "get_genome", side_effect=fake_get), \
          patch("host.db.log_evolution_event", MagicMock(), create=True):
         genome_mod.evolve_genome_from_fitness("test-jid", fitness, avg_ms)

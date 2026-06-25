@@ -28,12 +28,16 @@ def _run_evolve(genome_in, fitness, avg_ms):
     def fake_upsert(jid, **kwargs):
         captured.update(kwargs)
 
+    def fake_upsert_with_event(jid, genome_fields, event_kwargs):
+        captured.update(genome_fields)
+
     def fake_get(jid):
         return dict(genome_in)
 
     mock_db = MagicMock()
     mock_db.log_evolution_event = MagicMock()
     mock_db.upsert_group_genome = MagicMock()
+    mock_db.upsert_group_genome_with_event = MagicMock(side_effect=fake_upsert_with_event)
     mock_db.get_group_genome = MagicMock(return_value=dict(genome_in))
 
     with patch("host.evolution.genome.upsert_genome", side_effect=fake_upsert), \
