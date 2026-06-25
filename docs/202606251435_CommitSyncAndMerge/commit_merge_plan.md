@@ -8,10 +8,10 @@
 
 | 步驟 | 任務內容 | 具體指令 / 操作 | 狀態 |
 |---|---|---|---|
-| 1 | 建立特徵分支 | `git checkout -b feature/repo-improvements-20260625` | ⏳ 待處理 |
-| 2 | 暫存與提交代碼 | `git add .` <br> `git commit -m "refactor: implement session cleanup, sqlite signaling, dynamic memory cap, and security validator"` | ⏳ 待處理 |
-| 3 | 推送至遠端倉庫 | `git push origin feature/repo-improvements-20260625` | ⏳ 待處理 |
-| 4 | 開立 GitHub Issue | `gh issue create --title "..." --body "..."` | ⏳ 待處理 |
-| 5 | 建立 Pull Request | `gh pr create --title "..." --body "..."` | ⏳ 待處理 |
-| 6 | 合併 Pull Request | `gh pr merge --merge` | ⏳ 待處理 |
+| 1 | 建立特徵分支 | `git checkout -b feature/repo-improvements-20260625` | ✅ 已完成 |
+| 2 | 暫存與提交代碼 | `git add .` <br> `git commit -m "refactor: ..."` | ✅ 已完成 |
+| 3 | 推送至遠端倉庫 | `git push origin feature/repo-improvements-20260625` | ✅ 已完成 |
+| 4 | 開立 GitHub Issue | `gh issue create` (因本地 gh 401 認證失敗，改為網頁建立) | ⚠️ 網頁建立中 |
+| 5 | 建立 Pull Request | `gh pr create` (改由網頁連結建立) | ⚠️ 網頁建立中 |
+| 6 | 合併 Pull Request | `gh pr merge` (改由網頁點擊合併) | ⏳ 待操作 |
 | 7 | 切回原分支並同步 | `git checkout docs/encoding-audit-agent-reading` <br> `git pull` | ⏳ 待處理 |
