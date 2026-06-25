@@ -21,7 +21,7 @@
 
 | 步驟 | 任務內容 | 具體指令 / 操作 | 狀態 |
 |---|---|---|---|
-| 1 | 建立歸檔資料夾 | `mkdir docs/archive` | ⏳ 待處理 |
-| 2 | 移動文件 | 使用 `git mv` 移動上述對照表中的 8 個歷史檔案。 | ⏳ 待處理 |
-| 3 | 切換特徵分支提交變更 | 切換至 `feature/repo-improvements-20260625` 特徵分支 <br> 將歸檔變更併入 PR 提交並 push。 | ⏳ 待處理 |
-| 4 | 切回原分支並同步 | 切回原分支 `docs/encoding-audit-agent-reading` 並 checkout 最新 docs。 | ⏳ 待處理 |
+| 1 | 建立歸檔資料夾 | `mkdir docs/archive` | ✅ 已完成 |
+| 2 | 移動文件 | 使用 `git mv` 移動上述對照表中的 8 個歷史檔案。 | ✅ 已完成 |
+| 3 | 切換特徵分支提交變更 | 切換至 `feature/repo-improvements-20260625` 特徵分支 <br> 將歸檔變更併入 PR 提交並 push。 | ✅ 已完成 |
+| 4 | 切回原分支並同步 | 切回原分支 `docs/encoding-audit-agent-reading` 並 checkout 最新 docs。 | ✅ 已完成 |

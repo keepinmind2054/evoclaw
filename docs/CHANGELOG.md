@@ -1,3 +1,24 @@
+## [1.27.48] — 2026-06-25
+
+### Added & Refactored
+- **Session cleanup loop, SQLite signaling fallback, dynamic container memory capping, and AI-Fix static security validation.** Wired into host modules (`webportal.py`, `main.py`, `ipc_watcher.py`, `container_runner.py`, `self_update_ai_fix.py`, and `telegram_channel.py`) to address architectural instability and security injection risks.
+
+### Technical Details
+- **Modified Files**:
+  - `host/webportal.py` — added `_session_cleanup_loop` running every 10 minutes to actively remove inactive sessions.
+  - `host/main.py` — updated loop polling to support both SQLite state keys (`control:self_update`, `control:restart`, etc.) and fallback `.flag` files.
+  - `host/ipc_watcher.py` — updated self-update trigger writing to prioritize SQLite status writing with `try-except` file unlinking/writing fallback. Added `security_violation` check to halt merge/restart.
+  - `host/channels/telegram_channel.py` — updated `/restart` commands to write to SQLite `control:restart`.
+  - `host/container_runner.py` — implemented Level B task and scheduled task detection. Promotes Docker container `--memory` and `--memory-swap` limits dynamically from `512m` to `1024m`, capped at `CONTAINER_MEMORY_MAX` (default `2048m`).
+  - `host/self_update_ai_fix.py` — implemented `_validate_patch_content(diff)` static code security analysis. Blocks patches introducing network connections, subprocess invocations (`shell=True`), core tool changes (`_tools.py`), or security check bypasses. Terminating patch attempts and issuing Critical Security Alerts.
+  - `docs/SELF_UPDATE.md` — updated section 4 & 5 to document SQLite signaling keys, fallback flags, and AI-Fix static security validator.
+  - `tests/test_aifix_security.py` — new; 7 cases validating safe/unsafe diff behaviors, network imports, subprocess invocations, and security bypass regex matching.
+- **Image rebuild required**: No (host-side logic and documentation changes).
+- **Breaking Changes**: None. SQLite state signaling acts as a seamless upgrade, falls back to file flag checks.
+- **Verification**:
+  - `pytest tests/` — 658 cases (including newly added security tests) 100% passed (617 passed, 41 skipped).
+  - Smoke verified `pm2 restart evoclaw` runs successfully with new code.
+
 ## [1.27.47] — 2026-05-20
 
 ### Fixed
