@@ -14,4 +14,4 @@
 | 4 | 開立 GitHub Issue | `gh issue create` (因本地 gh 401 認證失敗，改為網頁建立) | ⚠️ 網頁建立中 |
 | 5 | 建立 Pull Request | `gh pr create` (改由網頁連結建立) | ⚠️ 網頁建立中 |
 | 6 | 合併 Pull Request | `gh pr merge` (改由網頁點擊合併) | ⏳ 待操作 |
-| 7 | 切回原分支並同步 | `git checkout docs/encoding-audit-agent-reading` <br> `git pull` | ⏳ 待處理 |
+| 7 | 切回原分支並同步 | `git checkout docs/encoding-audit-agent-reading` <br> `git pull` | ✅ 已完成 |
