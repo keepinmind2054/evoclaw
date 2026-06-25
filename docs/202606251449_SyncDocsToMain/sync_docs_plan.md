@@ -9,9 +9,9 @@
 | 步驟 | 任務內容 | 具體指令 / 操作 | 狀態 |
 |---|---|---|---|
 | 1 | 更新 `docs/SELF_UPDATE.md` | 使用新實作的 SQLite 通訊與安全過濾邏輯更新文檔。 | ✅ 已完成 |
-| 2 | 切回特徵分支 | `git checkout feature/repo-improvements-20260625` | ⏳ 待處理 |
-| 3 | 將更新的文檔同步到特徵分支 | `git checkout docs/encoding-audit-agent-reading -- docs/` | ⏳ 待處理 |
-| 4 | 暫存與提交變更 | `git add .` <br> `git commit -m "docs: sync SELF_UPDATE.md and add sync_docs_plan"` | ⏳ 待處理 |
-| 5 | 推送至遠端倉庫 | `git push origin feature/repo-improvements-20260625` | ⏳ 待處理 |
-| 6 | 切回原分支 | `git checkout docs/encoding-audit-agent-reading` | ⏳ 待處理 |
-| 7 | 將文檔 checkout 回原分支保留 | `git checkout feature/repo-improvements-20260625 -- docs/` | ⏳ 待處理 |
+| 2 | 切回特徵分支 | `git checkout feature/repo-improvements-20260625` | ✅ 已完成 |
+| 3 | 將更新的文檔同步到特徵分支 | `git checkout docs/encoding-audit-agent-reading -- docs/` | ✅ 已完成 |
+| 4 | 暫存與提交變更 | `git add .` <br> `git commit -m "docs: sync SELF_UPDATE.md and add sync_docs_plan"` | ✅ 已完成 |
+| 5 | 推送至遠端倉庫 | `git push origin feature/repo-improvements-20260625` | ✅ 已完成 |
+| 6 | 切回原分支 | `git checkout docs/encoding-audit-agent-reading` | ✅ 已完成 |
+| 7 | 將文檔 checkout 回原分支保留 | `git checkout feature/repo-improvements-20260625 -- docs/` | ✅ 已完成 |
