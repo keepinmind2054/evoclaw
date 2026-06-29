@@ -224,6 +224,16 @@ def main():
     use_openai_compat = bool(nim_api_key or openai_api_key)
     use_claude = bool(claude_api_key and not use_openai_compat)
 
+    # ── Smart Vision Routing ──
+    # Since NIM / OpenAI instruct models generally do not support vision inputs,
+    # we force route the request to Gemini (if GOOGLE_API_KEY is present)
+    # whenever we detect an image attachment pattern in prompt or history.
+    has_image = "[圖片附件:" in (prompt or "") or any("[圖片附件:" in str(msg.get("content", "")) for msg in (conversation_history or []))
+    if has_image and google_api_key:
+        _log("🧠 VISION-ROUTE", "Image detected — forcing Gemini backend for multi-modal support")
+        use_openai_compat = False
+        use_claude = False
+
     # P16B-FIX-5: log a warning when CLAUDE_API_KEY is set but suppressed by a
     # higher-priority OpenAI-compat key.  Previously this was silent — operators
     # would set CLAUDE_API_KEY expecting Claude to be used and get NIM instead.
