@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-_AGENT_PY = Path(__file__).parent.parent / "container" / "agent-runner" / "agent.py"
+_AGENT_PY = Path(__file__).parent.parent / "container" / "agent-runner" / "_tools.py"
 
 
 def _extract_tool_web_fetch():
@@ -63,9 +63,8 @@ def _extract_tool_web_fetch():
 
     fn_src = src[line_start:end_idx]
 
-    # Build a minimal namespace with the imports the function needs
-    # _log is a helper called by tool_web_fetch for SSRF warnings; provide a no-op stub.
-    ns: dict = {"_log": lambda tag, msg="": None}
+    import threading
+    ns: dict = {"_log": lambda tag, msg="": None, "_SSRF_PATCH_LOCK": threading.Lock()}
     exec(
         "import urllib.request, urllib.error, urllib.parse, socket, ipaddress, re\n" + fn_src,
         ns,
@@ -105,6 +104,7 @@ class TestSSRFDnsRebindingProtection:
         with patch("socket.getaddrinfo", return_value=_public_addrinfo):
             with patch("socket.create_connection", side_effect=_sentinel_create_connection):
                 result = tool_web_fetch("http://example.com/test")
+                print("RESULT IS:", repr(result))
 
         # The sentinel must have been called (i.e. the wrapper was active during open())
         assert _sentinel_called, (

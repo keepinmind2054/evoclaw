@@ -22,32 +22,19 @@ def _make_genome(response_style="balanced", formality=0.5, technical_depth=0.5, 
 def _run_evolve(genome_in, fitness, avg_ms):
     """Run evolve_genome_from_fitness with mocked DB and return captured upsert kwargs."""
     from host.evolution.genome import evolve_genome_from_fitness
+    import host.evolution.genome as genome_mod
 
     captured = {}
 
-    def fake_upsert(jid, **kwargs):
-        captured.update(kwargs)
+    def fake_upsert_with_event(jid, genome_fields, event_kwargs):
+        captured.update(genome_fields)
 
     def fake_get(jid):
         return dict(genome_in)
 
-    mock_db = MagicMock()
-    mock_db.log_evolution_event = MagicMock()
-    mock_db.upsert_group_genome = MagicMock()
-    mock_db.get_group_genome = MagicMock(return_value=dict(genome_in))
-
-    with patch("host.evolution.genome.upsert_genome", side_effect=fake_upsert), \
-         patch("host.evolution.genome.get_genome", side_effect=fake_get), \
-         patch.dict("sys.modules", {"host.db": mock_db, "host": MagicMock(db=mock_db)}):
-        # Patch the `from host import db` import inside evolve_genome_from_fitness
-        # by patching at the host.db level
-        import host.evolution.genome as genome_mod
-        with patch.object(genome_mod, "upsert_genome", side_effect=fake_upsert), \
-             patch.object(genome_mod, "get_genome", side_effect=fake_get):
-            # Also patch the db that's imported inside the function
-            import unittest.mock as _um
-            with _um.patch("host.db.log_evolution_event", mock_db.log_evolution_event, create=True):
-                evolve_genome_from_fitness("test-jid", fitness, avg_ms)
+    with patch.object(genome_mod, "get_genome", side_effect=fake_get), \
+         patch("host.db.upsert_group_genome_with_event", side_effect=fake_upsert_with_event):
+        evolve_genome_from_fitness("test-jid", fitness, avg_ms)
 
     return captured
 

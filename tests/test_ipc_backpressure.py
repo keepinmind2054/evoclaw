@@ -86,7 +86,7 @@ class TestIpcBackpressureCap:
                 with patch("host.ipc_watcher._handle_ipc", new_callable=AsyncMock) as mock_handle:
                     with patch("host.ipc_watcher._IPC_MAX_FILES_PER_CYCLE", 100):
                         from host.ipc_watcher import process_ipc_dir
-                        await process_ipc_dir(group_folder, is_main=False, route_fn=route_fn)
+                        await process_ipc_dir(group_folder, is_main=False, route_fn=capture_handle)
                     call_count = mock_handle.call_count
 
         # Exactly 100 should have been dispatched to _handle_ipc

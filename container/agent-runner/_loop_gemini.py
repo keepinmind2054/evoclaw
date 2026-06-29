@@ -20,6 +20,48 @@ from _constants import _ACTION_CLAIM_RE, is_unverified_action_claim
 from _tools import _messages_sent_via_tool
 
 
+def _parse_message_with_image(text: str) -> list[types.Part]:
+    """解析文字內容，如果含有 [圖片附件: <path>] 則讀取圖片並返回 Part 列表。"""
+    parts = []
+    if not text:
+        return parts
+
+    import re as _re_img
+    pattern = _re_img.compile(r"\[圖片附件:\s*([^\]]+)\]")
+    match = pattern.search(text)
+
+    if match:
+        img_rel_path = match.group(1).strip()
+        clean_text = pattern.sub("", text).strip()
+
+        img_path = Path(WORKSPACE) / img_rel_path
+        if img_path.exists():
+            try:
+                data = img_path.read_bytes()
+                suffix = img_path.suffix.lower()
+                mime_type = "image/jpeg"
+                if suffix in (".png", "png"):
+                    mime_type = "image/png"
+                elif suffix in (".gif", "gif"):
+                    mime_type = "image/gif"
+                elif suffix in (".webp", "webp"):
+                    mime_type = "image/webp"
+
+                parts.append(types.Part.from_bytes(data=data, mime_type=mime_type))
+                _log("🧠 Vision", f"Injected image part from {img_path}")
+            except Exception as e:
+                _log("🧠 Vision Warning", f"Failed to read image {img_path}: {e}")
+        else:
+            _log("🧠 Vision Warning", f"Image path does not exist inside workspace: {img_path}")
+
+        if clean_text:
+            parts.append(types.Part(text=clean_text))
+    else:
+        parts.append(types.Part(text=text))
+
+    return parts
+
+
 def run_agent(client_holder, system_instruction: str, user_message: str, chat_jid: str, assistant_name: str = "Eve", conversation_history: list = None, pool: "_KeyPool | None" = None, apply_key_fn=None, max_iter: int = 20, group_folder: str = "") -> str:
     """
     Gemini function-calling 代理迴圈（agentic loop）。
@@ -64,8 +106,13 @@ def run_agent(client_holder, system_instruction: str, user_message: str, chat_ji
             else:
                 text = str(_raw_content).strip() if _raw_content else ""
             if text:
-                history.append(types.Content(role=role, parts=[types.Part(text=text)]))
-    history.append(types.Content(role="user", parts=[types.Part(text=user_message)]))
+                parts = _parse_message_with_image(text)
+                if parts:
+                    history.append(types.Content(role=role, parts=parts))
+    
+    user_parts = _parse_message_with_image(user_message)
+    if user_parts:
+        history.append(types.Content(role="user", parts=user_parts))
 
     MAX_ITER = max_iter  # 由呼叫方動態設定（Level A=6, Level B=20）
     final_response = ""

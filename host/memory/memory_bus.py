@@ -94,6 +94,8 @@ class SharedMemoryStore:
         content     TEXT    NOT NULL,
         importance  REAL    NOT NULL DEFAULT 0.5,
         access_count INTEGER NOT NULL DEFAULT 0,
+        namespace   TEXT    NOT NULL DEFAULT '',
+        topic_tag   TEXT    NOT NULL DEFAULT '',
         created_at  REAL    NOT NULL,
         updated_at  REAL    NOT NULL
     );
@@ -101,6 +103,8 @@ class SharedMemoryStore:
         ON shared_memories(scope, project);
     CREATE INDEX IF NOT EXISTS idx_shared_memories_agent
         ON shared_memories(agent_id);
+    CREATE INDEX IF NOT EXISTS idx_shared_memories_ns_topic
+        ON shared_memories(namespace, topic_tag);
     CREATE VIRTUAL TABLE IF NOT EXISTS shared_memories_fts
         USING fts5(content, content='shared_memories', content_rowid='rowid');
     CREATE TRIGGER IF NOT EXISTS shared_memories_ai AFTER INSERT ON shared_memories BEGIN
@@ -982,7 +986,7 @@ class MemoryBus:
                     from .hot import _safe_truncate_utf8
                     updated = _safe_truncate_utf8(updated, max_bytes)
                 tmp_path = memory_file.with_suffix('.tmp')
-                tmp_path.write_text(updated, encoding="utf-8")
+                tmp_path.write_text(updated, encoding="utf-8", newline="\n")
                 os.replace(tmp_path, memory_file)
                 logger.debug(f"Hot memory patched for agent {agent_id}: +{len(patch)} chars")
                 return True
