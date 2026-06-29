@@ -102,6 +102,8 @@ Guardrails:
 - Limit writable scope to intended paths such as `host/`, `container/agent-runner/`, `scripts/`, and `docs/`
 - Keep retry count bounded with `AUTO_UPDATE_AI_FIX_MAX_RETRIES`
 - Optionally require human approval with `AUTO_UPDATE_AI_FIX_REQUIRE_HUMAN_APPROVE=true`
+- **Static Code Security Validation**: Automatically inspects AI-generated unified diffs. Rejects any changes introducing networking (`socket`, `requests`, `httpx`), subprocess calls (`subprocess`, `os.system` with `shell=True`), modifications to sensitive core tools (`_tools.py`), or bypass attempts of SSRF/authorization logic.
+- **Force Termination & Lockout**: If unsafe code injection is detected, the self-update flow is immediately aborted, changes are discarded, and a critical security alert (`🚨 CRITICAL SECURITY ALERT`) is sent to the originating channel, bypassing any automatic merge policy (`AUTO_UPDATE_AI_FIX_REQUIRE_HUMAN_APPROVE=false` is ignored) for safety.
 
 Primary implementation area:
 
@@ -111,21 +113,23 @@ Relevant history:
 
 - Issue `#570`: AI-assisted fix flow after failed update tests
 
-## 5. Runtime flags and notification files
+## 5. SQLite state keys and runtime fallback flags
 
-EvoClaw uses small files in `DATA_DIR` to communicate restart / update intent across loops.
+EvoClaw primarily utilizes SQLite database states (via the `router_state` table) to communicate control signals across loops. This avoids `PermissionError` issues on Windows caused by file locking when updating `.flag` files. File-system flags are still written and cleared as a fallback and for manual operations.
 
-| File | Meaning | Writer |
-|---|---|---|
-| `<DATA_DIR>/self_update.flag` | New code has been merged and host should restart into it | self-update flow |
-| `<DATA_DIR>/restart.flag` | Restart requested without code update | restart IPC / slash flow |
-| `<DATA_DIR>/restart_notify.json` | Best-effort post-restart notification context | self-update / restart flow |
+| SQLite State Key | File-System Fallback | Meaning | Writer |
+|---|---|---|---|
+| `control:self_update` | `self_update.flag` | New code has been merged; host should restart into it | self-update flow |
+| `control:restart` | `restart.flag` | Restart requested without code update | restart IPC / TG channel flow |
+| `control:refresh_groups` | `refresh_groups.flag` | Request host to reload registered groups list dynamically | IPC / Web Portal |
+| `control:reset_group` | `reset_group.flag` | Clear failure tracking metrics for a specific group JID | IPC watcher |
+| N/A | `restart_notify.json` | Best-effort post-restart notification metadata (JSON) | self-update / restart flow |
 
 Design notes:
 
-- `host/main.py` should watch these flags inside the main loop.
-- Once the loop observes a restart or self-update request, it should move into the `os.execv` path.
-- `restart_notify.json` may include source label, timestamp, and originating chat / JID so EvoClaw can send a post-restart confirmation.
+- `host/main.py` polls both the SQLite `router_state` table and the file-system `.flag` files in its main loop.
+- Once a restart signal is detected, the state is reset, the file is unlinked, and the loop transitions to the `os.execv` graceful restart flow.
+- `restart_notify.json` includes JID, source label, and start timestamp for sending a post-restart confirmation message.
 
 Relevant history:
 

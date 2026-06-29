@@ -260,6 +260,58 @@ class TelegramChannel:
                 self._app.add_handler(CommandHandler("update", handle_update_cmd))
                 self._app.add_handler(CommandHandler("restart", handle_restart_cmd))
 
+                async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+                    if not update.message or not update.message.photo:
+                        return
+                    self._last_poll_activity = time.time()
+                    jid = self._jid(update.effective_chat.id)
+                    sender = str(update.effective_user.id) if update.effective_user else "unknown"
+                    sender_name = update.effective_user.full_name if update.effective_user else "Unknown"
+
+                    groups = {g["jid"]: g for g in self._registered_groups}
+                    group = groups.get(jid)
+                    if not group:
+                        return
+                    folder = group["folder"]
+
+                    try:
+                        photo = update.message.photo[-1]
+                        file_unique_id = photo.file_unique_id
+                        tg_file = await photo.get_file()
+
+                        # 下載圖片到 groups/<folder>/attachments/
+                        attachments_dir = config.GROUPS_DIR / folder / "attachments"
+                        attachments_dir.mkdir(parents=True, exist_ok=True)
+                        dest_path = attachments_dir / f"{file_unique_id}.jpg"
+
+                        await tg_file.download_to_drive(custom_path=str(dest_path))
+                        log.info("Telegram: photo downloaded to %s", dest_path)
+
+                        caption = update.message.caption or ""
+                        # 用於容器內的相對路徑
+                        text = f"[圖片附件: attachments/{file_unique_id}.jpg]"
+                        if caption.strip():
+                            text += f"\n用戶留言: {caption.strip()}"
+
+                        # 檢查 trigger 限制
+                        if group.get("requires_trigger", True):
+                            if not config.TRIGGER_PATTERN.match(text):
+                                return
+
+                        await self._on_message(
+                            jid=jid,
+                            sender=sender,
+                            sender_name=sender_name,
+                            content=text,
+                            is_group=update.effective_chat.type in ("group", "supergroup"),
+                            channel="telegram",
+                        )
+                    except Exception as _exc:
+                        log.error(
+                            "Telegram handle_photo: unhandled exception for jid=%s: %s",
+                            jid, _exc, exc_info=True,
+                        )
+
                 async def handle_non_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     """Notify users who send non-text messages (Issue #70)."""
                     if not update.effective_chat:
@@ -275,9 +327,11 @@ class TelegramChannel:
                     except Exception:
                         pass
 
+                self._app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_photo))
+
                 self._app.add_handler(
                     MessageHandler(
-                        (filters.PHOTO | filters.VOICE | filters.VIDEO | filters.AUDIO |
+                        (filters.VOICE | filters.VIDEO | filters.AUDIO |
                          filters.Document.ALL | filters.Sticker.ALL | filters.LOCATION |
                          filters.CONTACT) & ~filters.COMMAND,
                         handle_non_text,

@@ -88,6 +88,13 @@ def _patch_base_dir(monkeypatch, repo: Path, data_dir: Path):
     from host import config as _cfg
     monkeypatch.setattr(_cfg, "BASE_DIR", repo)
     monkeypatch.setattr(_cfg, "DATA_DIR", data_dir)
+    monkeypatch.setattr(_cfg, "AUTO_UPDATE_USE_WORKTREE", False)
+
+    import host.ipc_watcher as _ipc
+    monkeypatch.setattr(_ipc.config, "BASE_DIR", repo)
+    monkeypatch.setattr(_ipc.config, "DATA_DIR", data_dir)
+    monkeypatch.setattr(_ipc.config, "AUTO_UPDATE_USE_WORKTREE", False)
+    
     data_dir.mkdir(exist_ok=True)
 
 
@@ -152,6 +159,8 @@ async def test_already_up_to_date_skips_gate(fake_repo, tmp_path, monkeypatch):
 
     data_dir = tmp_path / "data"
     _patch_base_dir(monkeypatch, fake_repo, data_dir)
+
+
 
     # A test command that WOULD fail if it ran — proves the gate was skipped.
     monkeypatch.setenv("AUTO_UPDATE_TEST_CMD", f'"{sys.executable}" -c "import sys; sys.exit(1)"')

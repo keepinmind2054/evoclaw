@@ -17,7 +17,7 @@ import logging
 import sqlite3
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -26,7 +26,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 def _reset_db_module():
     """Force host.db to be re-imported so _db global is reset between tests."""
-    import importlib
     import host.db as db_mod
     db_mod._db = None
     return db_mod
@@ -77,23 +76,26 @@ class TestIntegrityCheckOk:
     def test_integrity_check_pragma_is_executed(self, tmp_path):
         """Verify that PRAGMA integrity_check is actually called during init."""
         db_path = tmp_path / "pragma_check.db"
-        conn = sqlite3.connect(str(db_path))
-        conn.close()
+        db_path.touch()
 
         executed_pragmas = []
+        fake_conn = MagicMock()
+        
+        def fake_execute(sql, *args):
+            if "integrity_check" in sql.lower():
+                executed_pragmas.append(sql)
+            return MagicMock()
+            
+        fake_conn.execute = fake_execute
+        
         _orig_connect = sqlite3.connect
+        connect_call_count = [0]
 
         def patched_connect(path, **kwargs):
-            c = _orig_connect(path, **kwargs)
-            _orig_execute = c.execute
-
-            def tracked_execute(sql, *args):
-                if "integrity_check" in sql.lower():
-                    executed_pragmas.append(sql)
-                return _orig_execute(sql, *args)
-
-            c.execute = tracked_execute
-            return c
+            connect_call_count[0] += 1
+            if connect_call_count[0] == 1:
+                return fake_conn
+            return _orig_connect(path, **kwargs)
 
         with patch("sqlite3.connect", side_effect=patched_connect):
             import host.db as db_mod
@@ -120,7 +122,6 @@ class TestIntegrityCheckCorrupt:
     def test_corrupt_result_logs_critical(self, tmp_path, caplog):
         """A corruption message from integrity_check must produce a CRITICAL log."""
         db_path = tmp_path / "corrupt.db"
-        # Write a non-empty file so the if db_path.exists() branch runs
         db_path.write_bytes(b"SQLite format 3\x00" + b"\x00" * 100)
 
         fake_check_conn = MagicMock()
@@ -130,15 +131,17 @@ class TestIntegrityCheckCorrupt:
         fake_check_conn.close = MagicMock()
 
         _orig_connect = sqlite3.connect
-
         connect_call_count = [0]
 
         def patched_connect(path, **kwargs):
             connect_call_count[0] += 1
             if connect_call_count[0] == 1:
-                # First call = integrity check connection
                 return fake_check_conn
-            # Subsequent calls = normal connection
+            import os
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
             return _orig_connect(path, **kwargs)
 
         with patch("sqlite3.connect", side_effect=patched_connect):
@@ -175,6 +178,11 @@ class TestIntegrityCheckCorrupt:
             connect_call_count[0] += 1
             if connect_call_count[0] == 1:
                 return fake_check_conn
+            import os
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
             return _orig_connect(path, **kwargs)
 
         with patch("sqlite3.connect", side_effect=patched_connect):
@@ -225,25 +233,30 @@ class TestDatabaseErrorOnConnect:
     def test_database_error_does_not_crash_process(self, tmp_path):
         """DatabaseError during integrity check must not propagate as an unhandled exception."""
         db_path = tmp_path / "no_crash.db"
-        db_path.write_bytes(b"totally invalid sqlite content 12345!!")
+        db_path.touch()
+
+        real_connect = sqlite3.connect
+        call_count = [0]
+
+        def patched_connect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise sqlite3.DatabaseError("Mock DatabaseError during integrity check")
+            return real_connect(*args, **kwargs)
 
         import host.db as db_mod
         db_mod._db = None
-        try:
-            # Must not raise — the impl catches DatabaseError and logs CRITICAL only
-            db_mod.init_database(db_path)
-        except sqlite3.DatabaseError:
-            pytest.fail(
-                "DatabaseError during integrity check must not propagate to the caller"
-            )
-        except Exception:
-            # Any other exception (e.g. OperationalError from the main connect) is
-            # acceptable — we only require that DatabaseError from the check is caught.
-            pass
-        finally:
-            if db_mod._db is not None:
-                db_mod._db.close()
-                db_mod._db = None
+        with patch("sqlite3.connect", side_effect=patched_connect):
+            try:
+                db_mod.init_database(db_path)
+            except sqlite3.DatabaseError:
+                pytest.fail(
+                    "DatabaseError during integrity check must not propagate to the caller"
+                )
+            finally:
+                if db_mod._db is not None:
+                    db_mod._db.close()
+                    db_mod._db = None
 
 
 # ── Normal operations after passing integrity check ───────────────────────────
@@ -260,21 +273,20 @@ class TestNormalOperationsAfterIntegrityCheck:
         db_mod.init_database(db_path)
 
         try:
-            # register_group is a normal DB operation; it must succeed
-            db_mod.register_group(
-                folder="test_group",
+            # register_group has been refactored to set_registered_group; it must succeed
+            db_mod.set_registered_group(
                 jid="tg:9999",
                 name="Test Group",
+                folder="test_group",
                 trigger_pattern=None,
                 container_config=None,
                 requires_trigger=False,
                 is_main=False,
             )
+            # Retrieve to verify
             groups = db_mod.get_all_registered_groups()
-            jids = [g["jid"] for g in groups]
-            assert "tg:9999" in jids, (
-                "Registered group must be retrievable after successful init"
-            )
+            assert any(g["jid"] == "tg:9999" for g in groups)
         finally:
-            db_mod._db.close()
-            db_mod._db = None
+            if db_mod._db is not None:
+                db_mod._db.close()
+                db_mod._db = None

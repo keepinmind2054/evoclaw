@@ -217,11 +217,12 @@ class TestRestoreRemoteControlExecutorDispatch:
 
         poll_calls = [0]
 
-        async def fake_sleep(secs):
+        async def fake_wait_for(fut, timeout=None):
             poll_calls[0] += 1
             event_order.append("poll_sleep")
             if poll_calls[0] >= 1:
                 raise asyncio.CancelledError
+            return None
 
         fake_loop = MagicMock()
         fake_loop.run_in_executor = fake_run_in_executor
@@ -236,7 +237,7 @@ class TestRestoreRemoteControlExecutorDispatch:
         with patch("host.config.DATA_DIR", tmp_path):
             with patch("asyncio.get_running_loop", return_value=fake_loop):
                 with patch.object(ipc_mod, "_INOTIFY_AVAILABLE", False):
-                    with patch("asyncio.sleep", side_effect=fake_sleep):
+                    with patch("asyncio.wait_for", side_effect=fake_wait_for):
                         try:
                             await ipc_mod.start_ipc_watcher(
                                 fake_get_groups,

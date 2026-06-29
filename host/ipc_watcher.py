@@ -924,7 +924,7 @@ def _rc_save(pid: int, url: str, sender: str, jid: str) -> None:
                     "startedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}),
         encoding="utf-8",
     )
-    _tmp.rename(_dest)
+    _tmp.replace(_dest)
 
 
 def restore_remote_control() -> None:
