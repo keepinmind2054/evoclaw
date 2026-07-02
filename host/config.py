@@ -184,9 +184,10 @@ GMAIL_POLL_INTERVAL = _env_int("GMAIL_POLL_INTERVAL", 30)
 WHATSAPP_WEBHOOK_PORT = _env_int("WHATSAPP_WEBHOOK_PORT", 8080)
 
 # Dashboard
-DASHBOARD_HOST: str = os.getenv("DASHBOARD_HOST", "127.0.0.1")
-DASHBOARD_PORT = _env_int("DASHBOARD_PORT", 8765)
-DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")  # If set, enables HTTP Basic Auth
+_env_file_dashboard = read_env_file(["DASHBOARD_HOST", "DASHBOARD_PORT", "DASHBOARD_PASSWORD", "DASHBOARD_USER"])
+DASHBOARD_HOST: str = os.getenv("DASHBOARD_HOST") or _env_file_dashboard.get("DASHBOARD_HOST", "127.0.0.1")
+DASHBOARD_PORT = int(os.environ.get("DASHBOARD_PORT") or _env_file_dashboard.get("DASHBOARD_PORT") or 8765)
+DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD") or _env_file_dashboard.get("DASHBOARD_PASSWORD", "")  # If set, enables HTTP Basic Auth
 # p12b fix: defer the DASHBOARD_PASSWORD warning to a function so it can be called
 # after logging is fully configured (previously fired at import time before handlers
 # were set up, causing the warning to be emitted by the root logger's default handler
@@ -202,7 +203,7 @@ def warn_dashboard_no_password() -> None:
             "DASHBOARD_PASSWORD is not set — dashboard has NO authentication. "
             "Set DASHBOARD_PASSWORD in .env to enable HTTP Basic Auth."
         )
-DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "admin")
+DASHBOARD_USER = os.environ.get("DASHBOARD_USER") or _env_file_dashboard.get("DASHBOARD_USER", "admin")
 # Web portal config — env var takes priority; fall back to .env file so
 # operators can set it there (mirrors ENABLED_CHANNELS below).  Reading
 # os.environ alone silently ignored WEBPORTAL_ENABLED=true in .env because

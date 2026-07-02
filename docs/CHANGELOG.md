@@ -1,3 +1,19 @@
+## [1.27.51] — 2026-07-02
+
+### Fixed
+- **Hardened IPC file and memory response handling after deep review.** Non-main groups can no longer request `/workspace/project/*` through `send_file`, sensitive host paths such as `.env`, `.git/`, `store/`, and `data/` are denied for all send_file requests, and MemoryBus IPC responses must resolve inside `data/ipc/<group>/results/*.json` before the host writes them.
+- **Fixed container cleanup and GroupQueue retry edge cases.** Container cleanup now uses an always-defined subprocess alias and logs docker removal failures; GroupQueue retries preserve the consecutive failure counter so `MAX_RETRIES` is reachable, and tasks are no longer put into an unreachable pending state when the global waiting queue is full.
+- **Made Linux inotify IPC startup process pre-existing files.** The inotify backend now scans watched group IPC directories after arming watches and after refreshes so messages/tasks written before watcher startup are not stranded.
+- **Dashboard auth configuration now honors `.env`.** `DASHBOARD_HOST`, `DASHBOARD_PORT`, `DASHBOARD_PASSWORD`, and `DASHBOARD_USER` now use the same `.env` fallback pattern as other runtime settings.
+- **Removed tracked Python bytecode artifacts.** `__pycache__` / `*.pyc` files are no longer tracked; `.gitignore` already excludes them.
+
+### Technical Details
+- **Modified Files**: `host/ipc_watcher.py`, `host/group_queue.py`, `host/container_runner.py`, `host/config.py`, `.env.example`, `pyproject.toml`, `host/requirements.txt`, `tests/test_deep_review_hardening.py`, `docs/CHANGELOG.md`, and removed tracked bytecode files.
+- **Image rebuild required**: No — host-side and CI/test changes only.
+- **Breaking Changes**: Low risk. `send_file` no longer supports using IPC to send sensitive host project files; group-local artifacts remain supported.
+- **Verification**:
+  - `uv run --no-project --with pytest --with pytest-asyncio --with pyyaml --with croniter --with pytz --with requests --with python-telegram-bot --with psutil --with aiohttp --with websockets --with 'discord.py>=2.3.0' python -m pytest -q tests/test_deep_review_hardening.py tests/test_ipc_watcher_safety.py`
+
 ## [1.27.50] — 2026-07-02
 
 ### Documentation

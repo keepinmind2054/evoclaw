@@ -140,16 +140,34 @@ def _notify_main_group_error(filename: str, error: str) -> None:
         log.debug("_notify_main_group_error failed: %s", exc)
 
 
-def _write_ipc_response(path: str, data: dict) -> None:
-    """Atomically write *data* as JSON to *path* (write to .tmp then rename).
+def _resolve_ipc_response_file(path: str, group_folder: str) -> Path:
+    """Validate a container-provided IPC response path.
 
-    Used by memory_recall and memory_remember handlers to deliver results to
-    the container-side polling loop without risking a partial-read race.
+    Memory IPC tools poll files under data/ipc/<group>/results/.  Never trust the
+    raw response_file sent by a container: without containment checks it can
+    overwrite arbitrary host files such as .env.
     """
-    tmp = path + ".tmp"
+    if not path:
+        raise ValueError("IPC response_file must not be empty")
+    if "\x00" in path:
+        raise ValueError("IPC response_file must not contain null bytes")
+    results_root = (config.DATA_DIR / "ipc" / group_folder / "results").resolve()
+    resolved = Path(path).resolve()
+    if not resolved.is_relative_to(results_root):
+        raise ValueError(f"IPC response_file must stay within {results_root}")
+    if resolved.suffix != ".json":
+        raise ValueError("IPC response_file must end with .json")
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    return resolved
+
+
+def _write_ipc_response(path: str, data: dict, group_folder: str) -> None:
+    """Atomically write *data* as JSON to a validated IPC response path."""
+    out = _resolve_ipc_response_file(path, group_folder)
+    tmp = out.with_suffix(out.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh)
-    os.rename(tmp, path)
+    os.replace(tmp, out)
 
 
 # p28b: IPC backpressure — maximum number of JSON files to process per group per
@@ -506,7 +524,7 @@ async def _handle_ipc(payload: dict, group_folder: str, is_main: bool, route_fn:
 
         # Resolve container path to host path
         # Container sees /workspace/group/ → host sees {GROUPS_DIR}/{folder}/
-        host_path = _resolve_container_path(container_path, group_folder)
+        host_path = _resolve_container_path(container_path, group_folder, is_main=is_main)
         log.info("send_file IPC: resolved host_path=%r", host_path)
 
         if host_path and os.path.exists(host_path):
@@ -1690,7 +1708,7 @@ async def _run_memory_recall(
             }
             for m in memories
         ]
-        _write_ipc_response(response_file, {"ok": True, "memories": result_list})
+        _write_ipc_response(response_file, {"ok": True, "memories": result_list}, group_folder)
         log.info(
             "memory_recall IPC: query=%r found %d memories for agent=%s",
             query, len(result_list), agent_id,
@@ -1698,7 +1716,7 @@ async def _run_memory_recall(
     except Exception as exc:
         log.error("memory_recall IPC error: %s", exc)
         try:
-            _write_ipc_response(response_file, {"ok": False, "error": str(exc)})
+            _write_ipc_response(response_file, {"ok": False, "error": str(exc)}, group_folder)
         except Exception:
             pass
 
@@ -1724,7 +1742,7 @@ async def _run_memory_remember(
             project=namespace or "",
             importance=float(importance),
         )
-        _write_ipc_response(response_file, {"ok": True, "memory_id": memory_id})
+        _write_ipc_response(response_file, {"ok": True, "memory_id": memory_id}, group_folder)
         log.info(
             "memory_remember IPC: stored memory_id=%s for agent=%s importance=%.2f",
             memory_id, agent_id, importance,
@@ -1732,7 +1750,7 @@ async def _run_memory_remember(
     except Exception as exc:
         log.error("memory_remember IPC error: %s", exc)
         try:
-            _write_ipc_response(response_file, {"ok": False, "error": str(exc)})
+            _write_ipc_response(response_file, {"ok": False, "error": str(exc)}, group_folder)
         except Exception:
             pass
 
@@ -1853,7 +1871,25 @@ async def _run_subagent(
             pass
 
 
-def _resolve_container_path(container_path: str, group_folder: str) -> str | None:
+_SENSITIVE_SEND_FILE_NAMES = {".env", ".env.local", ".netrc", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
+_SENSITIVE_SEND_FILE_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".crt")
+_SENSITIVE_SEND_FILE_DIRS = {".git", "store", "data"}
+
+
+def _is_sensitive_send_file_path(path: Path, root: Path) -> bool:
+    try:
+        rel_parts = {part.lower() for part in path.relative_to(root).parts}
+    except ValueError:
+        rel_parts = {path.name.lower()}
+    name = path.name.lower()
+    if rel_parts & _SENSITIVE_SEND_FILE_DIRS:
+        return True
+    if name in _SENSITIVE_SEND_FILE_NAMES:
+        return True
+    return any(name.endswith(suffix) for suffix in _SENSITIVE_SEND_FILE_SUFFIXES)
+
+
+def _resolve_container_path(container_path: str, group_folder: str, *, is_main: bool = False) -> str | None:
     """Convert a container-side file path to the equivalent host path.
 
     Container /workspace/group/   → host {GROUPS_DIR}/{folder}/
@@ -1861,7 +1897,9 @@ def _resolve_container_path(container_path: str, group_folder: str) -> str | Non
     Container /workspace/ipc/     → host {DATA_DIR}/ipc/{folder}/
     Container /workspace/global/  → host {GROUPS_DIR}/global/
 
-    Uses pathlib.Path throughout for correct Windows backslash handling.
+    Non-main groups may not request /workspace/project/ files via send_file, and
+    sensitive host files are denied for every group.  Uses pathlib.Path
+    throughout for correct Windows backslash handling.
     """
     if not group_folder:
         log.warning("_resolve_container_path: empty group_folder for path %r", container_path)
@@ -1882,6 +1920,9 @@ def _resolve_container_path(container_path: str, group_folder: str) -> str | Non
         host = groups_dir / group_folder / rel
         expected_root = groups_dir / group_folder
     elif p.startswith("/workspace/project/"):
+        if not is_main:
+            log.warning("_resolve_container_path: non-main group %r tried to send project file %r", group_folder, container_path)
+            return None
         rel = p[len("/workspace/project/"):]
         host = base_dir / rel
         expected_root = base_dir
@@ -1909,6 +1950,9 @@ def _resolve_container_path(container_path: str, group_folder: str) -> str | Non
                 "container_path=%r resolved to %r which is outside %r",
                 container_path, str(resolved), str(expected_root),
             )
+            return None
+        if _is_sensitive_send_file_path(resolved, expected_root.resolve() if expected_root else resolved.parent):
+            log.warning("_resolve_container_path: sensitive file send denied for %r", container_path)
             return None
     except Exception as exc:
         log.warning("_resolve_container_path: resolution error for %r: %s", container_path, exc)
@@ -2061,6 +2105,15 @@ async def _start_ipc_watcher_inotify(get_groups_fn: Callable, route_fn: Callable
     _refresh_watches()
     log.info("IPC watcher (inotify): watching %d directories", len(watch_map))
 
+    # Process files that already existed before watches were armed.  inotify only
+    # emits future CREATE/MOVED_TO events, so a host restart after a container wrote
+    # IPC files would otherwise leave messages/tasks stranded forever.
+    for folder, is_main in set(watch_map.values()):
+        try:
+            await process_ipc_dir(folder, is_main, route_fn)
+        except Exception as _e:
+            log.error("inotify: initial process_ipc_dir error for %s: %s", folder, _e)
+
     # p17c BUG-FIX (MEDIUM): asyncio.get_event_loop() is deprecated in Python
     # 3.10+ when called from a coroutine — use asyncio.get_running_loop() which
     # always returns the loop the current coroutine is executing on.
@@ -2086,6 +2139,13 @@ async def _start_ipc_watcher_inotify(get_groups_fn: Callable, route_fn: Callable
             now = loop.time()
             if now - _last_refresh > _REFRESH_INTERVAL:
                 _refresh_watches()
+                # Also scan after refresh to pick up files created before a new
+                # watch was added for a newly registered group.
+                for folder, is_main in set(watch_map.values()):
+                    try:
+                        await process_ipc_dir(folder, is_main, route_fn)
+                    except Exception as _e:
+                        log.error("inotify: refresh process_ipc_dir error for %s: %s", folder, _e)
                 _last_refresh = now
 
             # Periodically purge stale subagent result files
