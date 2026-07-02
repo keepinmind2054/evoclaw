@@ -636,6 +636,40 @@ echo '{"prompt":"hello"}' | docker run -i --rm evoclaw-agent
 python -m pytest tests/
 ```
 
+### CI / PR 驗證流程
+
+目前 GitHub Actions 以「PR 先驗證、合併後再做漂移檢查」為主。開 PR 前建議先在本機跑與 CI 對齊的最小驗證：
+
+```bash
+python -m compileall host skills_engine run.py setup scripts container/agent-runner
+python -m pytest tests/ -v --tb=short
+npx -y github:jszzr/envdrift#v0.1.0 . --example .env.example --include host
+```
+
+若改到 `container/` 或 agent runner，還需要確認 Docker image 能建置：
+
+```bash
+docker build -t evoclaw-agent:latest container/
+```
+
+| Workflow | 觸發時機 | 主要檢查 |
+|----------|----------|----------|
+| `Python CI` (`.github/workflows/ci.yml`) | `pull_request` → `main` | 安裝 host 依賴、`pytest tests/ -v --tb=short` |
+| `PR checks` (`.github/workflows/pr-checks.yml`) | PR opened / edited / synchronized | PR body 必須引用 issue（`Closes #N` / `Fixes #N` / `Resolves #N` / `Refs #N`），除非加 `no-issue` label |
+| `PR checks` / changelog gate | PR touched `host/`, `container/`, `scripts/`, `Makefile`, `.env.example` | 必須更新 `docs/CHANGELOG.md`，除非加 `skip-changelog` label |
+| `Env Drift` (`.github/workflows/envdrift.yml`) | PR 與 push 到 `main` | 檢查 `host/` 使用的 env var 是否與 `.env.example` 同步 |
+| `Skill PR Validation` (`.github/workflows/skill-pr.yml`) | PR touched `.claude/skills/**` 或 `skills-engine/**` | 阻止新增 skill 同時改 source；套用 changed skills、typecheck、跑 skill test |
+| `Skill Drift Detection` (`.github/workflows/skill-drift.yml`) | push 到 `main` 且 touched `src/**`, `container/**`, `package.json`，或手動觸發 | 驗證所有 skills 是否仍能套用；若 drift，嘗試自動開修復 PR |
+| `Update token count` (`.github/workflows/update-tokens.yml`) | push 到 `main` touched `src/**`, `container/**`, `launchd/**`, `CLAUDE.md`，或手動觸發 | 更新 token badge / `repo-tokens/badge.svg`，有變更時自動 commit |
+
+PR 提交前請特別確認：
+
+1. **PR body 有 issue link**：例如 `Closes #617`。純文件或極小變更可加 `no-issue` label。
+2. **runtime 變更有 changelog**：改 `host/`、`container/`、`scripts/`、`Makefile` 或 `.env.example` 時，同步更新 `docs/CHANGELOG.md`。
+3. **env var 變更有 `.env.example`**：新增/改名 host env var 時，讓 `Env Drift` 通過。
+4. **container 變更標明需重建 image**：PR 說明與 changelog 都應註明是否需要 `docker build -t evoclaw-agent:latest container/`。
+5. **skill 變更與 source 變更分 PR**：避免觸發 Skill PR policy gate。
+
 ### 主要貢獻方向
 
 1. **Skills**（`skills_engine/`）— 新能力套件
