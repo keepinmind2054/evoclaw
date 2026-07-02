@@ -1,3 +1,19 @@
+## [1.27.50] — 2026-07-02
+
+### Documentation
+- **README now documents the current CI / PR validation flow.** Added a contributor-facing section covering local verification commands and the GitHub Actions gates for Python CI, PR issue links, changelog requirements, envdrift, skill validation, skill drift, and token-count updates.
+
+### Fixed
+- **`.env.example` now includes active `WEBPORTAL_PORT=8766` so Env Drift passes.** The CI envdrift job treats commented keys as absent, while `host/config.py` reads `WEBPORTAL_PORT`; uncommenting the example value aligns the sample env file with host usage.
+
+### Technical Details
+- **Modified Files**: `README.md`, `.env.example`, `docs/CHANGELOG.md`.
+- **Image rebuild required**: No — documentation and environment example only.
+- **Breaking Changes**: None.
+- **Verification**:
+  - `git diff --check README.md`
+  - `npx -y github:jszzr/envdrift#v0.1.0 . --example .env.example --include host`
+
 ## [1.27.49] — 2026-06-26
 
 ### Added
