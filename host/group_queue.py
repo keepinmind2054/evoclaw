@@ -64,6 +64,7 @@ class _GroupState:
     pending_tasks: Deque = field(default_factory=collections.deque)  # 等待執行的 _QueuedTask 清單 (O(1) popleft)
     pending_task_ids: set = field(default_factory=set)  # O(1) duplicate check for pending_tasks (issue #446)
     retry_count: int = 0            # 目前連續失敗次數（用於退避計算）
+    retry_ready: bool = False       # True only after the backoff timer fires; lets retry dispatch without resetting count
 
 
 class GroupQueue:
@@ -112,7 +113,7 @@ class GroupQueue:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def enqueue_message_check(self, group_jid: str) -> None:
+    def enqueue_message_check(self, group_jid: str, *, from_retry: bool = False) -> None:
         """
         通知系統某群組有新訊息需要處理。
 
@@ -135,7 +136,7 @@ class GroupQueue:
             log.debug(f"[{group_jid}] Container active — message queued")
             return
 
-        if state.retry_count > 0:
+        if state.retry_count > 0 and not from_retry:
             # 有重試已排程中（指數退避等待中），不要立即再啟動新 container。
             # 只標記 pending_messages，讓排程重試到期後自然觸發處理。
             # 這防止 Docker circuit breaker 開路時形成緊密無限重試迴圈。
@@ -164,6 +165,7 @@ class GroupQueue:
 
         # 條件都滿足，同步更新狀態後建立 asyncio task（避免 race：多個 task 排入前計數來不及更新）
         state.active = True
+        state.retry_ready = False
         self._active_count += 1
         _queued_at_ms = state.pending_message_queued_at_ms or int(time.time() * 1000)
         state.pending_message_queued_at_ms = None
@@ -225,7 +227,15 @@ class GroupQueue:
             return
 
         if self._active_count >= config.MAX_CONCURRENT_CONTAINERS:
-            # 全域並發已滿，也加入等待佇列
+            # 全域並發已滿，也加入等待佇列。若等待佇列已滿且此 group 尚未在
+            # 等待集中，不能先把 task 放進 pending_tasks：否則沒有喚醒路徑，
+            # 且後續 scheduler 會因 pending_task_ids 去重而永久跳過。
+            if group_jid not in self._waiting_set and len(self._waiting_groups) >= MAX_WAITING_GROUPS:
+                log.warning(
+                    "[%s] _waiting_groups at cap (%d), dropping task %s so scheduler can retry later",
+                    group_jid, MAX_WAITING_GROUPS, task_id,
+                )
+                return
             if len(state.pending_tasks) >= MAX_PENDING_TASKS_PER_GROUP:
                 log.warning(
                     "[%s] pending_tasks full (%d/%d), dropping task %s",
@@ -235,19 +245,14 @@ class GroupQueue:
             state.pending_tasks.append(task)
             state.pending_task_ids.add(task_id)  # keep O(1) lookup set in sync (issue #446)
             if group_jid not in self._waiting_set:  # O(1) membership check (issue #446)
-                if len(self._waiting_groups) < MAX_WAITING_GROUPS:
-                    self._waiting_groups.append(group_jid)
-                    self._waiting_set.add(group_jid)
-                else:
-                    log.warning(
-                        "[%s] _waiting_groups at cap (%d), group will not be queued",
-                        group_jid, MAX_WAITING_GROUPS,
-                    )
+                self._waiting_groups.append(group_jid)
+                self._waiting_set.add(group_jid)
             log.debug(f"[{group_jid}] At concurrency limit — task {task_id} queued")
             return
 
         # 同步更新狀態後建立 asyncio task（避免 race）
         state.active = True
+        state.retry_ready = False
         state.is_task_container = True
         state.running_task_id = task.id
         self._active_count += 1
@@ -328,6 +333,7 @@ class GroupQueue:
         if state.retry_count > MAX_RETRIES:
             log.error(f"[{group_jid}] Max retries exceeded — dropping message (will retry on next new message)")
             state.retry_count = 0
+            state.retry_ready = False
             # Notify user so they are not left with a silent non-response
             try:
                 from . import main as _main_mod
@@ -354,14 +360,14 @@ class GroupQueue:
         async def _retry():
             await asyncio.sleep(delay)
             if not self._shutting_down:
-                # BUG-GQ-01 FIX: Reset retry_count to 0 before calling
-                # enqueue_message_check.  Without this, the guard
-                # ``if state.retry_count > 0: return`` in enqueue_message_check
-                # fires immediately and prevents the retry from starting a new
-                # container, permanently deadlocking the group's message queue.
+                # Mark the retry as ready without resetting retry_count.  Resetting
+                # here made MAX_RETRIES unreachable because every failed retry
+                # restarted from count=1.  enqueue_message_check(from_retry=True)
+                # bypasses only the "timer pending" guard while preserving the
+                # consecutive failure count for the next _schedule_retry() call.
                 _s = self._get_group(group_jid)
-                _s.retry_count = 0
-                self.enqueue_message_check(group_jid)
+                _s.retry_ready = True
+                self.enqueue_message_check(group_jid, from_retry=True)
 
         t = asyncio.create_task(_retry(), name=f"retry-{group_jid}")
         self._retry_tasks.add(t)
@@ -399,7 +405,7 @@ class GroupQueue:
 
         # 再處理待辦訊息
         if state.pending_messages:
-            if state.retry_count > 0:
+            if state.retry_count > 0 and not state.retry_ready:
                 # 重試已排程中，不在 drain 時立即啟動 — 讓重試到期後自然處理。
                 # 這防止 Docker circuit breaker 開路時 _drain_group 形成緊密迴圈。
                 log.debug(f"[{group_jid}] Retry pending in drain — deferring message processing")
@@ -407,6 +413,7 @@ class GroupQueue:
             _queued_at_ms = state.pending_message_queued_at_ms or int(time.time() * 1000)
             state.pending_message_queued_at_ms = None
             state.active = True
+            state.retry_ready = False
             self._active_count += 1
             t = asyncio.create_task(
                 self._run_for_group(group_jid, reason="drain", queued_at_ms=_queued_at_ms),
@@ -449,7 +456,7 @@ class GroupQueue:
                 # this guard a group that failed and is waiting for its backoff
                 # delay can slip out of _waiting_groups and get a new container
                 # immediately, bypassing the circuit breaker entirely.
-                if state.retry_count > 0:
+                if state.retry_count > 0 and not state.retry_ready:
                     log.debug(
                         "[%s] Retry pending in drain_waiting — deferring message processing",
                         next_jid,
@@ -460,6 +467,7 @@ class GroupQueue:
                 # pending_messages=True and enqueue a duplicate run.  Clear it now
                 # (synchronously, before creating the task) to prevent double-dispatch.
                 state.pending_messages = False
+                state.retry_ready = False
                 _queued_at_ms = state.pending_message_queued_at_ms or int(time.time() * 1000)
                 state.pending_message_queued_at_ms = None
                 state.active = True

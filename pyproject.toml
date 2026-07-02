@@ -9,7 +9,9 @@ license = {text = "MIT"}
 dependencies = [
     "python-telegram-bot>=21.0",
     "croniter>=3.0.0",
+    "pytz>=2024.1",
     "pyyaml>=6.0",
+    "requests>=2.31.0",
     # aiofiles removed — not imported anywhere in host/; re-add if host code uses aiofiles
     # aiohttp: floor raised to 3.10.11 (CVE-2024-52304 HTTP request smuggling fixed there)
     "aiohttp>=3.10.11",
@@ -46,6 +48,10 @@ evoclaw-setup = "setup.setup:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+[tool.setuptools.packages.find]
+include = ["host*", "setup*", "skills_engine*"]
+exclude = ["groups*", "assets*", "launchd*", "container*", "dynamic_tools*", "tests*"]
 
 [build-system]
 requires = ["setuptools>=68"]

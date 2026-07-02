@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import subprocess
+import subprocess as _subprocess
 import sys
 import tempfile
 import time
@@ -1308,15 +1309,23 @@ async def run_container_agent(
         # Issue #563: --rm flag removed so we can `docker inspect` State.OOMKilled
         # post-mortem.  Must explicitly remove the container here on every exit
         # path so retries with the same container_name don't fail.  Best-effort,
-        # swallow errors (orphan_cleanup_loop is the safety net).
+        # but log failures so cleanup regressions are visible (the orphan cleanup
+        # loop remains a safety net).
         try:
-            _subprocess.run(
+            _rm_result = _subprocess.run(
                 ["docker", "rm", "-f", container_name],
                 capture_output=True, timeout=10,
                 creationflags=_NO_WINDOW,
             )
-        except Exception:
-            pass
+            if _rm_result.returncode != 0:
+                log.debug(
+                    "docker rm -f %s exited with %s: %s",
+                    container_name,
+                    _rm_result.returncode,
+                    (_rm_result.stderr or b"").decode(errors="replace")[-300:],
+                )
+        except Exception as _rm_exc:
+            log.debug("docker rm -f %s failed during cleanup: %s", container_name, _rm_exc)
         # Release the defense-in-depth semaphore acquired before execution
         # (STABILITY_ANALYSIS 2.4).  Placed last so active-container cleanup
         # runs first; wrapped in try/except so a NameError for container_name
