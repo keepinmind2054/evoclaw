@@ -228,7 +228,7 @@ def main():
     # Since NIM / OpenAI instruct models generally do not support vision inputs,
     # we force route the request to Gemini (if GOOGLE_API_KEY is present)
     # whenever we detect an image attachment pattern in prompt or history.
-    has_image = "[圖片附件:" in (prompt or "") or any("[圖片附件:" in str(msg.get("content", "")) for msg in (conversation_history or []))
+    has_image = "[圖片附件:" in (prompt or "")
     if has_image and google_api_key:
         _log("🧠 VISION-ROUTE", "Image detected — forcing Gemini backend for multi-modal support")
         use_openai_compat = False
@@ -686,8 +686,19 @@ def main():
     except Exception as e:
         _log("❌ ERROR", f"{type(e).__name__}: {e}")
         traceback.print_exc(file=sys.stderr)
-        # Emit a structured error so container_runner can surface it to the user via on_error
-        emit({"status": "error", "result": None, "error": f"{type(e).__name__}: {e}"})
+        # ── Handle Rate Limit / Quota Errors gracefully to inform the user ──
+        err_msg = str(e)
+        if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+            friendly_hint = (
+                "⚠️ 視覺辨識配額限制：\n"
+                "目前 Google Gemini 視覺辨識服務（免費版）的呼叫配額已耗盡，無法分析此圖片。\n"
+                "請稍等數分鐘後再試，或者在此期間您可以使用純文字與我繼續交流！"
+            )
+            preserved_session_id = session_id if session_id else str(uuid.uuid4())
+            emit({"status": "success", "result": friendly_hint, "newSessionId": preserved_session_id})
+        else:
+            # Emit a structured error so container_runner can surface it to the user via on_error
+            emit({"status": "error", "result": None, "error": f"{type(e).__name__}: {e}"})
 
 
 # ── Phase 1 fitness reporter helpers ─────────────────────────────────────────
